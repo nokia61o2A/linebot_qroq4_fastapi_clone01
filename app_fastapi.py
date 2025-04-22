@@ -124,7 +124,7 @@ async def handle_message(event):
     is_group_or_room = isinstance(event.source, (SourceGroup, SourceRoom))
 
     if not is_group_or_room:            #個人
-        show_loading_animation(user_id)
+        show_loading_animatio   n(user_id)
     # else:                               #群組 @名子識別
     #     if not msg.startswith('@'):
     #         return
@@ -163,10 +163,7 @@ async def handle_message(event):
         elif msg.startswith("cb:") or msg.startswith("$:"):
             coin_id = msg[3:].strip() if msg.startswith("cb:") else msg[2:].strip()
             reply_text = crypto_gpt(coin_id)
-        elif stock_code:
-            reply_text = stock_gpt(stock_code.group())
-        elif stock_symbol:
-            reply_text = stock_gpt(stock_symbol.group())
+        # 斷優先判斷熱字
         elif any(msg.lower().startswith(k.lower()) for k in ["金價", "黃金", "gold"]):
             reply_text = gold_gpt()
         elif any(msg.lower().startswith(k.lower()) for k in ["鉑", "platinum"]):
@@ -175,6 +172,11 @@ async def handle_message(event):
             reply_text = money_gpt("JPY")
         elif any(msg.lower().startswith(k.lower()) for k in ["美金", "usd"]):
             reply_text = money_gpt("USD")
+        # 其他的條件判斷大盤，美股 ... 等
+        elif stock_code:
+            reply_text = stock_gpt(stock_code.group())
+        elif stock_symbol:
+            reply_text = stock_gpt(stock_symbol.group())
         elif msg.startswith("104:"):
             reply_text = one04_gpt(msg[4:])
         elif msg.startswith("pt:"):
