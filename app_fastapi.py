@@ -124,7 +124,7 @@ async def handle_message(event):
     is_group_or_room = isinstance(event.source, (SourceGroup, SourceRoom))
 
     if not is_group_or_room:            #個人
-        show_loading_animatio   n(user_id)
+        show_loading_animation(user_id)
     # else:                               #群組 @名子識別
     #     if not msg.startswith('@'):
     #         return
