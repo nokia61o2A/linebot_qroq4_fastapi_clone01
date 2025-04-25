@@ -4,6 +4,7 @@ from groq import Groq
 from datetime import datetime
 import pandas as pd
 import requests
+import time
 from bs4 import BeautifulSoup
 
 # 設定 API 金鑰
@@ -26,8 +27,8 @@ def get_reply(messages):
                 temperature=1.2
             )
             reply = response.choices[0].message.content
-        except groq.GroqError as groq_err:
-            reply = f"OpenAI API 發生錯誤: {openai_err.error.message}，GROQ API 發生錯誤: {groq_err.message}"
+        except Exception as groq_err:
+            reply = f"OpenAI API 發生錯誤: {str(openai_err)}，GROQ API 發生錯誤: {str(groq_err)}"
     return reply
 
 # 擷取匯率資料
@@ -35,57 +36,81 @@ def fetch_jpy_rates(kind):
     # 目標網址
     url = f"https://rate.bot.com.tw/xrt/quote/day/{kind}"
 
-    # 發送HTTP請求
-    response = requests.get(url)
+    # 最大重試次數
+    max_retries = 3
+    retry_count = 0
+    retry_delay = 2  # 初始延遲秒數
 
-    # 確定HTTP請求成功
-    if response.status_code == 200:
-        # 解析HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
+    while retry_count < max_retries:
+        try:
+            # 發送HTTP請求
+            response = requests.get(url, timeout=10)  # 添加超時設定
 
-        # 在網頁中找到表格並提取即期匯率和本行賣出價格
-        table = soup.find('table', class_='table table-striped table-bordered table-condensed table-hover')
-        if not table:
-            print("找不到匯率資料的表格。")
-            return None
+            # 確定HTTP請求成功
+            if response.status_code == 200:
+                # 解析HTML
+                soup = BeautifulSoup(response.text, 'html.parser')
 
-        rows = table.find('tbody').find_all('tr')
+                # 在網頁中找到表格並提取即期匯率和本行賣出價格
+                table = soup.find('table', class_='table table-striped table-bordered table-condensed table-hover')
+                if not table:
+                    print("找不到匯率資料的表格。")
+                    return None
 
-        time_rates = []  # 日期時間
-        spot_rates = []  # 即期匯率
-        selling_rates = []  # 本行賣出價格
+                rows = table.find('tbody').find_all('tr')
 
-        for row in rows:
-            columns = row.find_all('td')
-            if len(columns) >= 5:
-                time_rate = columns[0].text.strip()
-                spot_rate = columns[2].text.strip()
-                selling_rate = columns[3].text.strip()
+                time_rates = []  # 日期時間
+                spot_rates = []  # 即期匯率
+                selling_rates = []  # 本行賣出價格
 
-                print(f"日期時間: {time_rate}, 即期匯率: {spot_rate}, 本行賣出價格: {selling_rate}")
+                for row in rows:
+                    columns = row.find_all('td')
+                    if len(columns) >= 5:
+                        time_rate = columns[0].text.strip()
+                        spot_rate = columns[2].text.strip()
+                        selling_rate = columns[3].text.strip()
 
-                time_rates.append(time_rate)
-                spot_rates.append(spot_rate)
-                selling_rates.append(selling_rate)
+                        print(f"日期時間: {time_rate}, 即期匯率: {spot_rate}, 本行賣出價格: {selling_rate}")
 
-        # 建立 DataFrame
-        df = pd.DataFrame({
-            '日期時間': time_rates,
-            '即期匯率': spot_rates,
-            '本行賣出價格': selling_rates
-        })
+                        time_rates.append(time_rate)
+                        spot_rates.append(spot_rate)
+                        selling_rates.append(selling_rate)
 
-        return df
-    else:
-        print(f"HTTP 請求失敗，狀態碼: {response.status_code}")
-        return None
+                # 建立 DataFrame
+                df = pd.DataFrame({
+                    '日期時間': time_rates,
+                    '即期匯率': spot_rates,
+                    '本行賣出價格': selling_rates
+                })
+
+                return df
+            else:
+                print(f"HTTP 請求失敗，狀態碼: {response.status_code}")
+                
+        except (requests.ConnectionError, requests.Timeout, requests.RequestException) as e:
+            print(f"網路連接錯誤 (嘗試 {retry_count+1}/{max_retries}): {str(e)}")
+            
+        # 如果到達這裡，表示請求失敗或發生錯誤，準備重試
+        retry_count += 1
+        if retry_count < max_retries:
+            print(f"等待 {retry_delay} 秒後重試...")
+            time.sleep(retry_delay)
+            retry_delay *= 2  # 指數退避策略
+    
+    # 所有重試都失敗，返回空的 DataFrame 或預設值
+    print("所有重試都失敗，返回預設值")
+    return pd.DataFrame({
+        '日期時間': ['N/A'],
+        '即期匯率': ['0.0'],
+        '本行賣出價格': ['0.0']
+    })
 
 # 生成分析報告內容
 def generate_content_msg(kind):
     # 獲取和處理資料
     money_prices_df = fetch_jpy_rates(kind)
-    if money_prices_df is None or money_prices_df.empty:
-        return "無法獲取匯率資料。"
+    if money_prices_df is None or money_prices_df.empty or money_prices_df['日期時間'].iloc[0] == 'N/A':
+        return "無法獲取匯率資料，但服務仍在運行中。請稍後再試。"
 
     # 從資料中獲取需要的最高價和最低價資訊
     money_prices_df['本行賣出價格'] = pd.to_numeric(money_prices_df['本行賣出價格'], errors='coerce')
