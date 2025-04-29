@@ -24,10 +24,13 @@ def get_cwb_session() -> requests.Session:
     session = requests.Session()
     retries = Retry(
         total=5,
-        backoff_factor=1,
+        backoff_factor=2,  # 增加退避時間
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
-        raise_on_status=False
+        raise_on_status=False,
+        connect=5,  # 連接重試次數
+        read=5,    # 讀取重試次數
+        redirect=5  # 重定向重試次數
     )
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("https://", adapter)
@@ -49,7 +52,7 @@ def fetch_and_process_weather(location: str = "臺北市") -> pd.DataFrame:
     print(f"正在連線至中央氣象局 API：{api_url}")
     
     try:
-        resp = session.get(api_url, timeout=5)
+        resp = session.get(api_url, timeout=(10, 30))  # (連接超時, 讀取超時)
         resp.raise_for_status()
     except requests.RequestException as e:
         # 捕捉所有與請求相關的錯誤
