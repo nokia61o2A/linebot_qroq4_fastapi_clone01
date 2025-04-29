@@ -6,15 +6,15 @@ from urllib3.util.retry import Retry
 import openai
 from groq import Groq
 
-# 設定 API 金鑰
+# 從 .env 讀取 API 金鑰，請確保 .env 已設定以下變數：
+# OPENAI_API_KEY, GROQ_API_KEY, CWB_AUTHORIZATION
 openai.api_key = os.getenv("OPENAI_API_KEY")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# 中央氣象局授權金鑰，請在環境變數設定 CWB_AUTHORIZATION
-CWB_AUTHORIZATION = os.getenv(
-    "CWB_AUTHORIZATION", 
-    "CWA-272CECC4-4454-459C-A846-12E5EB4ABF74"
-)
+# 中央氣象局授權金鑰
+CWB_AUTHORIZATION = os.getenv("CWB_AUTHORIZATION")
+if not CWB_AUTHORIZATION:
+    raise RuntimeError("請在 .env 設定 CWB_AUTHORIZATION，才能呼叫中央氣象局 API")
 
 
 def get_cwb_session() -> requests.Session:
@@ -22,15 +22,18 @@ def get_cwb_session() -> requests.Session:
     建立具有重試機制的 Session，以提高對 CWB API 的連線穩定度
     """
     session = requests.Session()
+    # 忽略系統環境中的 proxy 設定，避免被防火牆或 Proxy 干擾
+    session.trust_env = False
+
     retries = Retry(
         total=5,
-        backoff_factor=2,  # 增加退避時間
+        backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
         raise_on_status=False,
-        connect=5,  # 連接重試次數
-        read=5,    # 讀取重試次數
-        redirect=5  # 重定向重試次數
+        connect=5,
+        read=5,
+        redirect=5
     )
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("https://", adapter)
@@ -40,8 +43,7 @@ def get_cwb_session() -> requests.Session:
 
 def fetch_and_process_weather(location: str = "臺北市") -> pd.DataFrame:
     """
-    從中央氣象局開放資料取得未來 36 小時的天氣預報，並處理為 DataFrame。
-    使用重試機制以避免暫時性解析或連線錯誤。
+    從中央氣象局開放資料取得未來 36 小時天氣預報，並處理為 DataFrame
     """
     session = get_cwb_session()
     api_url = (
@@ -49,28 +51,23 @@ def fetch_and_process_weather(location: str = "臺北市") -> pd.DataFrame:
         f"?Authorization={CWB_AUTHORIZATION}&format=JSON&locationName={location}"
     )
 
-    print(f"正在連線至中央氣象局 API：{api_url}")
-    
     try:
-        resp = session.get(api_url, timeout=(10, 30))  # (連接超時, 讀取超時)
+        resp = session.get(api_url, timeout=(10, 30))
         resp.raise_for_status()
     except requests.RequestException as e:
-        # 捕捉所有與請求相關的錯誤
         raise RuntimeError(f"無法連線至中央氣象局 API：{e}")
 
     data = resp.json()
     locations = data.get("records", {}).get("location", [])
     if not locations:
-        raise RuntimeError(f"中央氣象局回傳資料格式異常，無法找到 location 資訊。")
+        raise RuntimeError("中央氣象局回傳資料格式異常，無法找到 location 資訊。")
 
-    # 找出對應地區
     target = next((loc for loc in locations if loc.get("locationName") == location), None)
     if not target:
         raise RuntimeError(f"中央氣象局資料中不包含地區：{location}")
 
-    weather_elements = target.get("weatherElement", [])
     records = []
-    for element in weather_elements:
+    for element in target.get("weatherElement", []):
         name = element.get("elementName")
         for period in element.get("time", []):
             start = pd.to_datetime(period.get("startTime"))
@@ -86,13 +83,14 @@ def fetch_and_process_weather(location: str = "臺北市") -> pd.DataFrame:
     df = pd.DataFrame(records)
     if df.empty:
         raise RuntimeError("取得的天氣資料為空，請確認參數是否正確。")
+
     df.sort_values(by="起始時間", inplace=True)
     return df
 
 
 def generate_content_msg(location: str = "臺北市") -> str:
     """
-    組成傳給 LLM 的使用者訊息，包含完整 DataFrame 與最新時段資訊。
+    組成傳給 LLM 的使用者訊息，包含完整 DataFrame 與最新時段資訊
     """
     df = fetch_and_process_weather(location)
     latest = df.iloc[-1]
@@ -110,12 +108,11 @@ def generate_content_msg(location: str = "臺北市") -> str:
 
 def weather_gpt(location: str = "臺北市") -> str:
     """
-    主函式：呼叫 LLM 生成天氣分析報告，並處理例外情況。
+    主函式：呼叫 LLM 生成天氣分析報告，並處理例外情況
     """
     try:
         content_msg = generate_content_msg(location)
     except RuntimeError as e:
-        # 回傳錯誤訊息給呼叫者
         return str(e)
 
     messages = [
