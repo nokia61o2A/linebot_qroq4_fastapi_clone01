@@ -19,6 +19,7 @@ from my_commands.one04_gpt import one04_gpt
 from my_commands.partjob_gpt import partjob_gpt
 from my_commands.crypto_coin_gpt import crypto_gpt
 from my_commands.stock.stock_gpt import stock_gpt
+from my_commands.weather_gpt import weather_gpt
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -163,6 +164,9 @@ async def handle_message(event):
         elif msg.startswith("cb:") or msg.startswith("$:"):
             coin_id = msg[3:].strip() if msg.startswith("cb:") else msg[2:].strip()
             reply_text = crypto_gpt(coin_id)
+        elif any(k in msg for k in ["天氣", "氣象"]):
+        # 可以傳入其他城市名稱參數，如：weather_gpt("高雄市")
+            reply_text = weather_gpt("桃園市")
         # 斷優先判斷熱字
         elif any(msg.lower().startswith(k.lower()) for k in ["金價", "黃金", "gold"]):
             reply_text = gold_gpt()
@@ -203,8 +207,8 @@ async def handle_message(event):
     quick_reply_items.append(QuickReplyButton(action=MessageAction(label="大樂透", text="大樂透")))
     quick_reply_items.append(QuickReplyButton(action=MessageAction(label="威力彩", text="威力彩")))
     quick_reply_items.append(QuickReplyButton(action=MessageAction(label="金價", text="金價")))
-    quick_reply_items.append(QuickReplyButton(action=MessageAction(label="日元", text="JPY")))
-    quick_reply_items.append(QuickReplyButton(action=MessageAction(label="美元", text="USD")))
+    # quick_reply_items.append(QuickReplyButton(action=MessageAction(label="日元", text="JPY")))
+    # quick_reply_items.append(QuickReplyButton(action=MessageAction(label="美元", text="USD")))
 
     if quick_reply_items:
         reply_message = TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_reply_items))
