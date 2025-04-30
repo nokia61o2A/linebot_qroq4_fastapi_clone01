@@ -16,10 +16,13 @@ CWB_AUTHORIZATION = os.getenv("CWB_AUTHORIZATION")
 if not CWB_AUTHORIZATION:
     raise RuntimeError("請在 .env 設定 CWB_AUTHORIZATION，才能呼叫中央氣象局 API")
 
+# API 主機改為氣象資料開放平臺域名
+BASE_URL = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
 
-def get_cwb_session() -> requests.Session:
+
+def get_cwa_session() -> requests.Session:
     """
-    建立具有重試機制的 Session，以提高對 CWB API 的連線穩定度
+    建立具有重試機制的 Session，以提高對 CWA API 的連線穩定度
     """
     session = requests.Session()
     # 忽略系統環境中的 proxy 設定，避免被防火牆或 Proxy 干擾
@@ -45,19 +48,21 @@ def fetch_and_process_weather(location: str = "臺北市") -> pd.DataFrame:
     """
     從中央氣象局開放資料取得未來 36 小時天氣預報，並處理為 DataFrame
     """
-    session = get_cwb_session()
-    api_url = (
-        "https://opendata.cwb.gov.tw/api/v1/rest/datastore/F-C0032-001"
-        f"?Authorization={CWB_AUTHORIZATION}&format=JSON&locationName={location}"
-    )
+    session = get_cwa_session()
+    params = {
+        "Authorization": CWB_AUTHORIZATION,
+        "format": "JSON",
+        "locationName": location
+    }
 
     try:
-        resp = session.get(api_url, timeout=(10, 30))
+        resp = session.get(BASE_URL, params=params, timeout=(10, 30))
         resp.raise_for_status()
     except requests.RequestException as e:
         raise RuntimeError(f"無法連線至中央氣象局 API：{e}")
 
     data = resp.json()
+    # 使用正確的 records 結構
     locations = data.get("records", {}).get("location", [])
     if not locations:
         raise RuntimeError("中央氣象局回傳資料格式異常，無法找到 location 資訊。")
@@ -72,12 +77,17 @@ def fetch_and_process_weather(location: str = "臺北市") -> pd.DataFrame:
         for period in element.get("time", []):
             start = pd.to_datetime(period.get("startTime"))
             end = pd.to_datetime(period.get("endTime"))
-            value = period.get("parameter", {}).get("parameterName", "")
+            # 參數可能在 parameterName, parameterUnit
+            param = period.get("parameter", {})
+            value = param.get("parameterName", "")
+            unit = param.get("parameterUnit", "")
+            # 合併值與單位
+            full = f"{value}{(' ' + unit) if unit else ''}"
             records.append({
                 "起始時間": start,
                 "結束時間": end,
                 "天氣參數": name,
-                "參數值": value
+                "參數值": full
             })
 
     df = pd.DataFrame(records)
