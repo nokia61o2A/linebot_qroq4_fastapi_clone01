@@ -137,6 +137,9 @@ async def handle_message(event):
     if len(conversation_history[user_id]) > MAX_HISTORY_LEN * 2:
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY_LEN * 2:]
 
+    # 生成回覆訊息
+    reply_message = create_reply_message(reply_text)
+
     try:
         # 依優先順序判斷指令
         if any(k in msg for k in ["威力彩", "大樂透", "539", "雙贏彩"]):
@@ -167,7 +170,6 @@ async def handle_message(event):
             elif stockUS_code:
                 reply_text = stock_gpt(stockUS_code.group())
             else:
-                # reply_text = await get_async_reply(conversation_history[user_id][-MAX_HISTORY_LEN:])
                 reply_text = stock_gpt(msg)
                 
     except Exception as e:
@@ -176,25 +178,33 @@ async def handle_message(event):
     if not reply_text:
         reply_text = "抱歉，目前無法提供回應，請稍後再試。"
 
-    # 快速回覆按鈕
-    english_ratio = calculate_english_ratio(reply_text)
-    quick_items = []
-    if english_ratio > 0.1:
-        quick_items.append(QuickReplyButton(action=MessageAction(label="翻譯成中文", text="請將上述內容翻譯成中文")))
-    for label, text in [("台股大盤","大盤"), ("美股大盤","美股"), ("大樂透","大樂透"), ("威力彩","威力彩"), ("金價","金價")]:
-        quick_items.append(QuickReplyButton(action=MessageAction(label=label, text=text)))
 
-    if quick_items:
-        message = TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_items))
-    else:
-        message = TextSendMessage(text=reply_text)
 
-    try:
-        line_bot_api.reply_message(event.reply_token, message)
-    except LineBotApiError as e:
-        print(f"❌ 回覆訊息失敗：{e}")
-
-    conversation_history[user_id].append({"role": "assistant", "content": reply_text})
+def create_reply_message(reply_text: str) -> TextSendMessage:
+    quick_reply_items = []
+    
+    # 檢查英文比例並添加翻譯按鈕
+    if calculate_english_ratio(reply_text) > 0.1:
+        quick_reply_items.append(
+            QuickReplyButton(action=MessageAction(label="翻譯成中文", text="請將上述內容翻譯成中文"))
+        )
+    
+    # 添加常用功能按鈕
+    common_buttons = [
+        ("台股大盤", "大盤"),
+        ("美股大盤", "美股"),
+        ("大樂透", "大樂透"),
+        ("威力彩", "威力彩"),
+        ("金價", "金價")
+        # ,
+        # ("日元", "JPY"),
+        # ("美元", "USD")
+    ]
+    
+    for label, text in common_buttons:
+        quick_reply_items.append(QuickReplyButton(action=MessageAction(label=label, text=text)))
+    
+    return TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_reply_items))
 
 @handler.add(PostbackEvent)
 async def handle_postback(event):
