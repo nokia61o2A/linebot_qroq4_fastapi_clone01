@@ -38,16 +38,17 @@ CHANNEL_SECRET     = os.getenv("CHANNEL_SECRET")
 OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 
-# Line Bot & LLM 客戶端
+# Line Bot & LLM 客戶端初始化
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler      = WebhookHandler(CHANNEL_SECRET)
 client       = OpenAI(api_key=OPENAI_API_KEY, base_url="https://free.v36.cm/v1")
 groq_client  = Groq(api_key=GROQ_API_KEY)
 
+# 保持對話歷史
 conversation_history = {}
 MAX_HISTORY_LEN     = 10
 
-# 應用生命週期
+# FastAPI 生命週期
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -60,6 +61,7 @@ app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # 工具函式
+
 def update_line_webhook():
     headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
     json_data = {"endpoint": f"{BASE_URL}/callback"}
@@ -88,7 +90,7 @@ def calculate_english_ratio(text: str) -> float:
     english = [c for c in letters if ord(c) < 128]
     return len(english) / len(letters)
 
-# 路由與事件
+# 路由與事件處理
 router = APIRouter()
 
 @router.post("/callback")
@@ -136,6 +138,7 @@ async def handle_message(event):
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY_LEN * 2:]
 
     try:
+        # 依優先順序判斷指令
         if any(k in msg for k in ["威力彩", "大樂透", "539", "雙贏彩"]):
             reply_text = lottery_gpt(msg)
         elif msg.lower().startswith("大盤") or msg.lower().startswith("台股"):
@@ -156,13 +159,22 @@ async def handle_message(event):
         elif any(k in msg for k in ["天氣", "氣象"]):
             reply_text = weather_gpt("桃園市")
         else:
-            reply_text = await get_async_reply(conversation_history[user_id][-MAX_HISTORY_LEN:])
+            # 台股代碼或美股代號
+            stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", msg)
+            stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)
+            if stock_code:
+                reply_text = stock_gpt(stock_code.group())
+            elif stockUS_code:
+                reply_text = stock_gpt(stockUS_code.group())
+            else:
+                reply_text = await get_async_reply(conversation_history[user_id][-MAX_HISTORY_LEN:])
     except Exception as e:
         reply_text = f"API 發生錯誤：{e}"
 
     if not reply_text:
         reply_text = "抱歉，目前無法提供回應，請稍後再試。"
 
+    # 快速回覆按鈕
     english_ratio = calculate_english_ratio(reply_text)
     quick_items = []
     if english_ratio > 0.1:
@@ -198,3 +210,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 5000))
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port)
+
