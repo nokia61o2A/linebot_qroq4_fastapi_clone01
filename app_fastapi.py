@@ -167,7 +167,9 @@ async def handle_message(event):
             elif stockUS_code:
                 reply_text = stock_gpt(stockUS_code.group())
             else:
-                reply_text = await get_async_reply(conversation_history[user_id][-MAX_HISTORY_LEN:])
+                # reply_text = await get_async_reply(conversation_history[user_id][-MAX_HISTORY_LEN:])
+                reply_text = stock_gpt(msg)
+                
     except Exception as e:
         reply_text = f"API 發生錯誤：{e}"
 
