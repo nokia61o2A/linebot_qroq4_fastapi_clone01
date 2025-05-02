@@ -157,6 +157,9 @@ async def handle_message(event):
         # 指令判斷與回覆內容產生
         if any(k in msg for k in ["威力彩", "大樂透", "539", "雙贏彩"]):
             reply_text = lottery_gpt(msg)
+        elif msg.startswith("104:"):  # 添加 104 工作查詢處理
+            job_keyword = msg[4:].strip()  # 去除 "104:" 前綴和空白
+            reply_text = one04_gpt(job_keyword)
         elif msg.lower().startswith("大盤") or msg.lower().startswith("台股"):
             reply_text = stock_gpt("大盤")
         elif msg.lower().startswith("美盤") or msg.lower().startswith("美股"):
