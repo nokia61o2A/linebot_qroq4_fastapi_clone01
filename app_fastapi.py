@@ -67,7 +67,26 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ 更新 Webhook 失敗: {e}", exc_info=True)
     yield
 
-app = FastAPI(lifespan=lifespan)
+# 在 FastAPI 應用程序配置中添加
+app = FastAPI(
+    lifespan=lifespan,
+    title="Line Bot API",
+    description="Line Bot with FastAPI",
+    version="1.0.0"
+)
+
+# 添加錯誤處理中間件
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        logger.error(f"請求處理失敗: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"}
+        )
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 router = APIRouter()
