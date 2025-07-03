@@ -1,5 +1,5 @@
 """
-AI 醬
+AI 醬 
 """
 import os
 import re
@@ -241,6 +241,7 @@ def create_reply_message(reply_text: str) -> TextSendMessage:
 
     # 常用快捷按鈕
     common_buttons = [
+        ("翻譯成英文", "請將上述內容翻譯成英文"),
         ("台股大盤", "大盤"),
         ("美股大盤", "美股"),
         ("大樂透", "大樂透"),
