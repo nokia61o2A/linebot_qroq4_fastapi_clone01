@@ -247,7 +247,7 @@ def create_reply_message(reply_text: str) -> TextSendMessage:
         ("大樂透", "大樂透"),
         ("威力彩", "威力彩"),
         ("金價", "金價"),
-        ("AI醬 ", "Ai醬")
+        ("AI醬 ", "@Ai醬")
     ]
     for label, text in common_buttons:
         quick_reply_items.append(
