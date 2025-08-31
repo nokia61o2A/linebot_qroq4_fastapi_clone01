@@ -1,5 +1,5 @@
 """
-AI 醬 
+AI 醬  git@github.com-nokia61o2A:nokia61o2A/linebot_qroq4_fastapi.git
 """
 import os
 import re
@@ -246,7 +246,8 @@ def create_reply_message(reply_text: str) -> TextSendMessage:
         ("美股大盤", "美股"),
         ("大樂透", "大樂透"),
         ("威力彩", "威力彩"),
-        ("金價", "金價")
+        ("金價", "金價"),
+        ("AI醬 ", "Ai醬")
     ]
     for label, text in common_buttons:
         quick_reply_items.append(
