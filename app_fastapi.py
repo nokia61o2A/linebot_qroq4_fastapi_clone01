@@ -267,12 +267,18 @@ async def handle_message(event):
     bot_info = line_bot_api.get_bot_info()
     bot_name = bot_info.display_name
     
-    # -- 新增：自動回覆開關指令處理
-    if msg.strip().lower() == '開啟自動回答':
+    # -- 修正：處理 @ 開頭的訊息，移除 @ 標記和機器人名稱
+    processed_msg = msg
+    if msg.startswith('@'):
+        # 移除 @ 符號和後面的任何名稱（包括 bot_name 或其他名稱如 @all）
+        processed_msg = re.sub(r'^@\w+\s*', '', msg).strip()
+    
+    # -- 修正：自動回覆開關指令處理，不區分大小寫
+    if processed_msg.lower() == '開啟自動回答':
         auto_reply_status[chat_id] = True
         await reply_simple(reply_token, "✅ 已開啟自動回答")
         return
-    elif msg.strip().lower() == '關閉自動回答':
+    elif processed_msg.lower() == '關閉自動回答':
         auto_reply_status[chat_id] = False
         await reply_simple(reply_token, "✅ 已關閉自動回答")
         return
@@ -281,17 +287,22 @@ async def handle_message(event):
         # 非自動回答模式下，檢查訊息是否包含機器人名稱
         if not any(name in msg.lower() for name in bot_name.lower().split()):
             return
-        msg_parts = msg.split(None, 1)
+        # 移除 @ 標記和機器人名稱
+        msg_parts = re.split(r'@\w+\s*', msg, 1)
         if len(msg_parts) > 1:
-            msg = msg_parts[1]
+            processed_msg = msg_parts[1].strip()
         else:
             auto_reply_status[chat_id] = True
             await reply_simple(reply_token, "✅ 已開啟自動回答")
             return
+    else:
+        # 在自動回答模式下，也處理 @ 開頭的訊息
+        if msg.startswith('@'):
+            processed_msg = re.sub(r'^@\w+\s*', '', msg).strip()
 
     # 更新對話歷史
     conversation_history.setdefault(user_id, [])
-    conversation_history[user_id].append({"role": "user", "content": msg + "，請以繁體中文回答"})
+    conversation_history[user_id].append({"role": "user", "content": processed_msg + "，請以繁體中文回答"})
     if len(conversation_history[user_id]) > MAX_HISTORY_LEN * 2:
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY_LEN * 2:]
 
@@ -300,42 +311,42 @@ async def handle_message(event):
     # ============================================
     reply_text = None
     try:
-        # 指令判斷與回覆內容產生
-        if any(k in msg for k in ["威力彩", "大樂透", "539", "雙贏彩"]):
-            reply_text = lottery_gpt(msg)
-        elif msg.startswith("104:"):  # 添加 104 工作查詢處理
-            job_keyword = msg[4:].strip()  # 去除 "104:" 前綴和空白
+        # 指令判斷與回覆內容產生（使用處理後的訊息）
+        if any(k in processed_msg for k in ["威力彩", "大樂透", "539", "雙贏彩"]):
+            reply_text = lottery_gpt(processed_msg)
+        elif processed_msg.startswith("104:"):  # 添加 104 工作查詢處理
+            job_keyword = processed_msg[4:].strip()  # 去除 "104:" 前綴和空白
             reply_text = one04_gpt(job_keyword)
-        elif msg.lower().startswith("大盤") or msg.lower().startswith("台股"):
+        elif processed_msg.lower().startswith("大盤") or processed_msg.lower().startswith("台股"):
             reply_text = stock_gpt("大盤")
-        elif msg.lower().startswith("美盤") or msg.lower().startswith("美股"):
+        elif processed_msg.lower().startswith("美盤") or processed_msg.lower().startswith("美股"):
             reply_text = stock_gpt("美盤")
-        elif msg.startswith("pt:"):  # -- 新增：打工查詢處理
-            reply_text = partjob_gpt(msg[3:])
-        elif msg.startswith("cb:") or msg.startswith("$:"):
-            coin_id = msg[3:].strip() if msg.startswith("cb:") else msg[2:].strip()
+        elif processed_msg.startswith("pt:"):  # -- 新增：打工查詢處理
+            reply_text = partjob_gpt(processed_msg[3:])
+        elif processed_msg.startswith("cb:") or processed_msg.startswith("$:"):
+            coin_id = processed_msg[3:].strip() if processed_msg.startswith("cb:") else processed_msg[2:].strip()
             reply_text = crypto_gpt(coin_id)
-        elif any(msg.lower().startswith(k) for k in ["金價", "黃金", "gold"]):
+        elif any(processed_msg.lower().startswith(k) for k in ["金價", "黃金", "gold"]):
             reply_text = gold_gpt()
-        elif any(msg.lower().startswith(k) for k in ["鉑", "platinum"]):
+        elif any(processed_msg.lower().startswith(k) for k in ["鉑", "platinum"]):
             reply_text = platinum_gpt()
-        elif any(msg.lower().startswith(k) for k in ["日幣", "jpy"]):
+        elif any(processed_msg.lower().startswith(k) for k in ["日幣", "jpy"]):
             reply_text = money_gpt("JPY")
-        elif any(msg.lower().startswith(k) for k in ["美金", "usd"]):
+        elif any(processed_msg.lower().startswith(k) for k in ["美金", "usd"]):
             reply_text = money_gpt("USD")
-        elif any(k in msg for k in ["天氣", "氣象"]):
+        elif any(k in processed_msg for k in ["天氣", "氣象"]):
             reply_text = weather_gpt("桃園市")  # 預設查詢桃園市天氣
         else:
             # 嘗試解析台股 / 美股代碼
-            stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", msg)
-            stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)
+            stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", processed_msg)
+            stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", processed_msg)
             if stock_code:
                 reply_text = stock_gpt(stock_code.group())
             elif stockUS_code:
                 reply_text = stock_gpt(stockUS_code.group())
             else:
                 # -- 新增：情感分析 → 帶情緒產生回覆（避免每次都中性）
-                sentiment = await analyze_sentiment(msg)
+                sentiment = await analyze_sentiment(processed_msg)
                 reply_text = await get_reply_with_sentiment(
                     conversation_history[user_id][-MAX_HISTORY_LEN:], sentiment=sentiment
                 )
