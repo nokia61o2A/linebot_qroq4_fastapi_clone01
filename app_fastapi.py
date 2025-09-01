@@ -51,17 +51,24 @@ GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
 # Line Bot & LLM 客戶端初始化
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler      = WebhookHandler(CHANNEL_SECRET)
-client       = OpenAI(api_key=OPENAI_API_KEY, base_url="https://free.v36.cm/v1")
-groq_client  = Groq(api_key=GROQ_API_KEY)
 
-# -- 新增：Groq 現行模型改為環境變數可控；提供主/備兩組（官方建議型號）
-GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")  # -- 修改：取代舊的 llama3-70b-8192
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")    # -- 新增：8B 輕量備援
+# 初始化 OpenAI 客戶端（--- 使用新的 API 格式 ---）
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    base_url="https://free.v36.cm/v1"
+)
+
+# 初始化 Groq 客戶端
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+# 使用最新的 Groq 模型
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
 # 保持對話歷史
 conversation_history = {}
 MAX_HISTORY_LEN     = 10
-auto_reply_status = {}  # -- 新增：自動回覆狀態管理
+auto_reply_status = {}
 
 # FastAPI 生命週期，用於啟動時更新 Webhook
 @asynccontextmanager
@@ -72,7 +79,6 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ 更新 Webhook 失敗: {e}", exc_info=True)
     yield
 
-# 在 FastAPI 應用程序配置中添加
 app = FastAPI(
     lifespan=lifespan,
     title="Line Bot API",
@@ -92,8 +98,8 @@ async def add_process_time_header(request: Request, call_next):
             status_code=500,
             content={"detail": "Internal server error"}
         )
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
 router = APIRouter()
 
 def update_line_webhook():
@@ -163,8 +169,8 @@ async def analyze_sentiment(text: str) -> str:
     回傳: positive / neutral / negative / angry
     """
     try:
-        # 首先嘗試 OpenAI
-        completion = await client.chat.completions.create(
+        # 使用新的 OpenAI API 格式
+        completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "你是一個情感分析助手，輸出文字情緒標籤"},
@@ -202,8 +208,8 @@ async def get_reply_with_sentiment(messages, sentiment: str = "neutral"):
     full_messages = [{"role": "system", "content": system_prompt}] + messages
 
     try:
-        # 首先嘗試 OpenAI
-        completion = await client.chat.completions.create(
+        # 使用新的 OpenAI API 格式
+        completion = client.chat.completions.create(
             model="gpt-4o-mini", 
             messages=full_messages, 
             max_tokens=800, 
@@ -232,48 +238,48 @@ app.include_router(router)
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message_wrapper(event):
-    # 非同步背景處理訊息
     asyncio.create_task(handle_message(event))
 
 async def get_async_reply(messages):
     """一般回覆函數（不帶情緒分析）"""
     try:
-        resp = await client.chat.completions.create(
-            model="gpt-4o-mini", messages=messages, max_tokens=800
+        # 使用新的 OpenAI API 格式
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini", 
+            messages=messages, 
+            max_tokens=800
         )
         return resp.choices[0].message.content
-    except Exception:
+    except Exception as e:
+        logger.error(f"OpenAI 一般回覆失敗: {e}")
+        # 使用 Groq 替代方案
         return groq_chat_completion(messages, max_tokens=800, temperature=0.7)
 
 async def handle_message(event):
-    user_id    = event.source.user_id
-    msg        = event.message.text.strip()
-    reply_token = event.reply_token  # -- 新增：取得回覆令牌
-    is_group   = isinstance(event.source, (SourceGroup, SourceRoom))
+    user_id = event.source.user_id
+    msg = event.message.text.strip()
+    reply_token = event.reply_token
+    is_group = isinstance(event.source, (SourceGroup, SourceRoom))
     
-    # -- 新增：自動回覆狀態管理
     chat_id = event.source.group_id if isinstance(event.source, SourceGroup) else (
         event.source.room_id if isinstance(event.source, SourceRoom) else user_id
     )
     
     if chat_id not in auto_reply_status:
-        # 單人聊天預設開啟，群組聊天預設關閉
         auto_reply_status[chat_id] = not is_group
 
-    # 顯示載入動畫（僅對單聊有效）
     if not is_group:
         show_loading_animation(user_id)
 
     bot_info = line_bot_api.get_bot_info()
     bot_name = bot_info.display_name
     
-    # -- 修正：處理 @ 開頭的訊息，移除 @ 標記和機器人名稱
+    # 處理 @ 開頭的訊息
     processed_msg = msg
     if msg.startswith('@'):
-        # 移除 @ 符號和後面的任何名稱（包括 bot_name 或其他名稱如 @all）
         processed_msg = re.sub(r'^@\w+\s*', '', msg).strip()
     
-    # -- 修正：自動回覆開關指令處理，不區分大小寫
+    # 自動回覆開關指令處理
     if processed_msg.lower() == '開啟自動回答':
         auto_reply_status[chat_id] = True
         await reply_simple(reply_token, "✅ 已開啟自動回答")
@@ -284,10 +290,8 @@ async def handle_message(event):
         return
         
     if not auto_reply_status[chat_id]:
-        # 非自動回答模式下，檢查訊息是否包含機器人名稱
         if not any(name in msg.lower() for name in bot_name.lower().split()):
             return
-        # 移除 @ 標記和機器人名稱
         msg_parts = re.split(r'@\w+\s*', msg, 1)
         if len(msg_parts) > 1:
             processed_msg = msg_parts[1].strip()
@@ -296,7 +300,6 @@ async def handle_message(event):
             await reply_simple(reply_token, "✅ 已開啟自動回答")
             return
     else:
-        # 在自動回答模式下，也處理 @ 開頭的訊息
         if msg.startswith('@'):
             processed_msg = re.sub(r'^@\w+\s*', '', msg).strip()
 
@@ -306,22 +309,18 @@ async def handle_message(event):
     if len(conversation_history[user_id]) > MAX_HISTORY_LEN * 2:
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY_LEN * 2:]
 
-    # ============================================
-    # 2. 確保任何情況下都先定義 reply_text
-    # ============================================
     reply_text = None
     try:
-        # 指令判斷與回覆內容產生（使用處理後的訊息）
         if any(k in processed_msg for k in ["威力彩", "大樂透", "539", "雙贏彩"]):
             reply_text = lottery_gpt(processed_msg)
-        elif processed_msg.startswith("104:"):  # 添加 104 工作查詢處理
-            job_keyword = processed_msg[4:].strip()  # 去除 "104:" 前綴和空白
+        elif processed_msg.startswith("104:"):
+            job_keyword = processed_msg[4:].strip()
             reply_text = one04_gpt(job_keyword)
         elif processed_msg.lower().startswith("大盤") or processed_msg.lower().startswith("台股"):
             reply_text = stock_gpt("大盤")
         elif processed_msg.lower().startswith("美盤") or processed_msg.lower().startswith("美股"):
             reply_text = stock_gpt("美盤")
-        elif processed_msg.startswith("pt:"):  # -- 新增：打工查詢處理
+        elif processed_msg.startswith("pt:"):
             reply_text = partjob_gpt(processed_msg[3:])
         elif processed_msg.startswith("cb:") or processed_msg.startswith("$:"):
             coin_id = processed_msg[3:].strip() if processed_msg.startswith("cb:") else processed_msg[2:].strip()
@@ -335,35 +334,29 @@ async def handle_message(event):
         elif any(processed_msg.lower().startswith(k) for k in ["美金", "usd"]):
             reply_text = money_gpt("USD")
         elif any(k in processed_msg for k in ["天氣", "氣象"]):
-            reply_text = weather_gpt("桃園市")  # 預設查詢桃園市天氣
+            reply_text = weather_gpt("桃園市")
         else:
-            # 嘗試解析台股 / 美股代碼
-            stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", processed_msg)
+            stock_code = re.fullmatch(r"\d{4,6}[A-Za-z]?", processed_msg)
             stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", processed_msg)
             if stock_code:
                 reply_text = stock_gpt(stock_code.group())
             elif stockUS_code:
                 reply_text = stock_gpt(stockUS_code.group())
             else:
-                # -- 新增：情感分析 → 帶情緒產生回覆（避免每次都中性）
                 sentiment = await analyze_sentiment(processed_msg)
                 reply_text = await get_reply_with_sentiment(
                     conversation_history[user_id][-MAX_HISTORY_LEN:], sentiment=sentiment
                 )
 
     except Exception as e:
-        # 3. 捕捉並記錄所有例外，提供友善提示
         logger.error(f"處理訊息時發生錯誤：{e}", exc_info=True)
         reply_text = "抱歉，伺服器發生錯誤，請稍後再試。"
 
-    # 4. 若仍未取得 reply_text，設為預設訊息
     if not reply_text:
         reply_text = "抱歉，目前無法提供回應，請稍後再試。"
 
-    # 5. 在確定 reply_text 有值後，再呼叫 create_reply_message 產生回覆物件
     reply_message = create_reply_message(reply_text, is_group, bot_name)
 
-    # 6. 呼叫 LINE API 送出回覆
     try:
         line_bot_api.reply_message(reply_token, reply_message)
         conversation_history[user_id].append({"role": "assistant", "content": reply_text})
@@ -373,7 +366,6 @@ async def handle_message(event):
 def create_reply_message(reply_text: str, is_group: bool, bot_name: str) -> TextSendMessage:
     quick_reply_items = []
 
-    # 英文比例檢查，超過 10% 則加翻譯按鈕
     if calculate_english_ratio(reply_text) > 0.1:
         quick_reply_items.append(
             QuickReplyButton(
@@ -381,7 +373,6 @@ def create_reply_message(reply_text: str, is_group: bool, bot_name: str) -> Text
             )
         )
 
-    # 常用快捷按鈕
     prefix = f"@{bot_name} " if is_group else ""
     common_buttons = [
         ("開啟自動回答", "開啟自動回答"),
@@ -403,7 +394,6 @@ def create_reply_message(reply_text: str, is_group: bool, bot_name: str) -> Text
 
     return TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_reply_items))
 
-# -- 新增：簡單回覆函數
 async def reply_simple(reply_token, text):
     try:
         line_bot_api.reply_message(reply_token, TextSendMessage(text=text))
@@ -412,7 +402,6 @@ async def reply_simple(reply_token, text):
 
 @handler.add(PostbackEvent)
 async def handle_postback(event):
-    # 簡單列印 Postback 資料
     logger.info(f"Postback data: {event.postback.data}")
 
 @app.get("/healthz")
@@ -426,5 +415,4 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 5000))
-    # 啟動時可透過 --log-level 調整日誌等級
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info")
