@@ -1,34 +1,50 @@
 import os
-import openai
-from groq import Groq
-from datetime import datetime
 import pandas as pd
 import requests
 import time
 from bs4 import BeautifulSoup
+from openai import OpenAI
+from groq import Groq
 
-# 設定 API 金鑰
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# 初始化 API 客戶端
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# 使用最新的 Groq 模型
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
 # 建立 GPT 模型
 def get_reply(messages):
     try:
-        response = openai.ChatCompletion.create(
+        # 使用新的 OpenAI API 格式
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo-1106",
-            messages=messages)
-        reply = response["choices"][0]["message"]["content"]
-    except openai.OpenAIError as openai_err:
+            messages=messages
+        )
+        reply = response.choices[0].message.content
+    except Exception as openai_err:
         try:
+            # 使用最新的 Groq 模型
             response = groq_client.chat.completions.create(
-                model="llama3-70b-8192",
+                model=GROQ_MODEL_PRIMARY,
                 messages=messages,
                 max_tokens=1000,
                 temperature=1.2
             )
             reply = response.choices[0].message.content
         except Exception as groq_err:
-            reply = f"OpenAI API 發生錯誤: {str(openai_err)}，GROQ API 發生錯誤: {str(groq_err)}"
+            try:
+                # 嘗試備用模型
+                response = groq_client.chat.completions.create(
+                    model=GROQ_MODEL_FALLBACK,
+                    messages=messages,
+                    max_tokens=1000,
+                    temperature=1.2
+                )
+                reply = response.choices[0].message.content
+            except Exception as fallback_err:
+                reply = f"API 發生錯誤: OpenAI - {str(openai_err)}, Groq - {str(groq_err)}, Fallback - {str(fallback_err)}"
     return reply
 
 # 擷取匯率資料
@@ -129,7 +145,7 @@ def generate_content_msg(kind):
 # 主函式
 def money_gpt(kind):
     content_msg = generate_content_msg(kind)
-    if content_msg == "無法獲取匯率資料。":
+    if content_msg == "無法獲取匯率資料，但服務仍在運行中。請稍後再試。":
         return content_msg
 
     print(content_msg)  # 調試輸出
