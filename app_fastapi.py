@@ -330,6 +330,7 @@ async def handle_message(event):
         elif any(processed_msg.lower().startswith(k) for k in ["鉑", "platinum"]):
             reply_text = platinum_gpt()
         elif any(processed_msg.lower().startswith(k) for k in ["日幣", "jpy"]):
+            # 修正 JPY 查詢，確保傳遞正確的貨幣代碼
             reply_text = money_gpt("JPY")
         elif any(processed_msg.lower().startswith(k) for k in ["美金", "usd"]):
             reply_text = money_gpt("USD")
