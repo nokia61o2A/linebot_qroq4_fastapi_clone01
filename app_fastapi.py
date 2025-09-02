@@ -57,26 +57,16 @@ from my_commands.weather_gpt import weather_gpt
 from my_commands.stock.stock_gpt import stock_gpt   # ✅ 改用小寫 stock 資料夾
 
 # ============================================
-# 3) 狀態管理
+# 狀態管理
 # ============================================
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 auto_reply_status: Dict[str, bool] = {}
 user_persona: Dict[str, str] = {}
-translation_requests: Dict[str, str] = {}
-
-# --- 繁體中文說明 ---
-# 定義不同的人設（甜 / 鹹 / 萌 / 酷）
-# ------------------------------------------ #
-PERSONAS: Dict[str, dict] = {
-    "sweet": {"title": "甜美女友","style": "語氣溫柔體貼、鼓勵安慰","greetings": "嗨～我在這裡，先深呼吸，我陪你喔。🌸","reply_format": "3~6 句"},
-    "salty": {"title": "鹹口傲嬌女友","style": "機智吐槽、有點壞壞但不失溫度","greetings": "欸你來啦～我就知道你又想我了😏","reply_format": "吐槽 + 建議"},
-    "moe":   {"title": "萌系女友","style": "動漫風格，多用可愛語尾","greetings": "呀呼～今天也要被我治癒一下嗎？(ﾉ>ω<)ﾉ","reply_format": "短句 + 可愛表情"},
-    "cool":  {"title": "酷系御姐","style": "話少但有氣場","greetings": "我在。先說你的狀況，我會幫你理清。","reply_format": "精煉 2~4 句"},
-}
+translation_requests: Dict[str, dict] = {}  # {user_id: {"lang": "繁體中文", "text": ""}}
 
 # ============================================
-# 4) FastAPI 與 Webhook
+# FastAPI 與 Webhook
 # ============================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -100,7 +90,7 @@ def update_line_webhook():
         logger.info(f"✅ Webhook 更新成功: {res.status_code}")
 
 # ============================================
-# 5) QuickReply 與 Flex Menu
+# QuickReply 與 Flex Menu
 # ============================================
 def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
     items: List[QuickReplyButton] = []
@@ -109,6 +99,7 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         QuickReplyButton(action=MessageAction(label="💖 人設選單", text="人設選單")),
         QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")),
         QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")),
+        QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")),  # ✅ 新增翻譯選單
         QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")),
         QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答")),
         QuickReplyButton(action=MessageAction(label="🌤️ 天氣", text=f"{prefix}天氣")),
@@ -131,6 +122,16 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
         ], paddingAll="10px")
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
+
+def flex_menu_translate() -> FlexSendMessage:
+    actions = [
+        MessageAction(label="🇺🇸 翻英文", text="翻譯->英文"),
+        MessageAction(label="🇹🇼 翻繁體中文", text="翻譯->繁體中文"),
+        MessageAction(label="🇨🇳 翻簡體中文", text="翻譯->簡體中文"),
+        MessageAction(label="🇯🇵 翻日文", text="翻譯->日文"),
+        MessageAction(label="❌ 結束翻譯", text="翻譯->結束"),
+    ]
+    return build_flex_menu("🌐 翻譯選擇", "選擇要翻譯的目標語言", actions)
 
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""
@@ -162,7 +163,7 @@ def flex_menu_persona() -> FlexSendMessage:
     return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
 
 # ============================================
-# 6) Groq 工具
+# Groq 工具
 # ============================================
 def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
     try:
@@ -189,8 +190,19 @@ def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
             logger.error(f"備用模型失敗: {e_fallback}")
             return "抱歉，AI 服務暫時不可用。"
 
+async def translate_text(text: str, target_language: str) -> str:
+    try:
+        messages = [
+            {"role": "system", "content": f"你是一位專業翻譯，請將以下文字翻譯成 {target_language}"},
+            {"role": "user", "content": text}
+        ]
+        return groq_chat_completion(messages, max_tokens=800, temperature=0.3)
+    except Exception as e:
+        logger.error(f"翻譯失敗: {e}")
+        return text
+
 # ============================================
-# 7) handle_message
+# handle_message
 # ============================================
 @router.post("/callback")
 async def callback(request: Request):
@@ -223,20 +235,35 @@ async def handle_message(event):
     bot_name = line_bot_api.get_bot_info().display_name
     low = msg.lower()
 
-    # --- 繁體中文說明 ---
-    # Flex 選單觸發
-    # ------------------------------------------ #
+    # --- Flex 選單觸發 ---
     if low == '人設選單':
         line_bot_api.reply_message(reply_token, flex_menu_persona()); return
     elif low == '金融選單':
         line_bot_api.reply_message(reply_token, flex_menu_finance(bot_name, is_group)); return
     elif low == '彩票選單':
         line_bot_api.reply_message(reply_token, flex_menu_lottery(bot_name, is_group)); return
+    elif low == '翻譯選單':
+        line_bot_api.reply_message(reply_token, flex_menu_translate()); return
 
+    # --- 翻譯邏輯 ---
+    if low.startswith("翻譯->"):
+        choice = low.replace("翻譯->", "")
+        if choice == "結束":
+            translation_requests.pop(user_id, None)
+            await reply_simple(reply_token, "✅ 已結束翻譯模式")
+            return
+        else:
+            translation_requests[user_id] = {"lang": choice, "text": ""}
+            await reply_simple(reply_token, f"🌐 已啟用翻譯模式，下一則訊息將翻譯成【{choice}】")
+            return
+    elif user_id in translation_requests and translation_requests[user_id]["lang"]:
+        target_lang = translation_requests[user_id]["lang"]
+        translated = await translate_text(msg, target_lang)
+        await reply_simple(reply_token, f"🌐 翻譯結果 ({target_lang})：\n{translated}")
+        return
+
+    # --- 功能觸發判斷 ---
     reply_text = None
-    # --- 繁體中文說明 ---
-    # 功能觸發判斷
-    # ------------------------------------------ #
     if any(k in msg for k in ["威力彩","大樂透","539","雙贏彩"]):
         reply_text = lottery_gpt(msg)
     elif msg.startswith("104:"):
@@ -261,11 +288,8 @@ async def handle_message(event):
     elif "天氣" in msg:
         reply_text = weather_gpt("台北市")
     else:
-        # --- 繁體中文說明 ---
-        # 股票代號正則判斷：台股數字代號 / 美股英文代號
-        # ------------------------------------------ #
-        stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", msg)   # 2330 / 2882A
-        stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)      # AAPL / TSLA
+        stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", msg)
+        stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)
         if stock_code:
             reply_text = stock_gpt(stock_code.group())
         elif stockUS_code:
@@ -280,7 +304,18 @@ async def handle_message(event):
         logger.error(f"回覆訊息失敗: {e.error.message}", exc_info=True)
 
 # ============================================
-# 8) 健康檢查
+# 簡單回覆工具
+# ============================================
+async def reply_simple(reply_token, text: str):
+    try:
+        bot_name = line_bot_api.get_bot_info().display_name
+        quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name)
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items)))
+    except Exception as e:
+        logger.error(f"reply_simple 發生錯誤: {e}")
+
+# ============================================
+# 健康檢查
 # ============================================
 @app.get("/healthz")
 async def health_check():
