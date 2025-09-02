@@ -299,7 +299,7 @@ async def analyze_sentiment(text: str) -> str:
         result = groq_chat_completion(messages, max_tokens=10, temperature=0)
         return (result or "neutral").strip().lower()
     except Exception as e:
-        logger.error(f"情感分析失敗: {e}")
+        logger.error(f"情感分析失敗: {e")
         return "neutral"
 
 # ============================================
@@ -339,7 +339,7 @@ async def get_reply_with_persona_and_sentiment(user_id: str, messages: list, sen
 # ============================================
 # 5) Quick Reply + Flex 垂直按鈕選單（優化版）
 # ============================================
-def build_quick_reply_items(is_group: bool, bot_name: str, has_english_content: bool = False) -> List[QuickReplyButton]:
+def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
     """縮減為必要按鈕（<= 13）"""
     items: List[QuickReplyButton] = []
     prefix = f"@{bot_name} " if is_group else ""
@@ -350,11 +350,8 @@ def build_quick_reply_items(is_group: bool, bot_name: str, has_english_content: 
         QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")),
         QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答")),
         QuickReplyButton(action=MessageAction(label="🌤️ 天氣", text=f"{prefix}天氣")),
+        QuickReplyButton(action=MessageAction(label="🌐 翻譯成中文", text="請將上述內容翻譯成中文")),  # 永遠顯示翻譯按鈕
     ])
-    
-    # 如果有英文內容，添加翻譯按鈕
-    if has_english_content and len(items) < 13:
-        items.append(QuickReplyButton(action=MessageAction(label="🌐 翻譯成中文", text="請將上述內容翻譯成中文")))
     
     return items
 
@@ -615,15 +612,11 @@ async def handle_message(event):
     if not reply_text:
         reply_text = "抱歉，目前無法提供回應，請稍後再試。"
 
-    # 檢查是否需要顯示翻譯按鈕
-    has_english_content = calculate_english_ratio(reply_text) > 0.1
-    
-    # 儲存需要翻譯的內容
-    if has_english_content:
-        translation_requests[user_id] = reply_text
+    # 儲存需要翻譯的內容（無論是否有英文都儲存）
+    translation_requests[user_id] = reply_text
 
-    # Quick Reply（包含翻譯按鈕）
-    quick_items = build_quick_reply_items(is_group, bot_name, has_english_content)
+    # Quick Reply（永遠包含翻譯按鈕）
+    quick_items = build_quick_reply_items(is_group, bot_name)
 
     reply_message = TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_items))
     try:
@@ -635,8 +628,7 @@ async def handle_message(event):
 async def reply_simple(reply_token, text):
     try:
         bot_name = line_bot_api.get_bot_info().display_name
-        has_english = calculate_english_ratio(text) > 0.1
-        quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name, has_english_content=has_english)
+        quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name)
         line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items)))
     except LineBotApiError as e:
         logger.error(f"❌ 回覆訊息失敗: {e}")
