@@ -3,21 +3,18 @@ import re
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Dict, List
+from typing import Dict
 
 import httpx
 import requests
-from fastapi import FastAPI, APIRouter, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
-    QuickReply, QuickReplyButton, MessageAction,
-    SourceGroup, SourceRoom, PostbackEvent,
-    FlexSendMessage, BubbleContainer, BoxComponent, TextComponent,
-    ButtonComponent
+    SourceGroup, SourceRoom
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
@@ -67,9 +64,6 @@ except ImportError:
 # ------------------------------------------ #
 translation_states: Dict[str, str] = {}
 
-#-- 繁體中文說明 --
-# 翻譯功能：根據聊天室ID獲取或設置翻譯語言
-# ------------------------------------------ #
 def get_translation_state(chat_id: str) -> str:
     return translation_states.get(chat_id, "none")  # 預設無翻譯
 
@@ -97,26 +91,32 @@ async def translate_text(text: str, target_lang: str) -> str:
         logger.error(f"翻譯失敗: {e}")
         return text  # 翻譯失敗時返回原文
 
-#-- 繁體中文說明 --
-# 同步處理翻譯邏輯：在同步上下文中執行異步翻譯
-# ------------------------------------------ #
+#-- 🔥 修正版：同步翻譯處理，避免 event loop already running
 def sync_translate_text(text: str, target_lang: str) -> str:
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        # 如果事件循環正在運行，使用 run_until_complete
-        return loop.run_until_complete(translate_text(text, target_lang))
-    else:
-        # 否則使用 asyncio.run
-        return asyncio.run(translate_text(text, target_lang))
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 如果 event loop 已經在跑，改用 thread-safe 提交 coroutine
+            future = asyncio.run_coroutine_threadsafe(
+                translate_text(text, target_lang), loop
+            )
+            return future.result()
+        else:
+            return loop.run_until_complete(translate_text(text, target_lang))
+    except Exception as e:
+        logger.error(f"sync_translate_text 錯誤: {e}")
+        return text
 
 #-- 繁體中文說明 --
-# 處理訊息事件的主邏輯（改為同步函數以兼容 linebot 的 WebhookHandler）
+# 處理訊息事件的主邏輯
 # ------------------------------------------ #
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event: MessageEvent):
-    chat_id = event.source.group_id if isinstance(event.source, SourceGroup) else \
-              event.source.room_id if isinstance(event.source, SourceRoom) else \
-              event.source.user_id
+    chat_id = (
+        event.source.group_id if isinstance(event.source, SourceGroup)
+        else event.source.room_id if isinstance(event.source, SourceRoom)
+        else event.source.user_id
+    )
     user_message = event.message.text.strip()
 
     # 檢查是否為翻譯指令
@@ -127,13 +127,11 @@ def handle_message(event: MessageEvent):
             reply = f"已設定此聊天室的翻譯語言為: {lang if lang != 'none' else '無'}"
         else:
             reply = "支援的語言: none, zh (中文), en (英文), vi (越南文), jp (日文)"
-    # 檢查是否為彩票或金價指令
     elif user_message.startswith("/lottery"):
         reply = lottery_gpt(user_message)
     elif user_message.startswith("/gold"):
         reply = gold_gpt(user_message)
     else:
-        # 根據當前聊天室的翻譯狀態進行翻譯（同步調用）
         target_lang = get_translation_state(chat_id)
         reply = sync_translate_text(user_message, target_lang)
 
@@ -146,19 +144,13 @@ def handle_message(event: MessageEvent):
     except LineBotApiError as e:
         logger.error(f"回覆訊息失敗: {e}")
 
-# --- 繁體中文說明 ---
-# FastAPI 應用程式初始化
-# ------------------------------------------ #
+# --- FastAPI 初始化 ---
 app = FastAPI()
 
-#-- 繁體中文說明 --
 # 設置靜態檔案路徑
-# ------------------------------------------ #
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-#-- 繁體中文說明 --
-# Webhook 路由處理 LINE Bot 回呼
-# ------------------------------------------ #
+# Webhook 路由處理
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
@@ -174,9 +166,7 @@ async def callback(request: Request):
 
     return JSONResponse(content={"status": "OK"})
 
-#-- 繁體中文說明 --
-# 應用程式啟動與關閉的生命週期管理
-# ------------------------------------------ #
+# 生命週期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("應用程式啟動中...")
@@ -185,9 +175,7 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-#-- 繁體中文說明 --
 # 主程式入口
-# ------------------------------------------ #
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
