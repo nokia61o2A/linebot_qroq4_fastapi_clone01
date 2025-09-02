@@ -337,8 +337,7 @@ async def handle_message(event):
         stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)
         if stock_code:
             reply_text = stock_gpt(stock_code.group())
-        elif stockUS
-            elif stockUS_code:
+        elif stockUS_code:
             reply_text = stock_gpt(stockUS_code.group())
         else:
             # --- 預設：走 LLM 人設聊天 + 情緒分析 ---
