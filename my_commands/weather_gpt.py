@@ -137,7 +137,7 @@ def weather_gpt(location: str = "臺北市") -> str:
         return response["choices"][0]["message"]["content"]
     except openai.OpenAIError:
         resp = groq_client.chat.completions.create(
-            model="llama3-70b-8192",
+            model="llama-3.1-8b-instant",
             messages=messages,
             max_tokens=1000,
             temperature=1.2

@@ -69,7 +69,7 @@ def get_reply(messages):
     except openai.OpenAIError as openai_err:
         try:
             response = groq_client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.1-8b-instant",
                 messages=messages,
                 max_tokens=5000,
                 temperature=1.2
@@ -78,7 +78,7 @@ def get_reply(messages):
         except Exception as groq_err:
             time.sleep(15)  # 等待一段時間再重試
             response = groq_client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.1-8b-instant",
                 messages=messages,
                 max_tokens=3000,
                 temperature=1.2

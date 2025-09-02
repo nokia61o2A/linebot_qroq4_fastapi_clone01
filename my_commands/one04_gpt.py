@@ -44,7 +44,7 @@ def get_reply(messages):
                 groq_last_request_time = time.time()
 
             response = groq_client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.1-8b-instant",
                 messages=messages,
                 max_tokens=1500,
                 temperature=1.2
@@ -59,7 +59,7 @@ def get_reply(messages):
                 time.sleep(15)
                 try:
                     response = groq_client.chat.completions.create(
-                        model="llama3-70b-8192",
+                        model="llama-3.1-8b-instant",
                         messages=messages,
                         max_tokens=1500,
                         temperature=1.2
