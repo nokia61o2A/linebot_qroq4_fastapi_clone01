@@ -181,6 +181,74 @@ def handle_message(event: MessageEvent):
 
     if chat_id not in auto_reply_status: auto_reply_status[chat_id] = True
     low = msg.lower()
+    if is_group and not auto_reply_status.get(chat_id, True) and not msg.startswith(f"@{bot_name}"): 
+        return
+    if msg.startswith(f"@{bot_name}"):
+        msg, low = msg[len(f"@{bot_name}"):].strip(), msg.lower()
+
+    # ======================
+    # 翻譯模式
+    # ======================
+    if chat_id in translation_states:
+        if not msg: return
+        target_lang = translation_states[chat_id]
+        translated_text = asyncio.run(translate_text(msg, target_lang))
+        guides = get_phonetic_guides(translated_text, target_lang)
+
+        final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n"
+        if target_lang in ["日文", "韓文"]:
+            display_text = translated_text
+            if guides.get('romaji'): display_text += f" (羅馬拼音: {guides['romaji']})"
+            if guides.get('bopomofo'): display_text += f" (ㄅㄆㄇ: {guides['bopomofo']})"
+            final_reply += display_text
+        elif target_lang in ["繁體中文", "簡體中文"]:
+            final_reply += translated_text
+            phonetic_parts = []
+            if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
+            if guides.get('bopomofo'): phonetic_parts.append(f"注音(ㄅㄆㄇ): {guides['bopomofo']}")
+            if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
+        else:
+            final_reply += translated_text
+        return reply_simple(reply_token, final_reply, is_group, bot_name)
+
+    # ======================
+    # 一般 AI 人設 + 情緒回覆 (LLM)
+    # ======================
+    try:
+        # 取對話歷史
+        history = conversation_history.get(chat_id, [])
+        if user_id not in user_persona:
+            user_persona[user_id] = "溫柔體貼的AI助手"  # 預設人設
+
+        messages = []
+        messages.append({"role": "system", "content": f"你是一個{user_persona[user_id]}，會用溫柔、貼心的方式回應使用者。"})
+        for h in history:
+            messages.append(h)
+        messages.append({"role": "user", "content": msg})
+
+        # 呼叫 LLM
+        reply_text = asyncio.run(groq_chat_completion(messages))
+
+        # 更新對話歷史
+        history.append({"role": "user", "content": msg})
+        history.append({"role": "assistant", "content": reply_text})
+        if len(history) > MAX_HISTORY_LEN:
+            history = history[-MAX_HISTORY_LEN:]
+        conversation_history[chat_id] = history
+
+    except Exception as e:
+        logger.error(f"AI 回覆失敗: {e}", exc_info=True)
+        reply_text = "抱歉，我剛剛走神了 😅，可以再說一次嗎？"
+
+    line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text))
+    user_id, chat_id = event.source.user_id, get_chat_id(event)
+    msg, reply_token = event.message.text.strip(), event.reply_token
+    is_group = isinstance(event.source, (SourceGroup, SourceRoom))
+    try: bot_name = line_bot_api.get_bot_info().display_name
+    except: bot_name = "AI助手"
+
+    if chat_id not in auto_reply_status: auto_reply_status[chat_id] = True
+    low = msg.lower()
     if is_group and not auto_reply_status.get(chat_id, True) and not msg.startswith(f"@{bot_name}"): return
     if msg.startswith(f"@{bot_name}"):
         msg, low = msg[len(f"@{bot_name}"):].strip(), msg.lower()
