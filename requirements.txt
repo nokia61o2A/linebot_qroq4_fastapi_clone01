@@ -13,5 +13,7 @@ pandas
 numpy
 openai>=1.3.8
 lxml
+# 🔥 發音標註功能函式庫
 pypinyin
-pyvi
+pykakasi
+korean-romanizer
