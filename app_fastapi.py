@@ -1,17 +1,13 @@
 import os
-import re
 import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Dict
 
-import httpx
-import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-# 🔥 FIX 1: 匯入 FastAPI 的 run_in_threadpool
+# ⚡️ 核心工具：用於在異步環境中運行同步程式碼
 from fastapi.concurrency import run_in_threadpool
 
 from linebot import LineBotApi, WebhookHandler
@@ -21,175 +17,184 @@ from linebot.models import (
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
-from groq import Groq
+# 🔥 FIX 1: 必須使用異步版本的 Groq 客戶端 (AsyncGroq) 才能搭配 await
+from groq import AsyncGroq
 
-#-- 繁體中文說明 --
-# 新增 pypinyin 用於生成中文拼音和注音符號，pyvi 用於解析越南文音節和聲調
-from pypinyin import pinyin, Style
-from pyvi import ViTokenizer, ViUtils
-
-# --- 繁體中文說明 ---
-# 基礎設定：Line Bot 與 Groq API 初始化
-# ------------------------------------------ #
+# --- 基礎設定 ---
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 
-BASE_URL       = os.getenv("BASE_URL")
-CHANNEL_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
+# 從環境變數讀取設定
+CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# 檢查必要的環境變數，若缺少則直接在啟動時報錯
+if not all([CHANNEL_TOKEN, CHANNEL_SECRET, GROQ_API_KEY]):
+    raise ValueError("缺少環境變數：請設定 CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, GROQ_API_KEY")
+
+# 初始化 API 客戶端
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
-handler      = WebhookHandler(CHANNEL_SECRET)
+handler = WebhookHandler(CHANNEL_SECRET)
 
-groq_client = Groq(api_key=GROQ_API_KEY)
-GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-70b-versatile")
+# 使用 AsyncGroq
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-8b-instant")
 
-os.environ["GROQ_MODEL"] = GROQ_MODEL_PRIMARY
-
-# --- 繁體中文說明 ---
-# 匯入自訂功能模組
-# ------------------------------------------ #
+# --- 匯入自訂功能模組 ---
 try:
     from my_commands.lottery_gpt import lottery_gpt
 except ImportError:
-    def lottery_gpt(msg): return "彩票功能暫時不可用"
+    logger.warning("無法匯入 'lottery_gpt' 模組，將使用預設功能。")
+    def lottery_gpt(msg: str) -> str: return "彩票功能暫時不可用"
 
 try:
     from my_commands.gold_gpt import gold_gpt
 except ImportError:
-    def gold_gpt(msg): return "金價功能暫時不可用"
+    logger.warning("無法匯入 'gold_gpt' 模組，將使用預設功能。")
+    def gold_gpt(msg: str) -> str: return "金價功能暫時不可用"
 
-#-- 繁體中文說明 --
-# 新增聊天室獨立的翻譯狀態管理
-# 使用字典儲存每個聊天室的翻譯狀態，鍵為聊天室ID，值為當前語言
-# ------------------------------------------ #
+# --- 翻譯狀態管理 ---
+# 注意：此狀態儲存在記憶體中，伺服器重啟後會遺失。
 translation_states: Dict[str, str] = {}
 
+def get_chat_id(event: MessageEvent) -> str:
+    """從 Line event 中提取唯一的聊天室 ID (使用者、群組或房間)"""
+    if isinstance(event.source, SourceGroup):
+        return event.source.group_id
+    if isinstance(event.source, SourceRoom):
+        return event.source.room_id
+    return event.source.user_id
+
 def get_translation_state(chat_id: str) -> str:
-    return translation_states.get(chat_id, "none")  # 預設無翻譯
+    return translation_states.get(chat_id, "none")
 
 def set_translation_state(chat_id: str, lang: str) -> None:
     translation_states[chat_id] = lang
 
-def clear_translation_state(chat_id: str) -> None:
-    translation_states[chat_id] = "none"
+# --- 翻譯核心邏輯 ---
 
-#-- 繁體中文說明 --
-# 翻譯邏輯：將文字翻譯為指定語言（異步函數）
-# ------------------------------------------ #
+# 🔥 FIX 2: 確保翻譯函數為 'async' 且正確使用 'await'
 async def translate_text(text: str, target_lang: str) -> str:
+    """使用 Groq API 異步翻譯文字"""
     if target_lang == "none" or not target_lang:
         return text
+
+    # 優化後的 Prompt，指示模型僅輸出結果
+    prompt = f"請將以下文字翻譯成'{target_lang}'，僅輸出翻譯後的結果，不要包含任何額外的說明或引號：\n\n{text}"
     try:
-        prompt = f"將以下文字翻譯成{target_lang}：{text}"
-        # 注意：groq API 調用本身就是非同步的，但SDK可能以同步方式封裝
-        # 為了安全，我們假設它可能阻塞，並在同步函數中正確調用
+        # 現在 groq_client 是 AsyncGroq，可以被正確地 await
         chat_completion = await groq_client.chat.completions.create(
             model=GROQ_MODEL_PRIMARY,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000
+            max_tokens=2048,
+            temperature=0.7,
         )
         return chat_completion.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"翻譯失敗: {e}")
-        # 如果 Groq SDK 的 create 不是 async, 則需要用 run_in_threadpool
-        # 但從您的程式碼結構來看，您希望它是 async 的
-        return text  # 翻譯失敗時返回原文
+        logger.error(f"Groq API 翻譯失敗: {e}")
+        return f"翻譯時發生錯誤，請稍後再試。 (原文: {text})"
 
-# 🔥 FIX 2: 簡化同步翻譯的處理方式
-# 在一個同步函數中，要執行一個異步函數，最簡單且現代的方式是使用 asyncio.run()
-# 這會在新執行緒中創建一個新的事件循環來運行任務，完美避開主循環衝突
-def sync_translate_text(text: str, target_lang: str) -> str:
-    if target_lang == "none":
-        return text
-    try:
-        # asyncio.run() 會自動管理事件循環的創建與銷毀
-        return asyncio.run(translate_text(text, target_lang))
-    except RuntimeError:
-        # 如果我們還是在一個已經運行的循環中（雖然 run_in_threadpool 應該能避免）
-        # 這裡可以保留一個備用方案，但通常 asyncio.run() 已經足夠
-        loop = asyncio.get_event_loop()
-        future = asyncio.run_coroutine_threadsafe(translate_text(text, target_lang), loop)
-        return future.result(timeout=30) # 增加超時以防萬一
-    except Exception as e:
-        logger.error(f"sync_translate_text 錯誤: {e}")
-        return text
-
-#-- 繁體中文說明 --
-# 處理訊息事件的主邏輯
-# ------------------------------------------ #
+# --- 訊息處理主邏輯 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event: MessageEvent):
-    chat_id = (
-        event.source.group_id if isinstance(event.source, SourceGroup)
-        else event.source.room_id if isinstance(event.source, SourceRoom)
-        else event.source.user_id
-    )
+    """處理 Line 的文字訊息事件 (此函數為同步的)"""
+    chat_id = get_chat_id(event)
     user_message = event.message.text.strip()
+    reply = ""
 
-    # 檢查是否為翻譯指令
-    if user_message.startswith("/translate"):
-        lang = user_message.replace("/translate", "").strip().lower()
-        if lang in ["none", "zh", "en", "vi", "jp"]:
+    # 指令處理 (轉為小寫以增加彈性)
+    command = user_message.lower()
+    if command.startswith("/translate"):
+        parts = user_message.split()
+        lang = parts[1].lower() if len(parts) > 1 else ""
+        supported_langs = {"none": "無", "zh": "繁體中文", "en": "英文", "vi": "越南文", "jp": "日文"}
+        if lang in supported_langs:
             set_translation_state(chat_id, lang)
-            reply = f"已設定此聊天室的翻譯語言為: {lang if lang != 'none' else '無'}"
+            reply = f"已將此聊天室的翻譯模式設定為: {supported_langs[lang]}"
         else:
-            reply = "支援的語言: none, zh (中文), en (英文), vi (越南文), jp (日文)"
-    elif user_message.startswith("/lottery"):
+            reply = "支援的語言: /translate [none|zh|en|vi|jp]"
+    elif command.startswith("/lottery"):
         reply = lottery_gpt(user_message)
-    elif user_message.startswith("/gold"):
+    elif command.startswith("/gold"):
         reply = gold_gpt(user_message)
     else:
+        # 非指令的一般訊息，檢查是否需要翻譯
         target_lang = get_translation_state(chat_id)
-        # 這個同步函式現在可以安全地在 run_in_threadpool 創建的背景執行緒中運行了
-        reply = sync_translate_text(user_message, target_lang)
+        if target_lang != "none":
+            try:
+                # 🔥 FIX 3: 從同步函數中安全地執行異步函數
+                # 因為 handle_message 是透過 run_in_threadpool 在背景執行緒中運行的，
+                # 該執行緒沒有正在運行的事件循環。
+                # 因此，使用 asyncio.run() 是最直接且正確的方式來執行我們的 async translate_text。
+                reply = asyncio.run(translate_text(user_message, target_lang))
+            except Exception as e:
+                logger.error(f"在 handle_message 中執行 asyncio.run 失敗: {e}")
+                reply = "處理您的訊息時發生內部錯誤。"
+        else:
+            # 如果沒有設定翻譯，不進行任何回覆，避免機器人洗版
+            return
 
-    # 回覆訊息
-    try:
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply)
-        )
-    except LineBotApiError as e:
-        logger.error(f"回覆訊息失敗: {e}")
+    # 確保有內容才回覆
+    if reply:
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply)
+            )
+        except LineBotApiError as e:
+            logger.error(f"回覆 Line 訊息失敗: {e.status_code} {e.error.message}")
 
-# --- FastAPI 初始化 ---
-app = FastAPI()
+# --- FastAPI 應用程式設定 ---
 
-# 設置靜態檔案路徑
+# 🔥 FIX 4: 使用現代的 FastAPI lifespan 語法
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """應用程式生命週期管理"""
+    logger.info("應用程式啟動...")
+    yield
+    logger.info("應用程式關閉。")
+
+app = FastAPI(lifespan=lifespan)
+
+# 掛載靜態檔案目錄
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Webhook 路由處理
+# Webhook 路由
 @app.post("/callback")
 async def callback(request: Request):
+    """Line Bot 的 Webhook 端點"""
     signature = request.headers.get("X-Line-Signature")
+    if not signature:
+        raise HTTPException(status_code=400, detail="缺少 X-Line-Signature 標頭")
+
     body = await request.body()
+    body_str = body.decode('utf-8')
 
     try:
-        # 🔥 FIX 3: 使用 run_in_threadpool 執行同步的 handler
-        # 這會將整個 handler.handle 流程（包含其內部的所有同步函式呼叫）
-        # 放到一個獨立的執行緒中，從而不會阻塞 FastAPI 的主事件循環。
-        await run_in_threadpool(handler.handle, body.decode(), signature)
+        # ⚡️ 核心：將同步的 handler.handle 放到獨立的執行緒中運行，
+        # 這可以防止它阻塞 FastAPI 的主異步事件循環。
+        await run_in_threadpool(handler.handle, body_str, signature)
     except InvalidSignatureError:
+        logger.warning("無效的簽名，請檢查您的 Channel Secret。")
         raise HTTPException(status_code=400, detail="無效的簽名")
     except LineBotApiError as e:
-        logger.error(f"LineBot API 錯誤: {e}")
+        logger.error(f"Line Bot API 錯誤: {e.status_code} {e.error.message}")
+        raise HTTPException(status_code=500, detail="Line Bot API 錯誤")
+    except Exception as e:
+        logger.error(f"處理 callback 時發生未知錯誤: {e}")
         raise HTTPException(status_code=500, detail="內部伺服器錯誤")
 
     return JSONResponse(content={"status": "OK"})
 
-# 生命週期管理
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("應用程式啟動中...")
-    yield
-    logger.info("應用程式關閉中...")
+# 健康檢查路由
+@app.get("/")
+async def root():
+    return {"message": "Line Bot is running."}
 
-app.router.lifespan_context = lifespan
-
-# 主程式入口
+# 主程式入口 (用於本機開發)
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("啟動開發伺服器於 http://127.0.0.1:8000")
+    # 在 Render 等平台部署時，會由 gunicorn 或 uvicorn worker class 指定 host
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
