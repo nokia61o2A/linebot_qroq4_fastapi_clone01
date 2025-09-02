@@ -404,7 +404,8 @@ async def handle_message(event):
     
     # 初始化自動回答狀態
     if chat_id not in auto_reply_status:
-        auto_reply_status[chat_id] = not is_group  # 私聊預設開啟，群組預設關閉
+        # auto_reply_status[chat_id] = not is_group  # 私聊預設開啟，群組預設關閉
+          auto_reply_status[chat_id] =  True  # 預設開
 
     try:
         bot_name = line_bot_api.get_bot_info().display_name
