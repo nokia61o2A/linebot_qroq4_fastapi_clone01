@@ -54,7 +54,7 @@ from my_commands.one04_gpt import one04_gpt
 from my_commands.partjob_gpt import partjob_gpt
 from my_commands.crypto_coin_gpt import crypto_gpt
 from my_commands.weather_gpt import weather_gpt
-from my_commands.stock.stock_gpt import stock_gpt   # ✅ 改用小寫 stock 資料夾
+from my_commands.stock.stock_gpt import stock_gpt   # ✅ 改小寫 stock 資料夾
 
 # ============================================
 # 狀態管理
@@ -201,6 +201,47 @@ async def translate_text(text: str, target_language: str) -> str:
         logger.error(f"翻譯失敗: {e}")
         return text
 
+async def analyze_sentiment(text: str) -> str:
+    try:
+        messages = [
+            {"role": "system", "content": "你是情感分析助手，只輸出一個情緒標籤。"},
+            {"role": "user", "content": f"判斷這句話的情緒：{text}\n只回傳：positive, neutral, negative, angry"}
+        ]
+        result = groq_chat_completion(messages, max_tokens=10, temperature=0)
+        return (result or "neutral").strip().lower()
+    except Exception as e:
+        logger.error(f"情感分析失敗: {e}")
+        return "neutral"
+
+# ============================================
+# 人設設定
+# ============================================
+PERSONAS = {
+    "sweet": {"title": "甜美女友", "style": "溫柔體貼，貼心安慰", "greetings": "嗨～我在這裡陪你 🌸"},
+    "salty": {"title": "傲嬌女友", "style": "吐槽機智，帶點壞壞", "greetings": "哼！又來找我了嗎 😏"},
+    "moe":   {"title": "萌系女友", "style": "動漫風格，可愛語尾", "greetings": "呀呼～要被我治癒嗎 (ﾉ>ω<)ﾉ"},
+    "cool":  {"title": "酷系御姐", "style": "冷靜高冷，直指重點", "greetings": "我在。說吧，我會幫你分析 🧊"},
+}
+
+def set_user_persona(user_id: str, key: str):
+    if key not in PERSONAS: key = "sweet"
+    user_persona[user_id] = key
+    return key
+
+def get_user_persona(user_id: str):
+    return user_persona.get(user_id, "sweet")
+
+def build_persona_prompt(user_id: str, sentiment: str) -> str:
+    p_key = get_user_persona(user_id)
+    p = PERSONAS[p_key]
+    return f"""
+你是一位「{p['title']}」。
+【語氣風格】{p['style']}
+【開場白】{p['greetings']}
+【情緒調整】使用者情緒：{sentiment}
+請用繁體中文回覆，簡短自然。
+""".strip()
+
 # ============================================
 # handle_message
 # ============================================
@@ -236,16 +277,12 @@ async def handle_message(event):
     low = msg.lower()
 
     # --- Flex 選單觸發 ---
-    if low == '人設選單':
-        line_bot_api.reply_message(reply_token, flex_menu_persona()); return
-    elif low == '金融選單':
-        line_bot_api.reply_message(reply_token, flex_menu_finance(bot_name, is_group)); return
-    elif low == '彩票選單':
-        line_bot_api.reply_message(reply_token, flex_menu_lottery(bot_name, is_group)); return
-    elif low == '翻譯選單':
-        line_bot_api.reply_message(reply_token, flex_menu_translate()); return
+    if low == '人設選單': line_bot_api.reply_message(reply_token, flex_menu_persona()); return
+    elif low == '金融選單': line_bot_api.reply_message(reply_token, flex_menu_finance(bot_name, is_group)); return
+    elif low == '彩票選單': line_bot_api.reply_message(reply_token, flex_menu_lottery(bot_name, is_group)); return
+    elif low == '翻譯選單': line_bot_api.reply_message(reply_token, flex_menu_translate()); return
 
-    # --- 翻譯邏輯 ---
+    # --- 翻譯模式 ---
     if low.startswith("翻譯->"):
         choice = low.replace("翻譯->", "")
         if choice == "結束":
@@ -254,7 +291,7 @@ async def handle_message(event):
             return
         else:
             translation_requests[user_id] = {"lang": choice, "text": ""}
-            await reply_simple(reply_token, f"🌐 已啟用翻譯模式，下一則訊息將翻譯成【{choice}】")
+            await reply_simple(reply_token, f"🌐 翻譯模式已啟用，下一則訊息將翻譯成【{choice}】")
             return
     elif user_id in translation_requests and translation_requests[user_id]["lang"]:
         target_lang = translation_requests[user_id]["lang"]
@@ -262,77 +299,94 @@ async def handle_message(event):
         await reply_simple(reply_token, f"🌐 翻譯結果 ({target_lang})：\n{translated}")
         return
 
-    # --- 功能觸發判斷 ---
+    # --- 人設切換 ---
+    if low in ("甜","sweet"):
+        key = set_user_persona(user_id,"sweet")
+        await reply_simple(reply_token,f"已切換人設：{PERSONAS[key]['title']} 🌸")
+        return
+    if low in ("鹹","salty"):
+        key = set_user_persona(user_id,"salty")
+        await reply_simple(reply_token,f"已切換人設：{PERSONAS[key]['title']} 😏")
+        return
+    if low in ("萌","moe"):
+        key = set_user_persona(user_id,"moe")
+        await reply_simple(reply_token,f"已切換人設：{PERSONAS[key]['title']} ✨")
+        return
+    if low in ("酷","cool"):
+        key = set_user_persona(user_id,"cool")
+        await reply_simple(reply_token,f"已切換人設：{PERSONAS[key]['title']} 🧊")
+        return
+
+    # --- 功能觸發 ---
     reply_text = None
-    if any(k in msg for k in ["威力彩","大樂透","539","雙贏彩"]):
-        reply_text = lottery_gpt(msg)
-    elif msg.startswith("104:"):
-        reply_text = one04_gpt(msg[4:].strip())
-    elif msg.startswith("pt:"):
-        reply_text = partjob_gpt(msg[3:].strip())
-    elif msg.startswith("cb:") or msg.startswith("$:"):
+    if any(k in msg for k in ["威力彩","大樂透","539","雙贏彩"]): reply_text = lottery_gpt(msg)
+    elif msg.startswith("104:"): reply_text = one04_gpt(msg[4:].strip())
+    elif msg.startswith("pt:"): reply_text = partjob_gpt(msg[3:].strip())
+    elif msg.startswith("cb:") or msg.startswith("$:"): 
         coin = msg[3:].strip() if msg.startswith("cb:") else msg[2:].strip()
         reply_text = crypto_gpt(coin)
-    elif "金價" in msg or "黃金" in msg:
-        reply_text = gold_gpt()
-    elif "鉑" in msg or "platinum" in msg.lower():
-        reply_text = platinum_gpt()
-    elif "USD" in msg or "美金" in msg:
-        reply_text = money_gpt("USD")
-    elif "JPY" in msg or "日幣" in msg:
-        reply_text = money_gpt("JPY")
-    elif "大盤" in msg or "台股" in msg:
-        reply_text = stock_gpt("大盤")
-    elif "美股" in msg:
-        reply_text = stock_gpt("美盤")
-    elif "天氣" in msg:
-        reply_text = weather_gpt("台北市")
-     else:
+    elif "金價" in msg or "黃金" in msg: reply_text = gold_gpt()
+    elif "鉑" in msg or "platinum" in msg.lower(): reply_text = platinum_gpt()
+    elif "USD" in msg or "美金" in msg: reply_text = money_gpt("USD")
+    elif "JPY" in msg or "日幣" in msg: reply_text = money_gpt("JPY")
+    elif "大盤" in msg or "台股" in msg: reply_text = stock_gpt("大盤")
+    elif "美股" in msg: reply_text = stock_gpt("美盤")
+    elif "天氣" in msg: reply_text = weather_gpt("台北市")
+    else:
         stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", msg)
         stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)
         if stock_code:
             reply_text = stock_gpt(stock_code.group())
-        elif stockUS_code:
+        elif stockUS
+            elif stockUS_code:
             reply_text = stock_gpt(stockUS_code.group())
         else:
-            # --- 繁體中文說明 ---
-            # 沒有觸發功能 → 進入 LLM 模式，使用人設 + 情緒
-            # ------------------------------------------ #
+            # --- 預設：走 LLM 人設聊天 + 情緒分析 ---
             conversation_history.setdefault(user_id, [])
             conversation_history[user_id].append({"role": "user", "content": msg})
 
-            # 保留最近對話，避免爆 token
             if len(conversation_history[user_id]) > MAX_HISTORY_LEN * 2:
                 conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY_LEN*2:]
 
-            # 情緒分析
             sentiment = await analyze_sentiment(msg)
-
-            # 構建人設 prompt
             persona_prompt = build_persona_prompt(user_id, sentiment)
             full_messages = [{"role": "system", "content": persona_prompt}] + conversation_history[user_id]
 
             reply_text = groq_chat_completion(full_messages, max_tokens=600, temperature=0.7)
 
-            # 存入歷史
             conversation_history[user_id].append({"role": "assistant", "content": reply_text})
 
+    # --- 回覆訊息 ---
+    if not reply_text:
+        reply_text = "抱歉，目前無法提供回應，請稍後再試。"
+
+    quick_items = build_quick_reply_items(is_group, bot_name)
+    reply_message = TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_items))
     try:
-        quick_items = build_quick_reply_items(is_group, bot_name)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_items)))
+        line_bot_api.reply_message(reply_token, reply_message)
     except LineBotApiError as e:
-        logger.error(f"回覆訊息失敗: {e.error.message}", exc_info=True)
+        logger.error(f"回覆訊息失敗：{e.error.message}", exc_info=True)
 
 # ============================================
-# 簡單回覆工具
+# 簡單回覆
 # ============================================
-async def reply_simple(reply_token, text: str):
+async def reply_simple(reply_token, text):
     try:
         bot_name = line_bot_api.get_bot_info().display_name
         quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items)))
-    except Exception as e:
-        logger.error(f"reply_simple 發生錯誤: {e}")
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items))
+        )
+    except LineBotApiError as e:
+        logger.error(f"❌ 回覆訊息失敗: {e}")
+
+# ============================================
+# Postback 事件
+# ============================================
+@handler.add(PostbackEvent)
+async def handle_postback(event):
+    logger.info(f"Postback data: {event.postback.data}")
 
 # ============================================
 # 健康檢查
@@ -345,6 +399,9 @@ async def health_check():
 async def root():
     return {"message": "Service is live."}
 
+# ============================================
+# 主程式入口
+# ============================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 5000))
