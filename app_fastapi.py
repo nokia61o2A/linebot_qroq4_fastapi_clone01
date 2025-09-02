@@ -60,18 +60,18 @@ client = OpenAI(
 
 # Groq
 groq_client = Groq(api_key=GROQ_API_KEY)
-GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")   # 採用現行 3.1 8B
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")   # 備援同型號
+GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
 # 對話/狀態
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 auto_reply_status: Dict[str, bool] = {}
 
-# 使用者「人設 persona」儲存（可甜/可鹹/萌/酷）
+# 使用者「人設 persona」儲存
 user_persona: Dict[str, str] = {}
 
-# 人設詞典（可自行擴充）
+# 人設詞典
 PERSONAS: Dict[str, dict] = {
     "sweet": {
         "title": "甜美女友",
@@ -138,13 +138,13 @@ def update_line_webhook():
         res.raise_for_status()
         logger.info(f"✅ Webhook 更新成功: {res.status_code}")
 
-def show_loading_animation(user_id: str, seconds: int = 5):  # 修正：必須是5的倍數
+def show_loading_animation(user_id: str, seconds: int = 5):
     """單聊時顯示「輸入中」動畫"""
     url = "https://api.line.me/v2/bot/chat/loading/start"
     headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
     # 確保 seconds 是 5 的倍數且在 5-60 之間
     loading_seconds = max(5, min(60, seconds))
-    loading_seconds = (loading_seconds // 5) * 5  # 取最接近的 5 的倍數
+    loading_seconds = (loading_seconds // 5) * 5
     
     data = {"chatId": user_id, "loadingSeconds": loading_seconds}
     try:
@@ -242,32 +242,34 @@ async def get_reply_with_persona_and_sentiment(user_id: str, messages: list, sen
     return groq_chat_completion(full_messages, max_tokens=600, temperature=0.7)
 
 # ============================================
-# 5) Quick Reply 群組：固定顯示人設切換
+# 5) Quick Reply 群組：使用下拉選單減少佔位
 # ============================================
 def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
-    """統一產生 Quick Reply，『人設選單固定置頂』"""
+    """使用群組下拉選單減少 Quick Reply 按鈕數量"""
     items: List[QuickReplyButton] = []
 
-    # 人設選單（永遠顯示在最前面）
-    for label, text in [("甜", "甜"), ("鹹", "鹹"), ("萌", "萌"), ("酷", "酷")]:
-        items.append(QuickReplyButton(action=MessageAction(label=f"人設：{label}", text=text)))
+    # 1. 人設選單（下拉式）
+    items.append(QuickReplyButton(
+        action=MessageAction(label="💖 人設選擇", text="人設選單")
+    ))
 
-    # 常用功能（減少數量以符合13個限制）
+    # 2. 金融服務選單（下拉式）
+    items.append(QuickReplyButton(
+        action=MessageAction(label="💰 金融服務", text="金融選單")
+    ))
+
+    # 3. 彩票服務選單（下拉式）
+    items.append(QuickReplyButton(
+        action=MessageAction(label="🎰 彩票服務", text="彩票選單")
+    ))
+
+    # 4. 系統設定（固定顯示）
     prefix = f"@{bot_name} " if is_group else ""
-    common = [
-        ("開啟自動回答", "開啟自動回答"),
-        ("關閉自動回答", "關閉自動回答"),
-        ("台股大盤", f"{prefix}大盤"),
-        ("美股大盤", f"{prefix}美股"),
-        ("大樂透", f"{prefix}大樂透"),
-        ("金價", f"{prefix}金價"),
-        ("日元", f"{prefix}JPY"),
-    ]
-    
-    # 確保總數不超過13個
-    max_buttons = 13 - len(items)
-    for label, text in common[:max_buttons]:
-        items.append(QuickReplyButton(action=MessageAction(label=label, text=text)))
+    items.extend([
+        QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")),
+        QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答")),
+        QuickReplyButton(action=MessageAction(label="🌤️ 天氣查詢", text=f"{prefix}天氣"))
+    ])
 
     return items
 
@@ -303,19 +305,31 @@ async def handle_message(event):
         event.source.room_id if isinstance(event.source, SourceRoom) else user_id
     )
     if chat_id not in auto_reply_status:
-        auto_reply_status[chat_id] = not is_group  # 單聊預設開啟；群組預設關閉
+        auto_reply_status[chat_id] = not is_group
 
     if not is_group:
         show_loading_animation(user_id)
 
-    # 去掉 @botName 前綴（群組中）
     bot_name = line_bot_api.get_bot_info().display_name
     processed_msg = msg
     if msg.startswith('@'):
         processed_msg = re.sub(r'^@\S+\s*', '', msg).strip()
 
-    # 自動回覆開關
+    # 處理選單指令
     low = processed_msg.lower()
+    if low == '人設選單':
+        await reply_simple(reply_token, "💖 請選擇人設風格：\n\n• 甜 - 溫柔體貼女友\n• 鹹 - 傲嬌吐槽女友\n• 萌 - 可愛動漫風格\n• 酷 - 冷靜御姐風格")
+        return
+    elif low == '金融選單':
+        prefix = f"@{bot_name} " if is_group else ""
+        await reply_simple(reply_token, f"💰 金融服務：\n\n• 大盤 - {prefix}大盤\n• 美股 - {prefix}美股\n• 金價 - {prefix}金價\n• 日元 - {prefix}JPY\n• 美元 - {prefix}USD")
+        return
+    elif low == '彩票選單':
+        prefix = f"@{bot_name} " if is_group else ""
+        await reply_simple(reply_token, f"🎰 彩票服務：\n\n• 大樂透 - {prefix}大樂透\n• 威力彩 - {prefix}威力彩\n• 539 - {prefix}539")
+        return
+
+    # 自動回覆開關
     if low == '開啟自動回答':
         auto_reply_status[chat_id] = True
         await reply_simple(reply_token, "✅ 已開啟自動回答")
@@ -329,7 +343,6 @@ async def handle_message(event):
     if not auto_reply_status[chat_id]:
         if not any(name in msg.lower() for name in bot_name.lower().split()):
             return
-        # 僅保留 @bot 後文字
         parts = re.split(r'@\S+\s*', msg, maxsplit=1)
         processed_msg = parts[1].strip() if len(parts) > 1 else ""
 
