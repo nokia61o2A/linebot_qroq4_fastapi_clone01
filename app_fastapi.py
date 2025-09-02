@@ -1,6 +1,7 @@
 """
 AI 醬  git@github.com-nokia61o2A:nokia61o2A/linebot_qroq4_fastapi.git
 """
+import os
 import re
 import asyncio
 import logging
@@ -27,15 +28,41 @@ from openai import OpenAI
 from groq import Groq
 
 # === 自訂指令模組 ===
-from my_commands.lottery_gpt import lottery_gpt
-from my_commands.gold_gpt import gold_gpt
-from my_commands.platinum_gpt import platinum_gpt
-from my_commands.money_gpt import money_gpt
-from my_commands.one04_gpt import one04_gpt
-from my_commands.partjob_gpt import partjob_gpt
-from my_commands.crypto_coin_gpt import crypto_gpt
-from my_commands.stock.stock_gpt import stock_gpt
-from my_commands.weather_gpt import weather_gpt  # 台灣氣象分析
+# 注意：這些模組需要存在於您的專案中
+try:
+    from my_commands.lottery_gpt import lottery_gpt
+    from my_commands.gold_gpt import gold_gpt
+    from my_commands.platinum_gpt import platinum_gpt
+    from my_commands.money_gpt import money_gpt
+    from my_commands.one04_gpt import one04_gpt
+    from my_commands.partjob_gpt import partjob_gpt
+    from my_commands.crypto_coin_gpt import crypto_gpt
+    from my_commands.stock.stock_gpt import stock_gpt
+    from my_commands.weather_gpt import weather_gpt
+    
+    # 檢查並更新自訂模組中的模型設定
+    import my_commands.lottery_gpt as lottery_module
+    import my_commands.weather_gpt as weather_module
+    
+    # 更新已停用的模型
+    if hasattr(lottery_module, 'GROQ_MODEL'):
+        lottery_module.GROQ_MODEL = "llama-3.1-8b-instant"
+    if hasattr(weather_module, 'GROQ_MODEL'):
+        weather_module.GROQ_MODEL = "llama-3.1-8b-instant"
+        
+except ImportError as e:
+    logger = logging.getLogger("uvicorn.error")
+    logger.error(f"導入自訂模組失敗: {e}")
+    # 提供備用函數以避免崩潰
+    def lottery_gpt(msg): return "彩票功能暫不可用"
+    def gold_gpt(): return "金價查詢功能暫不可用"
+    def platinum_gpt(): return "鉑金查詢功能暫不可用"
+    def money_gpt(currency): return f"{currency}匯率查詢功能暫不可用"
+    def one04_gpt(msg): return "104人力銀行功能暫不可用"
+    def partjob_gpt(msg): return "打工功能暫不可用"
+    def crypto_gpt(coin): return f"{coin}加密貨幣功能暫不可用"
+    def stock_gpt(code): return f"{code}股票功能暫不可用"
+    def weather_gpt(city): return f"{city}天氣功能暫不可用"
 
 # ============================================
 # 1) 基礎設定與客戶端初始化
@@ -59,10 +86,10 @@ client = OpenAI(
     timeout=15.0
 )
 
-# Groq
+# Groq - 使用有效的模型
 groq_client = Groq(api_key=GROQ_API_KEY)
 GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-70b-versatile")
 
 # 對話/狀態
 conversation_history: Dict[str, List[dict]] = {}
@@ -237,7 +264,7 @@ async def get_reply_with_persona_and_sentiment(user_id: str, messages: list, sen
     return groq_chat_completion(full_messages, max_tokens=600, temperature=0.7)
 
 # ============================================
-# 5) Quick Reply + Flex 垂直按鈕選單
+# 5) Quick Reply + Flex 垂直按鈕選單（優化版）
 # ============================================
 def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
     """縮減為必要按鈕（<= 13）"""
@@ -253,11 +280,10 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
     ])
     return items
 
-# -- 通用 Flex「垂直按鈕選單」產生器
+# -- 優化後的 Flex「垂直按鈕選單」產生器
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
     """
-    建立一張 Bubble，內容：標題/副標題 + 垂直多個按鈕
-    每個按鈕對應 MessageAction（點了直接發文字）
+    建立一張 Bubble，內容：標題/副標題 + 垂直多個按鈕（水平置中）
     """
     buttons: List[ButtonComponent] = []
     for act in actions:
@@ -266,58 +292,99 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
                 style="primary",
                 height="sm",
                 action=act,
-                margin="md"
+                margin="md",
+                color="#905C44",  # 深棕色，更溫暖的色調
+                gravity="center"  # 水平置中
             )
         )
 
     bubble = BubbleContainer(
+        size="mega",
         header=BoxComponent(
             layout="vertical",
             contents=[
-                TextComponent(text=title, weight="bold", size="lg"),
-                TextComponent(text=subtitle, size="sm", color="#888888", wrap=True),
+                TextComponent(
+                    text=title, 
+                    weight="bold", 
+                    size="xl",
+                    color="#FFFFFF",
+                    align="center"
+                ),
+                TextComponent(
+                    text=subtitle, 
+                    size="sm", 
+                    color="#EEEEEE", 
+                    wrap=True,
+                    align="center",
+                    margin="md"
+                ),
             ],
             spacing="sm",
-            paddingAll="16px"
+            paddingAll="20px",
+            backgroundColor="#FF6B6B",  # 粉色頭部
+            cornerRadius="lg"
         ),
         body=BoxComponent(
             layout="vertical",
             contents=buttons,
-            spacing="md",
-            paddingAll="16px"
-        )
+            spacing="sm",
+            paddingAll="20px",
+            backgroundColor="#FFF9F2",  # 淺米色背景
+            cornerRadius="lg"
+        ),
+        footer=BoxComponent(
+            layout="vertical",
+            contents=[
+                TextComponent(
+                    text="💖 點擊按鈕快速執行",
+                    size="xs",
+                    color="#888888",
+                    align="center",
+                    margin="md"
+                )
+            ],
+            paddingAll="10px"
+        ),
+        styles={
+            "header": {
+                "separator": True,
+                "separatorColor": "#E0E0E0"
+            }
+        }
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
 
-# -- 三個選單的內容（人設/金融/彩票）
-def flex_menu_persona() -> FlexSendMessage:
-    actions = [
-        MessageAction(label="甜美女友", text="甜"),
-        MessageAction(label="傲嬌女友", text="鹹"),
-        MessageAction(label="萌系女友", text="萌"),
-        MessageAction(label="酷系御姐", text="酷"),
-    ]
-    return build_flex_menu("人設選擇", "切換 AI 女友的說話風格", actions)
-
+# -- 優化後的金融選單
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""
     actions = [
-        MessageAction(label="台股大盤", text=f"{prefix}大盤"),
-        MessageAction(label="美股大盤", text=f"{prefix}美股"),
-        MessageAction(label="金價查詢", text=f"{prefix}金價"),
-        MessageAction(label="日元匯率", text=f"{prefix}JPY"),
-        MessageAction(label="美元匯率", text=f"{prefix}USD"),
+        MessageAction(label="📈 台股大盤", text=f"{prefix}大盤"),
+        MessageAction(label="📊 美股大盤", text=f"{prefix}美股"),
+        MessageAction(label="💰 金價查詢", text=f"{prefix}金價"),
+        MessageAction(label="💴 日元匯率", text=f"{prefix}JPY"),
+        MessageAction(label="💵 美元匯率", text=f"{prefix}USD"),
     ]
-    return build_flex_menu("金融服務", "常用即時查詢快捷鍵", actions)
+    return build_flex_menu("💰 金融服務", "點擊下方按鈕快速查詢最新資訊", actions)
 
+# -- 優化後的彩票選單
 def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""
     actions = [
-        MessageAction(label="大樂透", text=f"{prefix}大樂透"),
-        MessageAction(label="威力彩", text=f"{prefix}威力彩"),
-        MessageAction(label="539",   text=f"{prefix}539"),
+        MessageAction(label="🎰 大樂透", text=f"{prefix}大樂透"),
+        MessageAction(label="🎯 威力彩", text=f"{prefix}威力彩"),
+        MessageAction(label="🔢 539",   text=f"{prefix}539"),
     ]
-    return build_flex_menu("彩票服務", "快速開單與走勢查詢", actions)
+    return build_flex_menu("🎰 彩票服務", "快速開單與最新開獎資訊", actions)
+
+# -- 優化後的人設選單
+def flex_menu_persona() -> FlexSendMessage:
+    actions = [
+        MessageAction(label="🌸 甜美女友", text="甜"),
+        MessageAction(label="😏 傲嬌女友", text="鹹"),
+        MessageAction(label="✨ 萌系女友", text="萌"),
+        MessageAction(label="🧊 酷系御姐", text="酷"),
+    ]
+    return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
 
 # ============================================
 # 6) Webhook 與訊息處理流程
