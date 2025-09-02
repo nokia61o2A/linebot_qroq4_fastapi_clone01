@@ -20,8 +20,7 @@ from linebot.models import (
     QuickReply, QuickReplyButton, MessageAction,
     SourceGroup, SourceRoom, PostbackEvent,
     FlexSendMessage, BubbleContainer, BoxComponent, TextComponent,
-    ButtonComponent, SeparatorComponent, SpacerComponent, IconComponent,
-    URIAction, PostbackAction
+    ButtonComponent, SeparatorComponent, URIAction, PostbackAction
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
