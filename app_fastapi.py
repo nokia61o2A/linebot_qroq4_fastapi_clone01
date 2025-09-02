@@ -60,18 +60,18 @@ client = OpenAI(
 
 # Groq
 groq_client = Groq(api_key=GROQ_API_KEY)
-GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")   # -- 新增：採用現行 3.1 8B
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")   # -- 新增：備援同型號
+GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")   # 採用現行 3.1 8B
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")   # 備援同型號
 
 # 對話/狀態
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 auto_reply_status: Dict[str, bool] = {}
 
-# -- 新增：使用者「人設 persona」儲存（可甜/可鹹/萌/酷）
+# 使用者「人設 persona」儲存（可甜/可鹹/萌/酷）
 user_persona: Dict[str, str] = {}
 
-# -- 新增：人設詞典（可自行擴充）
+# 人設詞典（可自行擴充）
 PERSONAS: Dict[str, dict] = {
     "sweet": {
         "title": "甜美女友",
@@ -129,7 +129,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 router = APIRouter()
 
 def update_line_webhook():
-    """啟動時更新 LINE Webhook 到 /callback（Render 需設好 BASE_URL）"""
+    """啟動時更新 LINE Webhook 到 /callback"""
     headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
     json_data = {"endpoint": f"{BASE_URL}/callback"}
     with httpx.Client() as c:
@@ -137,20 +137,22 @@ def update_line_webhook():
                     headers=headers, json=json_data, timeout=10.0)
         res.raise_for_status()
         logger.info(f"✅ Webhook 更新成功: {res.status_code}")
-# 參考：https://developers.line.biz/en/docs/messaging-api/using-webhooks/
 
-def show_loading_animation(user_id: str, seconds: int = 5):
-    """單聊時顯示「輸入中」動畫，提高體感"""
+def show_loading_animation(user_id: str, seconds: int = 5):  # 修正：必須是5的倍數
+    """單聊時顯示「輸入中」動畫"""
     url = "https://api.line.me/v2/bot/chat/loading/start"
     headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
-    data = {"chatId": user_id, "loadingSeconds": seconds}
+    # 確保 seconds 是 5 的倍數且在 5-60 之間
+    loading_seconds = max(5, min(60, seconds))
+    loading_seconds = (loading_seconds // 5) * 5  # 取最接近的 5 的倍數
+    
+    data = {"chatId": user_id, "loadingSeconds": loading_seconds}
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=5)
         if resp.status_code != 202:
             logger.error(f"❌ 載入動畫錯誤: {resp.status_code} {resp.text}")
     except Exception as e:
         logger.error(f"❌ 載入動畫請求失敗: {e}", exc_info=True)
-# 參考：https://developers.line.biz/en/reference/messaging-api/#chat-loading
 
 def calculate_english_ratio(text: str) -> float:
     letters = [c for c in text if c.isalpha()]
@@ -187,12 +189,9 @@ def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
         except Exception as e_fallback:
             logger.error(f"備用模型 {GROQ_MODEL_FALLBACK} 也失敗: {e_fallback}")
             return "抱歉，AI 服務暫時不可用。"
-# 參考：https://console.groq.com/docs/api-reference
 
 async def analyze_sentiment(text: str) -> str:
-    """
-    使用 Groq 判斷訊息情緒；回傳：positive/neutral/negative/angry
-    """
+    """使用 Groq 判斷訊息情緒"""
     try:
         messages = [
             {"role": "system", "content": "你是情感分析助手，只輸出一個情緒標籤。"},
@@ -205,7 +204,7 @@ async def analyze_sentiment(text: str) -> str:
         return "neutral"
 
 # ============================================
-# 4) 人設 Cosplay：可甜/可鹹/萌/酷（Day 9）
+# 4) 人設 Cosplay：可甜/可鹹/萌/酷
 # ============================================
 def set_user_persona(user_id: str, key: str) -> str:
     """設定使用者人設；不合法鍵值回退 sweet"""
@@ -235,7 +234,6 @@ def build_persona_prompt(user_id: str, sentiment: str) -> str:
 - neutral：自然聊天，維持輕鬆流暢。
 請用繁體中文回覆，句子精簡、自然、有溫度。
 """.strip()
-# 參考（Prompt 設計）：https://platform.openai.com/docs/guides/prompt-engineering
 
 async def get_reply_with_persona_and_sentiment(user_id: str, messages: list, sentiment: str) -> str:
     """把人設 + 情緒 一起注入 system，再用 Groq 生成回覆"""
@@ -244,17 +242,17 @@ async def get_reply_with_persona_and_sentiment(user_id: str, messages: list, sen
     return groq_chat_completion(full_messages, max_tokens=600, temperature=0.7)
 
 # ============================================
-# 5) Quick Reply 群組：固定顯示人設切換（此版重點）
+# 5) Quick Reply 群組：固定顯示人設切換
 # ============================================
 def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
-    """# -- 新增：統一產生 Quick Reply，『人設選單固定置頂』"""
+    """統一產生 Quick Reply，『人設選單固定置頂』"""
     items: List[QuickReplyButton] = []
 
-    # -- 人設選單（永遠顯示在最前面）
+    # 人設選單（永遠顯示在最前面）
     for label, text in [("甜", "甜"), ("鹹", "鹹"), ("萌", "萌"), ("酷", "酷")]:
         items.append(QuickReplyButton(action=MessageAction(label=f"人設：{label}", text=text)))
 
-    # -- 常用功能（依你原本設計）
+    # 常用功能（減少數量以符合13個限制）
     prefix = f"@{bot_name} " if is_group else ""
     common = [
         ("開啟自動回答", "開啟自動回答"),
@@ -262,17 +260,16 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         ("台股大盤", f"{prefix}大盤"),
         ("美股大盤", f"{prefix}美股"),
         ("大樂透", f"{prefix}大樂透"),
-        ("威力彩", f"{prefix}威力彩"),
         ("金價", f"{prefix}金價"),
         ("日元", f"{prefix}JPY"),
-        ("美元", f"{prefix}USD"),
-        (f"{bot_name}", f"@{bot_name}"),
     ]
-    for label, text in common:
+    
+    # 確保總數不超過13個
+    max_buttons = 13 - len(items)
+    for label, text in common[:max_buttons]:
         items.append(QuickReplyButton(action=MessageAction(label=label, text=text)))
 
     return items
-# 參考（Quick Reply）：https://developers.line.biz/en/docs/messaging-api/message-types/#quick-reply
 
 # ============================================
 # 6) Webhook 與訊息處理流程
@@ -336,7 +333,7 @@ async def handle_message(event):
         parts = re.split(r'@\S+\s*', msg, maxsplit=1)
         processed_msg = parts[1].strip() if len(parts) > 1 else ""
 
-    # -- 人設切換指令（多個同義詞）
+    # 人設切換指令
     if low in ("甜", "sweet", "溫柔"):
         key = set_user_persona(user_id, "sweet")
         await reply_simple(reply_token, f"已切換人設：{PERSONAS[key]['title']} 🌸")
@@ -395,7 +392,7 @@ async def handle_message(event):
             elif stockUS_code:
                 reply_text = stock_gpt(stockUS_code.group())
             else:
-                # -- 情感分析 → 注入人設 system → 生成回覆（Day 8 + Day 9）
+                # 情感分析 → 注入人設 system → 生成回覆
                 sentiment = await analyze_sentiment(processed_msg)
                 reply_text = await get_reply_with_persona_and_sentiment(
                     user_id,
@@ -410,11 +407,11 @@ async def handle_message(event):
     if not reply_text:
         reply_text = "抱歉，目前無法提供回應，請稍後再試。"
 
-    # -- 使用『固定群組』Quick Reply（人設置頂）
-    quick_items = build_quick_reply_items(is_group, bot_name)  # -- 新增：統一從這裡產生
-    # 如果英文比例高 → 動態加上翻譯鍵（加在末尾，避免擠掉人設）
-    if calculate_english_ratio(reply_text) > 0.1:
-        quick_items.append(QuickReplyButton(action=MessageA3-3-3-3-ction(label="翻譯成中文", text="請將上述內容翻譯成中文")))
+    # 使用統一 Quick Reply
+    quick_items = build_quick_reply_items(is_group, bot_name)
+    # 如果英文比例高 → 動態加上翻譯鍵
+    if calculate_english_ratio(reply_text) > 0.1 and len(quick_items) < 13:
+        quick_items.append(QuickReplyButton(action=MessageAction(label="翻譯成中文", text="請將上述內容翻譯成中文")))
 
     reply_message = TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_items))
     try:
@@ -425,9 +422,8 @@ async def handle_message(event):
 
 async def reply_simple(reply_token, text):
     try:
-        # -- 也套用固定 Quick Reply（讓切換人設永遠可見）
         bot_name = line_bot_api.get_bot_info().display_name
-        quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name)  # -- 新增
+        quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name)
         line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items)))
     except LineBotApiError as e:
         logger.error(f"❌ 回覆訊息失敗: {e}")
