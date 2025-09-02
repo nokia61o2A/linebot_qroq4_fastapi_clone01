@@ -27,43 +27,6 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 from openai import OpenAI
 from groq import Groq
 
-# === 自訂指令模組 ===
-# 注意：這些模組需要存在於您的專案中
-try:
-    from my_commands.lottery_gpt import lottery_gpt
-    from my_commands.gold_gpt import gold_gpt
-    from my_commands.platinum_gpt import platinum_gpt
-    from my_commands.money_gpt import money_gpt
-    from my_commands.one04_gpt import one04_gpt
-    from my_commands.partjob_gpt import partjob_gpt
-    from my_commands.crypto_coin_gpt import crypto_gpt
-    from my_commands.stock.stock_gpt import stock_gpt
-    from my_commands.weather_gpt import weather_gpt
-    
-    # 檢查並更新自訂模組中的模型設定
-    import my_commands.lottery_gpt as lottery_module
-    import my_commands.weather_gpt as weather_module
-    
-    # 更新已停用的模型
-    if hasattr(lottery_module, 'GROQ_MODEL'):
-        lottery_module.GROQ_MODEL = "llama-3.1-8b-instant"
-    if hasattr(weather_module, 'GROQ_MODEL'):
-        weather_module.GROQ_MODEL = "llama-3.1-8b-instant"
-        
-except ImportError as e:
-    logger = logging.getLogger("uvicorn.error")
-    logger.error(f"導入自訂模組失敗: {e}")
-    # 提供備用函數以避免崩潰
-    def lottery_gpt(msg): return "彩票功能暫不可用"
-    def gold_gpt(): return "金價查詢功能暫不可用"
-    def platinum_gpt(): return "鉑金查詢功能暫不可用"
-    def money_gpt(currency): return f"{currency}匯率查詢功能暫不可用"
-    def one04_gpt(msg): return "104人力銀行功能暫不可用"
-    def partjob_gpt(msg): return "打工功能暫不可用"
-    def crypto_gpt(coin): return f"{coin}加密貨幣功能暫不可用"
-    def stock_gpt(code): return f"{code}股票功能暫不可用"
-    def weather_gpt(city): return f"{city}天氣功能暫不可用"
-
 # ============================================
 # 1) 基礎設定與客戶端初始化
 # ============================================
@@ -79,17 +42,75 @@ GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler      = WebhookHandler(CHANNEL_SECRET)
 
-# OpenAI（保留：主要仍以 Groq 為主）
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url="https://free.v36.cm/v1",
-    timeout=15.0
-)
-
 # Groq - 使用有效的模型
 groq_client = Groq(api_key=GROQ_API_KEY)
 GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-70b-versatile")
+
+# 設置環境變數，讓所有模組使用正確的模型
+os.environ["GROQ_MODEL"] = GROQ_MODEL_PRIMARY
+
+# === 自訂指令模組 ===
+# 提供備用函數以避免崩潰
+def lottery_gpt(msg): 
+    return "彩票分析功能維護中，請稍後再試 🎰"
+
+def gold_gpt(): 
+    return "金價查詢功能維護中，請稍後再試 💰"
+
+def platinum_gpt(): 
+    return "鉑金查詢功能維護中，請稍後再試 ⚪"
+
+def money_gpt(currency): 
+    return f"{currency}匯率查詢功能維護中，請稍後再試 💱"
+
+def one04_gpt(msg): 
+    return "104人力銀行功能維護中，請稍後再試 👔"
+
+def partjob_gpt(msg): 
+    return "打工功能維護中，請稍後再試 💼"
+
+def crypto_gpt(coin): 
+    return f"{coin}加密貨幣功能維護中，請稍後再試 ₿"
+
+def stock_gpt(code): 
+    return f"{code}股票功能維護中，請稍後再試 📈"
+
+def weather_gpt(city): 
+    return f"{city}天氣功能維護中，請稍後再試 🌤️"
+
+# 嘗試動態更新自訂模組的模型設定
+def update_custom_modules_model():
+    """動態更新自訂模組中的模型設定"""
+    custom_modules = [
+        'my_commands.lottery_gpt',
+        'my_commands.gold_gpt', 
+        'my_commands.platinum_gpt',
+        'my_commands.money_gpt',
+        'my_commands.one04_gpt',
+        'my_commands.partjob_gpt',
+        'my_commands.crypto_coin_gpt',
+        'my_commands.stock.stock_gpt',
+        'my_commands.weather_gpt'
+    ]
+    
+    for module_name in custom_modules:
+        try:
+            module = __import__(module_name, fromlist=[''])
+            if hasattr(module, 'groq_client'):
+                # 更新現有的 groq_client 實例
+                module.groq_client = Groq(api_key=GROQ_API_KEY)
+            if hasattr(module, 'GROQ_MODEL'):
+                # 更新模型名稱
+                module.GROQ_MODEL = GROQ_MODEL_PRIMARY
+            # 設置模組級別的環境變數
+            setattr(module, 'groq_client', Groq(api_key=GROQ_API_KEY))
+            setattr(module, 'GROQ_MODEL', GROQ_MODEL_PRIMARY)
+            
+        except ImportError as e:
+            logger.warning(f"無法導入模組 {module_name}: {e}")
+        except Exception as e:
+            logger.warning(f"更新模組 {module_name} 時發生錯誤: {e}")
 
 # 對話/狀態
 conversation_history: Dict[str, List[dict]] = {}
@@ -134,8 +155,9 @@ PERSONAS: Dict[str, dict] = {
 async def lifespan(app: FastAPI):
     try:
         update_line_webhook()
+        update_custom_modules_model()  # 啟動時更新自訂模組
     except Exception as e:
-        logger.error(f"❌ 更新 Webhook 失敗: {e}", exc_info=True)
+        logger.error(f"❌ 啟動初始化失敗: {e}", exc_info=True)
     yield
 
 app = FastAPI(
@@ -293,8 +315,8 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
                 height="sm",
                 action=act,
                 margin="md",
-                color="#905C44",  # 深棕色，更溫暖的色調
-                gravity="center"  # 水平置中
+                color="#905C44",
+                gravity="center"
             )
         )
 
@@ -321,7 +343,7 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
             ],
             spacing="sm",
             paddingAll="20px",
-            backgroundColor="#FF6B6B",  # 粉色頭部
+            backgroundColor="#FF6B6B",
             cornerRadius="lg"
         ),
         body=BoxComponent(
@@ -329,7 +351,7 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
             contents=buttons,
             spacing="sm",
             paddingAll="20px",
-            backgroundColor="#FFF9F2",  # 淺米色背景
+            backgroundColor="#FFF9F2",
             cornerRadius="lg"
         ),
         footer=BoxComponent(
@@ -344,13 +366,7 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
                 )
             ],
             paddingAll="10px"
-        ),
-        styles={
-            "header": {
-                "separator": True,
-                "separatorColor": "#E0E0E0"
-            }
-        }
+        )
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
 
@@ -483,7 +499,7 @@ async def handle_message(event):
 
     reply_text = None
     try:
-        # 內建指令路由
+        # 內建指令路由 - 使用備用函數，避免模組錯誤
         if any(k in processed_msg for k in ["威力彩", "大樂透", "539", "雙贏彩"]):
             reply_text = lottery_gpt(processed_msg)
         elif processed_msg.startswith("104:"):
