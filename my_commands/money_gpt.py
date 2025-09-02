@@ -48,8 +48,8 @@ def get_reply(messages):
     return reply
 
 # 擷取匯率資料
-def fetch_jpy_rates(kind):
-    # 目標網址
+def fetch_currency_rates(kind):
+    # 目標網址 - 使用正確的台灣銀行匯率API
     url = f"https://rate.bot.com.tw/xrt/quote/day/{kind}"
 
     # 最大重試次數
@@ -124,7 +124,7 @@ def fetch_jpy_rates(kind):
 # 生成分析報告內容
 def generate_content_msg(kind):
     # 獲取和處理資料
-    money_prices_df = fetch_jpy_rates(kind)
+    money_prices_df = fetch_currency_rates(kind)
     if money_prices_df is None or money_prices_df.empty or money_prices_df['日期時間'].iloc[0] == 'N/A':
         return "無法獲取匯率資料，但服務仍在運行中。請稍後再試。"
 
