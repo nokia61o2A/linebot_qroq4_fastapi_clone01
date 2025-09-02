@@ -139,7 +139,7 @@ def update_line_webhook():
         logger.info(f"✅ Webhook 更新成功: {res.status_code}")
 # 參考：https://developers.line.biz/en/docs/messaging-api/using-webhooks/
 
-def show_loading_animation(user_id: str, seconds: int = 3):
+def show_loading_animation(user_id: str, seconds: int = 5):
     """單聊時顯示「輸入中」動畫，提高體感"""
     url = "https://api.line.me/v2/bot/chat/loading/start"
     headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
