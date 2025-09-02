@@ -80,7 +80,7 @@ def clear_translation_state(chat_id: str) -> None:
     translation_states[chat_id] = "none"
 
 #-- 繁體中文說明 --
-# 翻譯邏輯：將文字翻譯為指定語言
+# 翻譯邏輯：將文字翻譯為指定語言（異步函數）
 # ------------------------------------------ #
 async def translate_text(text: str, target_lang: str) -> str:
     if target_lang == "none":
@@ -98,10 +98,22 @@ async def translate_text(text: str, target_lang: str) -> str:
         return text  # 翻譯失敗時返回原文
 
 #-- 繁體中文說明 --
-# 處理訊息事件的主邏輯
+# 同步處理翻譯邏輯：在同步上下文中執行異步翻譯
+# ------------------------------------------ #
+def sync_translate_text(text: str, target_lang: str) -> str:
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        # 如果事件循環正在運行，使用 run_until_complete
+        return loop.run_until_complete(translate_text(text, target_lang))
+    else:
+        # 否則使用 asyncio.run
+        return asyncio.run(translate_text(text, target_lang))
+
+#-- 繁體中文說明 --
+# 處理訊息事件的主邏輯（改為同步函數以兼容 linebot 的 WebhookHandler）
 # ------------------------------------------ #
 @handler.add(MessageEvent, message=TextMessage)
-async def handle_message(event: MessageEvent):
+def handle_message(event: MessageEvent):
     chat_id = event.source.group_id if isinstance(event.source, SourceGroup) else \
               event.source.room_id if isinstance(event.source, SourceRoom) else \
               event.source.user_id
@@ -115,27 +127,24 @@ async def handle_message(event: MessageEvent):
             reply = f"已設定此聊天室的翻譯語言為: {lang if lang != 'none' else '無'}"
         else:
             reply = "支援的語言: none, zh (中文), en (英文), vi (越南文), jp (日文)"
-        await line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply)
-        )
-        return
-
     # 檢查是否為彩票或金價指令
-    if user_message.startswith("/lottery"):
+    elif user_message.startswith("/lottery"):
         reply = lottery_gpt(user_message)
     elif user_message.startswith("/gold"):
         reply = gold_gpt(user_message)
     else:
-        # 根據當前聊天室的翻譯狀態進行翻譯
+        # 根據當前聊天室的翻譯狀態進行翻譯（同步調用）
         target_lang = get_translation_state(chat_id)
-        reply = await translate_text(user_message, target_lang)
+        reply = sync_translate_text(user_message, target_lang)
 
     # 回覆訊息
-    await line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply)
-    )
+    try:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply)
+        )
+    except LineBotApiError as e:
+        logger.error(f"回覆訊息失敗: {e}")
 
 # --- 繁體中文說明 ---
 # FastAPI 應用程式初始化
