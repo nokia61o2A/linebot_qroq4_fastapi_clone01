@@ -204,8 +204,76 @@ async def callback(request: Request):
 
 app.include_router(router)
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message_wrapper(event):
+async def handle_message(event):
+    user_id = event.source.user_id
+    msg = event.message.text.strip()
+    reply_token = event.reply_token
+    is_group = isinstance(event.source, (SourceGroup, SourceRoom))
+
+    chat_id = event.source.group_id if isinstance(event.source, SourceGroup) else (
+        event.source.room_id if isinstance(event.source, SourceRoom) else user_id
+    )
+    if chat_id not in auto_reply_status:
+        auto_reply_status[chat_id] = not is_group
+
+    bot_name = line_bot_api.get_bot_info().display_name
+    low = msg.lower()
+
+    # --- 繁體中文說明 ---
+    # Flex 選單觸發
+    # ------------------------------------------ #
+    if low == '人設選單':
+        line_bot_api.reply_message(reply_token, flex_menu_persona()); return
+    elif low == '金融選單':
+        line_bot_api.reply_message(reply_token, flex_menu_finance(bot_name, is_group)); return
+    elif low == '彩票選單':
+        line_bot_api.reply_message(reply_token, flex_menu_lottery(bot_name, is_group)); return
+
+    reply_text = None
+    # --- 繁體中文說明 ---
+    # 功能觸發判斷
+    # ------------------------------------------ #
+    if any(k in msg for k in ["威力彩","大樂透","539","雙贏彩"]):
+        reply_text = lottery_gpt(msg)
+    elif msg.startswith("104:"):
+        reply_text = one04_gpt(msg[4:].strip())
+    elif msg.startswith("pt:"):
+        reply_text = partjob_gpt(msg[3:].strip())
+    elif msg.startswith("cb:") or msg.startswith("$:"):
+        coin = msg[3:].strip() if msg.startswith("cb:") else msg[2:].strip()
+        reply_text = crypto_gpt(coin)
+    elif "金價" in msg or "黃金" in msg:
+        reply_text = gold_gpt()
+    elif "鉑" in msg or "platinum" in msg.lower():
+        reply_text = platinum_gpt()
+    elif "USD" in msg or "美金" in msg:
+        reply_text = money_gpt("USD")
+    elif "JPY" in msg or "日幣" in msg:
+        reply_text = money_gpt("JPY")
+    elif "大盤" in msg or "台股" in msg:
+        reply_text = stock_gpt("大盤")
+    elif "美股" in msg:
+        reply_text = stock_gpt("美盤")
+    elif "天氣" in msg:
+        reply_text = weather_gpt("台北市")
+    else:
+        # --- 繁體中文說明 ---
+        # 股票代號自動判斷：台股數字代號 or 美股英文代號
+        # ------------------------------------------ #
+        stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", msg)      # 2330 / 2317
+        stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)         # AAPL / TSLA
+        if stock_code:
+            reply_text = stock_gpt(stock_code.group())
+        elif stockUS_code:
+            reply_text = stock_gpt(stockUS_code.group())
+        else:
+            reply_text = f"我收到訊息：{msg}（暫未定義功能）"
+
+    try:
+        quick_items = build_quick_reply_items(is_group, bot_name)
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_items)))
+    except LineBotApiError as e:
+        logger.error(f"回覆訊息失敗: {e.error.message}", exc_info=True)
     asyncio.create_task(handle_message(event))
 
 async def handle_message(event):
