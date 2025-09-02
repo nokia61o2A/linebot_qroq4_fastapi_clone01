@@ -1,3 +1,7 @@
+"""
+aibot FastAPI 應用程序初始化
+"""
+
 import os
 import re
 import asyncio
