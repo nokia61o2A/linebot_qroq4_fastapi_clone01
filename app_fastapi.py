@@ -19,7 +19,6 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
     QuickReply, QuickReplyButton, MessageAction,
     SourceGroup, SourceRoom, PostbackEvent,
-    # -- 變更：引入 Flex 相關元件
     FlexSendMessage, BubbleContainer, BoxComponent, TextComponent,
     ButtonComponent, SeparatorComponent, SpacerComponent, IconComponent,
     URIAction, PostbackAction
@@ -39,25 +38,21 @@ from my_commands.partjob_gpt import partjob_gpt
 from my_commands.crypto_coin_gpt import crypto_gpt
 from my_commands.stock.stock_gpt import stock_gpt
 from my_commands.weather_gpt import weather_gpt  # 台灣氣象分析
-# 參考：LINE webhook/SDK 基本整合 <https://developers.line.biz/en/docs/messaging-api/overview/>
 
 # ============================================
 # 1) 基礎設定與客戶端初始化
 # ============================================
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
-# 參考：FastAPI 日誌基本用法 <https://fastapi.tiangolo.com/advanced/using-request-directly/>
 
 BASE_URL       = os.getenv("BASE_URL")
 CHANNEL_TOKEN  = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
-# 參考：Render 環境變數設定 <https://render.com/docs/configure-environment-variables>
 
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler      = WebhookHandler(CHANNEL_SECRET)
-# 參考：LINE Python SDK 初始化 <https://github.com/line/line-bot-sdk-python>
 
 # OpenAI（保留：主要仍以 Groq 為主）
 client = OpenAI(
@@ -65,19 +60,16 @@ client = OpenAI(
     base_url="https://free.v36.cm/v1",
     timeout=15.0
 )
-# 參考：OpenAI Python SDK <https://platform.openai.com/docs/api-reference>
 
 # Groq
 groq_client = Groq(api_key=GROQ_API_KEY)
 GROQ_MODEL_PRIMARY  = os.getenv("GROQ_MODEL_PRIMARY",  "llama-3.1-8b-instant")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
-# 參考：Groq Chat Completions <https://console.groq.com/docs/api-reference>
 
 # 對話/狀態
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 auto_reply_status: Dict[str, bool] = {}
-# 參考：對話記憶策略 <https://platform.openai.com/docs/guides/prompt-engineering>
 
 # 使用者「人設 persona」儲存
 user_persona: Dict[str, str] = {}
@@ -109,7 +101,6 @@ PERSONAS: Dict[str, dict] = {
         "reply_format": "精煉 2~4 句，條列要點。"
     }
 }
-# 參考：角色化（persona）設計思路 <https://platform.openai.com/docs/guides/prompt-engineering#instruction-hierarchy>
 
 # ============================================
 # 2) FastAPI 應用與 Webhook 更新
@@ -121,7 +112,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ 更新 Webhook 失敗: {e}", exc_info=True)
     yield
-# 參考：FastAPI lifespan hooks <https://fastapi.tiangolo.com/advanced/events/>
 
 app = FastAPI(
     lifespan=lifespan,
@@ -129,7 +119,6 @@ app = FastAPI(
     description="Line Bot with FastAPI",
     version="1.0.0"
 )
-# 參考：FastAPI 基本應用 <https://fastapi.tiangolo.com/>
 
 @app.middleware("http")
 async def error_guard(request: Request, call_next):
@@ -138,11 +127,9 @@ async def error_guard(request: Request, call_next):
     except Exception as e:
         logger.error(f"請求處理失敗: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"detail": "Internal server error"})
-# 參考：FastAPI 中介層 <https://fastapi.tiangolo.com/advanced/middleware/>
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 router = APIRouter()
-# 參考：靜態檔案服務 <https://fastapi.tiangolo.com/tutorial/static-files/>
 
 def update_line_webhook():
     """啟動時更新 LINE Webhook 到 /callback"""
@@ -153,7 +140,6 @@ def update_line_webhook():
                     headers=headers, json=json_data, timeout=10.0)
         res.raise_for_status()
         logger.info(f"✅ Webhook 更新成功: {res.status_code}")
-# 參考：設定 webhook endpoint <https://developers.line.biz/en/reference/messaging-api/#set-webhook-endpoint-url>
 
 def show_loading_animation(user_id: str, seconds: int = 5):
     """單聊時顯示「輸入中」動畫（5 的倍數，5~60 秒）"""
@@ -168,7 +154,6 @@ def show_loading_animation(user_id: str, seconds: int = 5):
             logger.error(f"❌ 載入動畫錯誤: {resp.status_code} {resp.text}")
     except Exception as e:
         logger.error(f"❌ 載入動畫請求失敗: {e}", exc_info=True)
-# 參考：Chat Loading API <https://developers.line.biz/en/reference/messaging-api/#start-typing-indicator>
 
 def calculate_english_ratio(text: str) -> float:
     letters = [c for c in text if c.isalpha()]
@@ -176,7 +161,6 @@ def calculate_english_ratio(text: str) -> float:
         return 0.0
     english = [c for c in letters if ord(c) < 128]
     return len(english) / len(letters)
-# 參考：字元檢測（一般 Python 基礎）
 
 # ============================================
 # 3) Groq 呼叫封裝 & 情緒分析
@@ -206,7 +190,6 @@ def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
         except Exception as e_fallback:
             logger.error(f"備用模型 {GROQ_MODEL_FALLBACK} 也失敗: {e_fallback}")
             return "抱歉，AI 服務暫時不可用。"
-# 參考：Groq API Retries <https://console.groq.com/docs/api-reference#errors>
 
 async def analyze_sentiment(text: str) -> str:
     """使用 Groq 判斷訊息情緒"""
@@ -220,7 +203,6 @@ async def analyze_sentiment(text: str) -> str:
     except Exception as e:
         logger.error(f"情感分析失敗: {e}")
         return "neutral"
-# 參考：情感分類以 LLM 完成（少樣本提示）<https://platform.openai.com/docs/guides/prompt-engineering>
 
 # ============================================
 # 4) 人設 Cosplay：可甜/可鹹/萌/酷
@@ -231,11 +213,9 @@ def set_user_persona(user_id: str, key: str) -> str:
         key = "sweet"
     user_persona[user_id] = key
     return key
-# 參考：簡易使用者偏好持久化（以記憶體為例）
 
 def get_user_persona(user_id: str) -> str:
     return user_persona.get(user_id, "sweet")
-# 參考：預設人設
 
 def build_persona_prompt(user_id: str, sentiment: str) -> str:
     p_key = get_user_persona(user_id)
@@ -252,13 +232,11 @@ def build_persona_prompt(user_id: str, sentiment: str) -> str:
 - neutral：自然聊天，維持輕鬆流暢。
 請用繁體中文回覆，句子精簡、自然、有溫度。
 """.strip()
-# 參考：System Prompt 注入策略 <https://platform.openai.com/docs/guides/prompt-engineering#system-messages>
 
 async def get_reply_with_persona_and_sentiment(user_id: str, messages: list, sentiment: str) -> str:
     sys = build_persona_prompt(user_id, sentiment)
     full_messages = [{"role": "system", "content": sys}] + messages
     return groq_chat_completion(full_messages, max_tokens=600, temperature=0.7)
-# 參考：多訊息對話格式 <https://console.groq.com/docs/api-reference#chat-completions>
 
 # ============================================
 # 5) Quick Reply + Flex 垂直按鈕選單
@@ -276,9 +254,8 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         QuickReplyButton(action=MessageAction(label="🌤️ 天氣", text=f"{prefix}天氣")),
     ])
     return items
-# 參考：Quick Reply 限制（最多 13）<https://developers.line.biz/en/docs/messaging-api/using-quick-reply/>
 
-# -- 變更：通用 Flex「垂直按鈕選單」產生器
+# -- 通用 Flex「垂直按鈕選單」產生器
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
     """
     建立一張 Bubble，內容：標題/副標題 + 垂直多個按鈕
@@ -313,9 +290,8 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
         )
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
-# 參考：Flex Message 結構（Bubble/Box/Button）<https://developers.line.biz/en/docs/messaging-api/using-flex-messages/>
 
-# -- 變更：三個選單的內容（人設/金融/彩票）
+# -- 三個選單的內容（人設/金融/彩票）
 def flex_menu_persona() -> FlexSendMessage:
     actions = [
         MessageAction(label="甜美女友", text="甜"),
@@ -344,7 +320,6 @@ def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
         MessageAction(label="539",   text=f"{prefix}539"),
     ]
     return build_flex_menu("彩票服務", "快速開單與走勢查詢", actions)
-# 參考：MessageAction/按鈕互動 <https://developers.line.biz/en/reference/messaging-api/#message-action>
 
 # ============================================
 # 6) Webhook 與訊息處理流程
@@ -361,14 +336,12 @@ async def callback(request: Request):
         logger.error(f"Callback 處理失敗: {e}", exc_info=True)
         raise HTTPException(500, str(e))
     return JSONResponse({"message": "ok"})
-# 參考：Callback handler <https://developers.line.biz/en/docs/messaging-api/building-bot/#handle-events>
 
 app.include_router(router)
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message_wrapper(event):
     asyncio.create_task(handle_message(event))
-# 參考：LINE SDK 非同步處理（自建 task）
 
 async def handle_message(event):
     user_id = event.source.user_id
@@ -390,18 +363,17 @@ async def handle_message(event):
     if msg.startswith('@'):
         processed_msg = re.sub(r'^@\S+\s*', '', msg).strip()
 
-    # === Flex 選單觸發（取代純文字提示） ===
+    # === Flex 選單觸發（垂直按鈕選單） ===
     low = processed_msg.lower()
     if low == '人設選單':
-        line_bot_api.reply_message(reply_token, flex_menu_persona())   # -- 變更：送 Flex
+        line_bot_api.reply_message(reply_token, flex_menu_persona())
         return
     elif low == '金融選單':
-        line_bot_api.reply_message(reply_token, flex_menu_finance(bot_name, is_group))  # -- 變更
+        line_bot_api.reply_message(reply_token, flex_menu_finance(bot_name, is_group))
         return
     elif low == '彩票選單':
-        line_bot_api.reply_message(reply_token, flex_menu_lottery(bot_name, is_group))   # -- 變更
+        line_bot_api.reply_message(reply_token, flex_menu_lottery(bot_name, is_group))
         return
-    # 參考：Flex 訊息傳送 <https://developers.line.biz/en/reference/messaging-api/#send-flex-message>
 
     # 自動回覆開關
     if low == '開啟自動回答':
@@ -412,7 +384,6 @@ async def handle_message(event):
         auto_reply_status[chat_id] = False
         await reply_simple(reply_token, "✅ 已關閉自動回答")
         return
-    # 參考：模式切換（一般邏輯）
 
     # 群組未開啟時，僅在提到 bot 名稱時回覆
     if not auto_reply_status[chat_id]:
@@ -438,14 +409,12 @@ async def handle_message(event):
         key = set_user_persona(user_id, "cool")
         await reply_simple(reply_token, f"已切換人設：{PERSONAS[key]['title']} 🧊")
         return
-    # 參考：指令路由（簡單 if/elif）
 
     # 維持對話歷史
     conversation_history.setdefault(user_id, [])
     conversation_history[user_id].append({"role": "user", "content": processed_msg + "，請以繁體中文回答"})
     if len(conversation_history[user_id]) > MAX_HISTORY_LEN * 2:
         conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY_LEN*2:]
-    # 參考：歷史裁剪（token 控制）<https://platform.openai.com/docs/guides/prompt-engineering#keep-it-short>
 
     reply_text = None
     try:
@@ -492,7 +461,6 @@ async def handle_message(event):
     except Exception as e:
         logger.error(f"處理訊息時發生錯誤：{e}", exc_info=True)
         reply_text = "抱歉，伺服器發生錯誤，請稍後再試。"
-    # 參考：例外處理與回復
 
     if not reply_text:
         reply_text = "抱歉，目前無法提供回應，請稍後再試。"
@@ -508,7 +476,6 @@ async def handle_message(event):
         conversation_history[user_id].append({"role": "assistant", "content": reply_text})
     except LineBotApiError as e:
         logger.error(f"回覆訊息失敗：{e.error.message}", exc_info=True)
-# 參考：Reply API <https://developers.line.biz/en/reference/messaging-api/#send-reply-message>
 
 async def reply_simple(reply_token, text):
     try:
@@ -517,25 +484,20 @@ async def reply_simple(reply_token, text):
         line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items)))
     except LineBotApiError as e:
         logger.error(f"❌ 回覆訊息失敗: {e}")
-# 參考：簡易回覆封裝（實務常用）
 
 @handler.add(PostbackEvent)
 async def handle_postback(event):
     logger.info(f"Postback data: {event.postback.data}")
-# 參考：Postback 事件 <https://developers.line.biz/en/reference/messaging-api/#postback-event>
 
 @app.get("/healthz")
 async def health_check():
     return {"status": "ok"}
-# 參考：健康檢查端點（Render 用）<https://render.com/docs/health-checks>
 
 @app.get("/")
 async def root():
     return {"message": "Service is live."}
-# 參考：根路由簡易心跳（方便人工測試）
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 5000))
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info")
-# 參考：Uvicorn 啟動（Render Start Command）<https://render.com/docs/web-services#start-command>
