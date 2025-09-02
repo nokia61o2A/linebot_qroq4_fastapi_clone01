@@ -26,6 +26,8 @@ from linebot.models import (
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
 from groq import Groq
+from pypinyin import pinyin, Style
+from pyvi import ViTokenizer, ViUtils
 
 # --- 繁體中文說明 ---
 # 基礎設定：Line Bot 與 Groq API 初始化
@@ -165,6 +167,8 @@ def flex_menu_translate() -> FlexSendMessage:
         MessageAction(label="🇨🇳 翻簡體中文", text="翻譯->簡體中文"),
         MessageAction(label="🇯🇵 翻日文", text="翻譯->日文"),
         MessageAction(label="🇰🇷 翻韓文", text="翻譯->韓文"),
+        MessageAction(label="🇻🇳 翻越南文", text="翻譯->越南文"),
+        MessageAction(label="🇨🇳 越南文翻中文", text="翻譯->越中"),
         MessageAction(label="❌ 結束翻譯", text="翻譯->結束"),
     ]
     return build_flex_menu("🌐 翻譯選擇", "選擇要翻譯的目標語言", actions)
@@ -231,13 +235,71 @@ def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
             return "抱歉，AI 服務暫時不可用。請稍後再試 💔"
 
 async def translate_text(text: str, target_language: str) -> str:
-    """使用 Groq API 進行翻譯"""
+    """使用 Groq API 進行翻譯，並為中文和越南文添加拼音/音譯標註"""
     try:
         messages = [
             {"role": "system", "content": f"你是一位專業翻譯師。請將使用者提供的文字準確翻譯成{target_language}。只需要回傳翻譯結果，不要額外說明。"},
             {"role": "user", "content": text}
         ]
-        return groq_chat_completion(messages, max_tokens=800, temperature=0.3)
+        translated_text = groq_chat_completion(messages, max_tokens=800, temperature=0.3)
+
+        # 拼音/音譯標註邏輯
+        phonetic_annotation = ""
+        bopomofo_annotation = ""
+
+        if target_language == "繁體中文" or target_language == "越中":
+            # 生成漢語拼音
+            pinyin_list = pinyin(translated_text, style=Style.TONE)
+            phonetic_annotation = " ".join([item[0] for item in pinyin_list])
+            # 生成ㄅㄆㄇ（注音）
+            bopomofo_list = pinyin(translated_text, style=Style.BOPOMOFO)
+            bopomofo_annotation = " ".join([item[0] for item in bopomofo_list])
+            return f"🌐 翻譯結果 ({'繁體中文' if target_language == '越中' else target_language})：\n{translated_text}\n\n【漢語拼音】{phonetic_annotation}\n【ㄅㄆㄇ】{bopomofo_annotation}"
+
+        elif target_language == "越南文":
+            # 使用 pyvi 分解越南文音節和聲調
+            tokens = ViTokenizer.tokenize(translated_text).split()
+            bopomofo_like = []
+
+            # 越南文聲母、韻母和聲調映射
+            consonant_map = {
+                'b': 'ㄅ', 'p': 'ㄆ', 'ph': 'ㄆ', 't': 'ㄉ', 'th': 'ㄊ',
+                'k': 'ㄍ', 'c': 'ㄍ', 'q': 'ㄍ', 's': 'ㄙ', 'd': 'ㄉ',
+                'đ': 'ㄉ', 'g': 'ㄍ', 'h': 'ㄏ', 'l': 'ㄌ', 'm': 'ㄇ',
+                'n': 'ㄋ', 'r': 'ㄖ', 'v': 'ㄈ'
+            }
+            vowel_map = {
+                'a': 'ㄚ', 'e': 'ㄝ', 'i': 'ㄧ', 'o': 'ㄛ', 'u': 'ㄨ', 'y': 'ㄧ',
+                'ă': 'ㄚ', 'â': 'ㄚ', 'ê': 'ㄝ', 'ô': 'ㄛ', 'ơ': 'ㄛ', 'ư': 'ㄨ'
+            }
+            tone_map = {
+                'ngang': 'ˉ', 'sắc': 'ˊ', 'huyền': 'ˋ', 'hỏi': 'ˇ', 'ngã': 'ˇ', 'nặng': '˙'
+            }
+
+            for token in tokens:
+                # 移除聲調以取得基本音節
+                no_tone = ViUtils.remove_tones(token)
+                tone = ViUtils.get_tone(token) or 'ngang'
+
+                # 提取聲母和韻母
+                consonant = ''
+                vowel = ''
+                for char in no_tone:
+                    if char in consonant_map and not consonant:
+                        consonant = consonant_map.get(char, 'ㄎ')
+                    elif char in vowel_map:
+                        vowel += vowel_map.get(char, 'ㄚ')
+
+                # 組合音譯
+                bopomofo_like.append(f"{consonant or 'ㄎ'}{vowel or 'ㄚ'}{tone_map.get(tone, 'ˉ')}")
+
+            bopomofo_annotation = " ".join(bopomofo_like)
+            return f"🌐 翻譯結果 (越南文)：\n{translated_text}\n\n【類ㄅㄆㄇ音譯】{bopomofo_annotation}"
+
+        else:
+            # 其他語言無需拼音標註
+            return f"🌐 翻譯結果 ({target_language})：\n{translated_text}"
+
     except Exception as e:
         logger.error(f"翻譯失敗: {e}")
         return f"翻譯失敗，原文：{text}"
@@ -403,8 +465,7 @@ async def handle_message(event):
     
     # 初始化自動回答狀態
     if chat_id not in auto_reply_status:
-        # auto_reply_status[chat_id] = not is_group  # 私聊預設開啟，群組預設關閉
-          auto_reply_status[chat_id] =  True  # 預設開
+        auto_reply_status[chat_id] = True  # 預設開
 
     try:
         bot_name = line_bot_api.get_bot_info().display_name
@@ -524,8 +585,6 @@ async def handle_message(event):
     elif "美股" in msg:
         reply_text = stock_gpt("美盤")
     
-    # 天氣功能已移除
-    
     # 股票代碼檢查
     elif re.fullmatch(r"\d{4,6}[A-Za-z]?", msg):
         reply_text = stock_gpt(msg)
@@ -623,6 +682,5 @@ async def root():
 
 @app.get("/status")
 async def status():
-    """
-    狀態檢查
-    """
+    """狀態檢查"""
+    return {"status": "ok", "version": "1.0.0"}
