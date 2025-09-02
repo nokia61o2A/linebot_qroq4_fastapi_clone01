@@ -131,7 +131,7 @@ def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
         if KAKASI_ENABLED:
             try:
                 kks, result = pykakasi.kakasi(), []
-                for item in kks.convert(text): result.append(item.get('romaji', item['orig']))
+                for item in kks.convert(text): result.append(item['hepburn'])
                 guides['romaji'] = ''.join(result)
                 guides['bopomofo'] = japanese_to_bopomofo(text)
             except Exception as e: logger.error(f"日文發音處理失敗: {e}")
@@ -151,20 +151,76 @@ def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
     return guides
 
 async def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
-    # (此函式與前版相同)
-    pass
+    """使用 Groq API 進行聊天完成"""
+    try:
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL_PRIMARY,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Groq API 呼叫失敗: {e}")
+        try:
+            # 嘗試使用備用模型
+            response = await groq_client.chat.completions.create(
+                model=GROQ_MODEL_FALLBACK,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e2:
+            logger.error(f"備用模型也失敗: {e2}")
+            return "抱歉，AI 服務暫時不可用，請稍後再試。"
 
 async def translate_text(text: str, target_language: str) -> str:
-    # (此函式與前版相同)
-    pass
+    """使用 Groq API 進行文字翻譯"""
+    try:
+        messages = [
+            {"role": "system", "content": f"你是一位專業翻譯，請將以下文字翻譯成{target_language}，保持原意並使用自然流暢的表達方式。"},
+            {"role": "user", "content": text}
+        ]
+        
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL_PRIMARY,
+            messages=messages,
+            max_tokens=800,
+            temperature=0.3
+        )
+        
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"翻譯失敗: {e}")
+        try:
+            # 嘗試使用備用模型
+            response = await groq_client.chat.completions.create(
+                model=GROQ_MODEL_FALLBACK,
+                messages=messages,
+                max_tokens=800,
+                temperature=0.3
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e2:
+            logger.error(f"備用翻譯也失敗: {e2}")
+            return text  # 翻譯失敗時返回原文
 
 def get_chat_id(event: MessageEvent) -> str:
-    # (此函式與前版相同)
-    pass
+    """獲取聊天室ID"""
+    if isinstance(event.source, SourceGroup):
+        return event.source.group_id
+    elif isinstance(event.source, SourceRoom):
+        return event.source.room_id
+    else:
+        return event.source.user_id
 
 def reply_simple(reply_token, text, is_group=False, bot_name="AI助手"):
-    # (此函式與前版相同)
-    pass
+    """簡單回覆訊息"""
+    try:
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=text))
+    except LineBotApiError as e:
+        logger.error(f"回覆訊息失敗: {e}")
 
 # (所有 build_flex_menu, build_quick_reply_items, persona 相關函式都與前版相同，此處省略)
 
@@ -197,10 +253,11 @@ def handle_message(event: MessageEvent):
 
         final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n"
         if target_lang in ["日文", "韓文"]:
-            display_text = translated_text
-            if guides.get('romaji'): display_text += f" (羅馬拼音: {guides['romaji']})"
-            if guides.get('bopomofo'): display_text += f" (ㄅㄆㄇ: {guides['bopomofo']})"
-            final_reply += display_text
+            final_reply += translated_text
+            phonetic_parts = []
+            if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
+            if guides.get('bopomofo'): phonetic_parts.append(f"注音符號: {guides['bopomofo']}")
+            if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
         elif target_lang in ["繁體中文", "簡體中文"]:
             final_reply += translated_text
             phonetic_parts = []
@@ -259,28 +316,7 @@ def handle_message(event: MessageEvent):
     elif msg == "關閉自動回答":
         auto_reply_status[chat_id] = False; return reply_simple(reply_token, "❌ 已關閉自動回答模式", is_group, bot_name)
     
-    # ... 其他指令與AI聊天邏輯 (與前版相同)
-    if chat_id in translation_states:
-        if not msg: return
-        target_lang = translation_states[chat_id]
-        translated_text = asyncio.run(translate_text(msg, target_lang))
-        guides = get_phonetic_guides(translated_text, target_lang)
-        
-        final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n"
-        if target_lang in ["日文", "韓文"]:
-            display_text = translated_text
-            if guides.get('romaji'): display_text += f" (羅馬拼音: {guides['romaji']})"
-            if guides.get('bopomofo'): display_text += f" (ㄅㄆㄇ: {guides['bopomofo']})"
-            final_reply += display_text
-        elif target_lang in ["繁體中文", "簡體中文"]:
-            final_reply += translated_text
-            phonetic_parts = []
-            if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
-            if guides.get('bopomofo'): phonetic_parts.append(f"注音(ㄅㄆㄇ): {guides['bopomofo']}")
-            if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
-        else:
-            final_reply += translated_text
-        return reply_simple(reply_token, final_reply, is_group, bot_name)
+    # 其他指令處理邏輯將在此處添加...
 
     # (此處省略了其餘未修改的指令判斷、AI聊天等邏輯)
     reply_text = "抱歉，我現在有點忙，請稍後再試試 💔" # Fallback

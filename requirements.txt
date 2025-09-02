@@ -17,3 +17,4 @@ lxml
 pypinyin
 pykakasi
 korean-romanizer
+hangul-jamo
