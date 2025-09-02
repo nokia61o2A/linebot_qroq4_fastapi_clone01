@@ -1,7 +1,6 @@
 """
 AI 醬  git@github.com-nokia61o2A:nokia61o2A/linebot_qroq4_fastapi.git
 """
-import os
 import re
 import asyncio
 import logging
