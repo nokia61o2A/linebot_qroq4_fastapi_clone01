@@ -294,8 +294,7 @@ async def handle_message(event):
             reply_text = stock_gpt(stock_code.group())
         elif stockUS_code:
             reply_text = stock_gpt(stockUS_code.group())
-        else:
-            reply_text = f"我收到訊息：{msg}（暫未定義功能）"
+        # 如果沒有匹配到特定功能，不需要設置 reply_text，讓它進入 AI 聊天模式
 
     try:
         quick_items = build_quick_reply_items(is_group, bot_name)

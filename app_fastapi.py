@@ -90,16 +90,7 @@ try:
 except ImportError:
     def stock_gpt(code): return f"{code}股票功能暫時不可用"
 
-# 天氣功能 - 直接在這裡實作以避免循環匯入
-def weather_gpt(city: str = "台北市") -> str:
-    """簡單的天氣查詢功能"""
-    try:
-        # 這裡可以整合實際的天氣API
-        # 目前返回模擬回應
-        return f"🌤️ {city}今日天氣：晴時多雲，氣溫 25-30°C，降雨機率 20%"
-    except Exception as e:
-        logger.error(f"天氣查詢錯誤: {e}")
-        return "天氣功能暫時不可用，請稍後再試"
+# 天氣功能已移除
 
 # ============================================
 # 狀態管理
@@ -142,12 +133,12 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
     prefix = f"@{bot_name} " if is_group else ""
     items.extend([
         QuickReplyButton(action=MessageAction(label="💖 人設選單", text="人設選單")),
+        QuickReplyButton(action=MessageAction(label="👤 我的人設", text="我的人設")),
         QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")),
         QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")),
         QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")),
         QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")),
         QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答")),
-        QuickReplyButton(action=MessageAction(label="🌤️ 天氣", text=f"{prefix}天氣")),
     ])
     return items
 
@@ -206,6 +197,9 @@ def flex_menu_persona() -> FlexSendMessage:
         MessageAction(label="😏 傲嬌女友", text="鹹"),
         MessageAction(label="✨ 萌系女友", text="萌"),
         MessageAction(label="🧊 酷系御姐", text="酷"),
+        MessageAction(label="📚 知性學姐", text="smart"),
+        MessageAction(label="💪 元氣少女", text="cute"),
+        MessageAction(label="🎲 隨機人設", text="random"),
     ]
     return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
 
@@ -290,16 +284,47 @@ PERSONAS = {
         "greetings": "我在這裡。有什麼需要我幫你分析的嗎？ 🧊⚡",
         "emoji": "🧊⚡💎🖤"
     },
+    "smart": {
+        "title": "知性學姐", 
+        "style": "博學多聞，用詞優雅，喜歡分享知識，有耐心", 
+        "greetings": "你好，有什麼我能幫你解答的問題嗎？📚✨",
+        "emoji": "📚🔍🧠💡"
+    },
+    "cute": {
+        "title": "元氣少女", 
+        "style": "活潑開朗，充滿正能量，說話直率，喜歡鼓勵人", 
+        "greetings": "嗨嗨！今天也要元氣滿滿哦！💪😄",
+        "emoji": "💪😄🌟⭐"
+    },
 }
 
+import random
+
 def set_user_persona(user_id: str, key: str):
-    if key not in PERSONAS: 
+    if key == "random":
+        # 隨機選擇一個人設
+        key = random.choice(list(PERSONAS.keys()))
+    elif key not in PERSONAS: 
         key = "sweet"
     user_persona[user_id] = key
     return key
 
 def get_user_persona(user_id: str):
     return user_persona.get(user_id, "sweet")
+
+def get_persona_info(user_id: str) -> str:
+    """獲取用戶當前人設的詳細信息"""
+    p_key = get_user_persona(user_id)
+    p = PERSONAS[p_key]
+    return f"💖 當前人設：{p['title']}\n\n【特質】{p['style']}\n【常用表情】{p['emoji']}\n\n{p['greetings']}"
+
+def get_all_personas_info() -> str:
+    """獲取所有可用人設的列表"""
+    result = "💖 所有可用人設：\n\n"
+    for key, p in PERSONAS.items():
+        result += f"• {p['title']} - 輸入「{key}」切換\n"
+    result += "\n🎲 輸入「random」可隨機切換人設"
+    return result
 
 def build_persona_prompt(user_id: str, sentiment: str) -> str:
     p_key = get_user_persona(user_id)
@@ -411,6 +436,14 @@ async def handle_message(event):
     if low == '人設選單':
         line_bot_api.reply_message(reply_token, flex_menu_persona())
         return
+    elif low == '我的人設' or low == '當前人設':
+        persona_info = get_persona_info(user_id)
+        await reply_simple(reply_token, persona_info, is_group, bot_name)
+        return
+    elif low == '人設列表' or low == '所有人設':
+        all_personas = get_all_personas_info()
+        await reply_simple(reply_token, all_personas, is_group, bot_name)
+        return
     elif low == '金融選單':
         line_bot_api.reply_message(reply_token, flex_menu_finance(bot_name, is_group))
         return
@@ -445,7 +478,10 @@ async def handle_message(event):
         "甜": "sweet", "sweet": "sweet",
         "鹹": "salty", "salty": "salty", 
         "萌": "moe", "moe": "moe",
-        "酷": "cool", "cool": "cool"
+        "酷": "cool", "cool": "cool",
+        "smart": "smart", "知性": "smart",
+        "cute": "cute", "元氣": "cute",
+        "random": "random", "隨機": "random"
     }
     
     if low in persona_changes:
@@ -488,12 +524,7 @@ async def handle_message(event):
     elif "美股" in msg:
         reply_text = stock_gpt("美盤")
     
-    # 天氣
-    elif "天氣" in msg:
-        # 嘗試提取城市名稱
-        city_match = re.search(r"(台北|新北|桃園|台中|台南|高雄|基隆|新竹|苗栗|彰化|南投|雲林|嘉義|屏東|宜蘭|花蓮|台東|澎湖|金門|馬祖)", msg)
-        city = city_match.group(1) if city_match else "台北市"
-        reply_text = weather_gpt(city)
+    # 天氣功能已移除
     
     # 股票代碼檢查
     elif re.fullmatch(r"\d{4,6}[A-Za-z]?", msg):
@@ -592,4 +623,6 @@ async def root():
 
 @app.get("/status")
 async def status():
+    """
+    狀態檢查
     """
