@@ -54,7 +54,7 @@ from my_commands.one04_gpt import one04_gpt
 from my_commands.partjob_gpt import partjob_gpt
 from my_commands.crypto_coin_gpt import crypto_gpt
 from my_commands.weather_gpt import weather_gpt
-from my_commands.Stock.stock_gpt import stock_gpt   # ✅ 修正 import 股票模組路徑
+from my_commands.stock.stock_gpt import stock_gpt   # ✅ 改用小寫 stock 資料夾
 
 # ============================================
 # 3) 狀態管理
