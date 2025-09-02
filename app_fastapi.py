@@ -112,6 +112,40 @@ def update_custom_modules_model():
         except Exception as e:
             logger.warning(f"更新模組 {module_name} 時發生錯誤: {e}")
 
+def auto_fix_custom_modules():
+    """自動修復自訂模組中的錯誤"""
+    try:
+        modules_to_fix = [
+            'my_commands/lottery_gpt.py',
+            'my_commands/gold_gpt.py',
+            'my_commands/platinum_gpt.py',
+            'my_commands/money_gpt.py',
+            'my_commands/one04_gpt.py',
+            'my_commands/partjob_gpt.py',
+            'my_commands/crypto_coin_gpt.py',
+            'my_commands/weather_gpt.py'
+        ]
+        
+        GROQ_MODEL_CORRECT = "llama-3.1-8b-instant"
+        
+        for module_path in modules_to_fix:
+            if os.path.exists(module_path):
+                with open(module_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # 替換模型
+                new_content = content.replace('"llama3-70b-8192"', f'"{GROQ_MODEL_CORRECT}"')
+                new_content = new_content.replace("'llama3-70b-8192'", f"'{GROQ_MODEL_CORRECT}'")
+                new_content = new_content.replace('except groq.GroqError as groq_err:', 'except Exception as groq_err:')
+                
+                if new_content != content:
+                    with open(module_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    logger.info(f"✅ 已自動修復: {module_path}")
+                    
+    except Exception as e:
+        logger.warning(f"自動修復模組時發生錯誤: {e}")
+
 # 對話/狀態
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
@@ -119,6 +153,9 @@ auto_reply_status: Dict[str, bool] = {}
 
 # 使用者「人設 persona」儲存
 user_persona: Dict[str, str] = {}
+
+# 翻譯狀態儲存
+translation_requests: Dict[str, str] = {}
 
 # 人設詞典
 PERSONAS: Dict[str, dict] = {
@@ -155,7 +192,8 @@ PERSONAS: Dict[str, dict] = {
 async def lifespan(app: FastAPI):
     try:
         update_line_webhook()
-        update_custom_modules_model()  # 啟動時更新自訂模組
+        update_custom_modules_model()  # 更新模型設定
+        auto_fix_custom_modules()      # 自動修復模組
     except Exception as e:
         logger.error(f"❌ 啟動初始化失敗: {e}", exc_info=True)
     yield
@@ -210,7 +248,7 @@ def calculate_english_ratio(text: str) -> float:
     return len(english) / len(letters)
 
 # ============================================
-# 3) Groq 呼叫封裝 & 情緒分析
+# 3) Groq 呼叫封裝 & 情緒分析 & 翻譯功能
 # ============================================
 def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
     """統一的 Groq 聊天完成函數，含備援"""
@@ -237,6 +275,19 @@ def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
         except Exception as e_fallback:
             logger.error(f"備用模型 {GROQ_MODEL_FALLBACK} 也失敗: {e_fallback}")
             return "抱歉，AI 服務暫時不可用。"
+
+async def translate_text(text: str, target_language: str = "繁體中文") -> str:
+    """使用 Groq 進行翻譯"""
+    try:
+        messages = [
+            {"role": "system", "content": f"你是一位專業的翻譯專家，請將以下內容翻譯成{target_language}，保持原意不變。"},
+            {"role": "user", "content": f"請翻譯以下內容：{text}"}
+        ]
+        result = groq_chat_completion(messages, max_tokens=1000, temperature=0.3)
+        return result or text  # 如果翻譯失敗，返回原文
+    except Exception as e:
+        logger.error(f"翻譯失敗: {e}")
+        return text  # 失敗時返回原文
 
 async def analyze_sentiment(text: str) -> str:
     """使用 Groq 判斷訊息情緒"""
@@ -288,7 +339,7 @@ async def get_reply_with_persona_and_sentiment(user_id: str, messages: list, sen
 # ============================================
 # 5) Quick Reply + Flex 垂直按鈕選單（優化版）
 # ============================================
-def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
+def build_quick_reply_items(is_group: bool, bot_name: str, has_english_content: bool = False) -> List[QuickReplyButton]:
     """縮減為必要按鈕（<= 13）"""
     items: List[QuickReplyButton] = []
     prefix = f"@{bot_name} " if is_group else ""
@@ -300,6 +351,11 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答")),
         QuickReplyButton(action=MessageAction(label="🌤️ 天氣", text=f"{prefix}天氣")),
     ])
+    
+    # 如果有英文內容，添加翻譯按鈕
+    if has_english_content and len(items) < 13:
+        items.append(QuickReplyButton(action=MessageAction(label="🌐 翻譯成中文", text="請將上述內容翻譯成中文")))
+    
     return items
 
 # -- 優化後的 Flex「垂直按鈕選單」產生器
@@ -444,6 +500,19 @@ async def handle_message(event):
     if msg.startswith('@'):
         processed_msg = re.sub(r'^@\S+\s*', '', msg).strip()
 
+    # === 翻譯功能處理 ===
+    if processed_msg.lower() in ["請將上述內容翻譯成中文", "翻譯成中文", "translate"]:
+        if user_id in translation_requests:
+            original_text = translation_requests[user_id]
+            translated_text = await translate_text(original_text, "繁體中文")
+            await reply_simple(reply_token, f"🌐 翻譯結果：\n{translated_text}")
+            # 清除翻譯請求
+            translation_requests.pop(user_id, None)
+            return
+        else:
+            await reply_simple(reply_token, "沒有需要翻譯的內容，請先發送要翻譯的文字")
+            return
+
     # === Flex 選單觸發（垂直按鈕選單） ===
     low = processed_msg.lower()
     if low == '人設選單':
@@ -546,10 +615,15 @@ async def handle_message(event):
     if not reply_text:
         reply_text = "抱歉，目前無法提供回應，請稍後再試。"
 
-    # Quick Reply（必要精簡）
-    quick_items = build_quick_reply_items(is_group, bot_name)
-    if calculate_english_ratio(reply_text) > 0.1 and len(quick_items) < 13:
-        quick_items.append(QuickReplyButton(action=MessageAction(label="翻譯成中文", text="請將上述內容翻譯成中文")))
+    # 檢查是否需要顯示翻譯按鈕
+    has_english_content = calculate_english_ratio(reply_text) > 0.1
+    
+    # 儲存需要翻譯的內容
+    if has_english_content:
+        translation_requests[user_id] = reply_text
+
+    # Quick Reply（包含翻譯按鈕）
+    quick_items = build_quick_reply_items(is_group, bot_name, has_english_content)
 
     reply_message = TextSendMessage(text=reply_text, quick_reply=QuickReply(items=quick_items))
     try:
@@ -561,7 +635,8 @@ async def handle_message(event):
 async def reply_simple(reply_token, text):
     try:
         bot_name = line_bot_api.get_bot_info().display_name
-        quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name)
+        has_english = calculate_english_ratio(text) > 0.1
+        quick_items = build_quick_reply_items(is_group=False, bot_name=bot_name, has_english_content=has_english)
         line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items)))
     except LineBotApiError as e:
         logger.error(f"❌ 回覆訊息失敗: {e}")
