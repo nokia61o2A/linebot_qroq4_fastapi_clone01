@@ -287,7 +287,7 @@ async def handle_message(event):
         reply_text = stock_gpt("美盤")
     elif "天氣" in msg:
         reply_text = weather_gpt("台北市")
-    else:
+     else:
         stock_code   = re.fullmatch(r"\d{4,6}[A-Za-z]?", msg)
         stockUS_code = re.fullmatch(r"[A-Za-z]{1,5}", msg)
         if stock_code:
@@ -295,7 +295,27 @@ async def handle_message(event):
         elif stockUS_code:
             reply_text = stock_gpt(stockUS_code.group())
         else:
-            reply_text = f"我收到訊息：{msg}（暫未定義功能）"
+            # --- 繁體中文說明 ---
+            # 沒有觸發功能 → 進入 LLM 模式，使用人設 + 情緒
+            # ------------------------------------------ #
+            conversation_history.setdefault(user_id, [])
+            conversation_history[user_id].append({"role": "user", "content": msg})
+
+            # 保留最近對話，避免爆 token
+            if len(conversation_history[user_id]) > MAX_HISTORY_LEN * 2:
+                conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY_LEN*2:]
+
+            # 情緒分析
+            sentiment = await analyze_sentiment(msg)
+
+            # 構建人設 prompt
+            persona_prompt = build_persona_prompt(user_id, sentiment)
+            full_messages = [{"role": "system", "content": persona_prompt}] + conversation_history[user_id]
+
+            reply_text = groq_chat_completion(full_messages, max_tokens=600, temperature=0.7)
+
+            # 存入歷史
+            conversation_history[user_id].append({"role": "assistant", "content": reply_text})
 
     try:
         quick_items = build_quick_reply_items(is_group, bot_name)
