@@ -126,7 +126,7 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
     items: List[QuickReplyButton] = []
     prefix = f"@{bot_name} " if is_group else ""
     items.extend([
-        QuickReplyButton(action=MessageAction(label="💖 我的人設", text="我的人設")),
+        QuickReplyButton(action=MessageAction(label="💖 人設選單", text="人設選單")),
         QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")),
         QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")),
         QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")),
