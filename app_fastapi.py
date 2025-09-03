@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v25 - 修正Flex Menu標題為黑字白底)
+aibot FastAPI 應用程序初始化 (v26 - 新增越南文翻譯與注音模擬)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -11,6 +11,7 @@ import logging
 import random
 from contextlib import asynccontextmanager
 from typing import Dict, List
+import unicodedata
 
 import httpx
 from fastapi import FastAPI, APIRouter, Request, HTTPException
@@ -99,6 +100,11 @@ except ImportError:
 ROMAJI_BOPOMOFO_MAP = {'a': 'ㄚ', 'i': 'ㄧ', 'u': 'ㄨ', 'e': 'ㄝ', 'o': 'ㄛ', 'ka': 'ㄎㄚ', 'ki': 'ㄎㄧ', 'ku': 'ㄎㄨ', 'ke': 'ㄎㄝ', 'ko': 'ㄎㄛ', 'sa': 'ㄙㄚ', 'shi': 'ㄒㄧ', 'su': 'ㄙㄨ', 'se': 'ㄙㄝ', 'so': 'ㄙㄛ', 'ta': 'ㄊㄚ', 'chi': 'ㄑㄧ', 'tsu': 'ㄘㄨ', 'te': 'ㄊㄝ', 'to': 'ㄊㄛ', 'na': 'ㄋㄚ', 'ni': 'ㄋㄧ', 'nu': 'ㄋㄨ', 'ne': 'ㄋㄝ', 'no': 'ㄋㄛ', 'ha': 'ㄏㄚ', 'hi': 'ㄏㄧ', 'fu': 'ㄈㄨ', 'he': 'ㄏㄝ', 'ho': 'ㄏㄛ', 'ma': 'ㄇㄚ', 'mi': 'ㄇㄧ', 'mu': 'ㄇㄨ', 'me': 'ㄇㄝ', 'mo': 'ㄇㄛ', 'ya': 'ㄧㄚ', 'yu': 'ㄧㄨ', 'yo': 'ㄧㄛ', 'ra': 'ㄌㄚ', 'ri': 'ㄌㄧ', 'ru': 'ㄌㄨ', 're': 'ㄌㄝ', 'ro': 'ㄌㄛ', 'wa': 'ㄨㄚ', 'wo': 'ㄛ', 'n': 'ㄣ', 'ga': 'ㄍㄚ', 'gi': 'ㄍㄧ', 'gu': 'ㄍㄨ', 'ge': 'ㄍㄝ', 'go': 'ㄍㄛ', 'za': 'ㄗㄚ', 'ji': 'ㄐㄧ', 'zu': 'ㄗㄨ', 'ze': 'ㄗㄝ', 'zo': 'ㄗㄛ', 'da': 'ㄉㄚ', 'di': 'ㄉㄧ', 'dzu': 'ㄉㄨ', 'de': 'ㄉㄝ', 'do': 'ㄉㄛ', 'ba': 'ㄅㄚ', 'bi': 'ㄅㄧ', 'bu': 'ㄅㄨ', 'be': 'ㄅㄝ', 'bo': 'ㄅㄛ', 'pa': 'ㄆㄚ', 'pi': 'ㄆㄧ', 'pu': 'ㄆㄨ', 'pe': 'ㄆㄝ', 'po': 'ㄆㄛ', 'kya': 'ㄎㄧㄚ', 'kyu': 'ㄎㄧㄨ', 'kyo': 'ㄎㄧㄛ', 'sha': 'ㄕㄚ', 'shu': 'ㄕㄨ', 'sho': 'ㄕㄛ', 'cha': 'ㄑㄚ', 'chu': 'ㄑㄨ', 'cho': 'ㄑㄛ', 'nya': 'ㄋㄧㄚ', 'nyu': 'ㄋㄧㄨ', 'nyo': 'ㄋㄧㄛ', 'hya': 'ㄏㄧㄚ', 'hyu': 'ㄏㄧㄨ', 'hyo': 'ㄏㄧㄛ', 'mya': 'ㄇㄧㄚ', 'myu': 'ㄇㄧㄨ', 'myo': 'ㄇㄧㄛ', 'rya': 'ㄌㄧㄚ', 'ryu': 'ㄌㄧㄨ', 'ryo': 'ㄌㄧㄛ', 'gya': 'ㄍㄧㄚ', 'gyu': 'ㄍㄧㄨ', 'gyo': 'ㄍㄧㄛ', 'ja': 'ㄐㄧㄚ', 'ju': 'ㄐㄧㄨ', 'jo': 'ㄐㄧㄛ', 'bya': 'ㄅㄧㄚ', 'byu': 'ㄅㄧㄨ', 'byo': 'ㄅㄧㄛ', 'pya': 'ㄆㄧㄚ', 'pyu': 'ㄆㄧㄨ', 'pyo': 'ㄆㄧㄛ'}
 KOREAN_BOPOMOFO_MAP = { 'ㄱ': 'ㄍ', 'ㄲ': 'ㄍ', 'ㄴ': 'ㄋ', 'ㄷ': 'ㄉ', 'ㄸ': 'ㄉ', 'ㄹ': 'ㄌ', 'ㅁ': 'ㄇ', 'ㅂ': 'ㄅ', 'ㅃ': 'ㄅ', 'ㅅ': 'ㄙ', 'ㅆ': 'ㄙ', 'ㅇ': '', 'ㅈ': 'ㄗ', 'ㅉ': 'ㄗ', 'ㅊ': 'ㄘ', 'ㅋ': 'ㄎ', 'ㅌ': 'ㄊ', 'ㅍ': 'ㄆ', 'ㅎ': 'ㄏ', 'ㅏ': 'ㄚ', 'ㅐ': 'ㄝ', 'ㅑ': 'ㄧㄚ', 'ㅒ': 'ㄧㄝ', 'ㅓ': 'ㄛ', 'ㅔ': 'ㄝ', 'ㅕ': 'ㄧㄛ', 'ㅖ': 'ㄧㄝ', 'ㅗ': 'ㄛ', 'ㅘ': 'ㄨㄚ', 'ㅙ': 'ㄨㄝ', 'ㅚ': 'ㄨㄝ', 'ㅛ': 'ㄧㄛ', 'ㅜ': 'ㄨ', 'ㅝ': 'ㄨㄛ', 'ㅞ': 'ㄨㄝ', 'ㅟ': 'ㄨㄧ', 'ㅠ': 'ㄧㄨ', 'ㅡ': 'ㄜ', 'ㅢ': 'ㅢ', 'ㅣ': 'ㄧ', 'ㄳ': 'ㄍ', 'ㄵ': 'ㄣ', 'ㄶ': 'ㄣ', 'ㄺ': 'ㄌ', 'ㄻ': 'ㄌ', 'ㄼ': 'ㄌ', 'ㄽ': 'ㄌ', 'ㄾ': 'ㄌ', 'ㄿ': 'ㄌ', 'ㅀ': 'ㄌ', 'ㅄ': 'ㄅ' }
 
+# <--- 新增點: 越南文注音模擬映射表
+VIETNAMESE_BOPOMOFO_MAP = {'a': 'ㄚ', 'ă': 'ㄚ', 'â': 'ㄜ', 'b': 'ㄅ', 'c': 'ㄍ', 'ch': 'ㄐ', 'd': 'ㄗ', 'đ': 'ㄉ', 'e': 'ㄝ', 'ê': 'ㄝ', 'g': 'ㄍ', 'gh': 'ㄍ', 'gi': 'ㄗ', 'h': 'ㄏ', 'i': 'ㄧ', 'k': 'ㄍ', 'kh': 'ㄎ', 'l': 'ㄌ', 'm': 'ㄇ', 'n': 'ㄋ', 'ng': 'ㄥ', 'ngh': 'ㄥ', 'nh': 'ㄋ', 'o': 'ㄛ', 'ô': 'ㄛ', 'ơ': 'ㄜ', 'p': 'ㄅ', 'ph': 'ㄈ', 'qu': 'ㄨ', 'r': 'ㄌ', 's': 'ㄕ', 't': 'ㄉ', 'th': 'ㄊ', 'tr': 'ㄐ', 'u': 'ㄨ', 'ư': 'ือ', 'v': 'ㄨ', 'x': 'ㄙ', 'y': 'ㄧ'}
+VIETNAMESE_TONE_MAP = {' huyền': 'ˋ', ' sắc': 'ˊ', ' hỏi': 'ˇ', ' ngã': 'ˇ', ' nặng': '˙'}
+VIETNAMESE_CHAR_DECOMPOSE = {'à': 'a huyền', 'ằ': 'ă huyền', 'ầ': 'â huyền', 'è': 'e huyền', 'ề': 'ê huyền', 'ì': 'i huyền', 'ò': 'o huyền', 'ồ': 'ô huyền', 'ờ': 'ơ huyền', 'ù': 'u huyền', 'ừ': 'ư huyền', 'ỳ': 'y huyền', 'á': 'a sắc', 'ắ': 'ă sắc', 'ấ': 'â sắc', 'é': 'e sắc', 'ế': 'ê sắc', 'í': 'i sắc', 'ó': 'o sắc', 'ố': 'ô sắc', 'ớ': 'ơ sắc', 'ú': 'u sắc', 'ứ': 'ư sắc', 'ý': 'y sắc', 'ả': 'a hỏi', 'ẳ': 'ă hỏi', 'ẩ': 'â hỏi', 'ẻ': 'e hỏi', 'ể': 'ê hỏi', 'ỉ': 'i hỏi', 'ỏ': 'o hỏi', 'ổ': 'ô hỏi', 'ở': 'ơ hỏi', 'ủ': 'u hỏi', 'ử': 'ư hỏi', 'ỷ': 'y hỏi', 'ã': 'a ngã', 'ẵ': 'ă ngã', 'ẫ': 'â ngã', 'ẽ': 'e ngã', 'ễ': 'ê ngã', 'ĩ': 'i ngã', 'õ': 'o ngã', 'ỗ': 'ô ngã', 'ỡ': 'ơ ngã', 'ũ': 'u ngã', 'ữ': 'ư ngã', 'ỹ': 'y ngã', 'ạ': 'a nặng', 'ặ': 'ă nặng', 'ậ': 'â nặng', 'ẹ': 'e nặng', 'ệ': 'ê nặng', 'ị': 'i nặng', 'ọ': 'o nặng', 'ộ': 'ô nặng', 'ợ': 'ơ nặng', 'ụ': 'u nặng', 'ự': 'ư nặng', 'ỵ': 'y nặng'}
+
 PERSONAS = {
     "sweet": {"title": "甜美女友", "style": "溫柔體貼，總是對你充滿耐心，用鼓勵和安慰的話語溫暖你的心。", "greetings": "親愛的，你來啦～今天過得好嗎？我在這聽你說喔 🌸", "emoji": "🌸💕😊🥰"},
     "salty": {"title": "傲嬌女友", "style": "毒舌、傲嬌，表面上會吐槽你，但字裡行間卻流露出不經意的關心。", "greetings": "哼，還知道要來找我啊？說吧，又遇到什麼麻煩事了。😏", "emoji": "😏😒🙄"},
@@ -140,6 +146,41 @@ def korean_to_bopomofo(text: str) -> str:
     try: return "".join([KOREAN_BOPOMOFO_MAP.get(char, char) for char in decompose(text)])
     except Exception as e: logger.error(f"韓文轉注音失敗: {e}"); return ""
 
+# <--- 新增點: 越南文轉注音模擬函式
+def vietnamese_to_bopomofo(text: str) -> str:
+    words = text.lower().split()
+    bopomofo_words = []
+    for word in words:
+        decomposed_word = ""
+        for char in word:
+            if char in VIETNAMESE_CHAR_DECOMPOSE:
+                decomposed_word += VIETNAMESE_CHAR_DECOMPOSE[char]
+            else:
+                decomposed_word += char
+        
+        # 處理聲調
+        tone = ''
+        for t_key, t_val in VIETNAMESE_TONE_MAP.items():
+            if t_key in decomposed_word:
+                tone = t_val
+                decomposed_word = decomposed_word.replace(t_key, '')
+                break
+
+        # 處理子音組合
+        syllable = ""
+        i = 0
+        while i < len(decomposed_word):
+            match = next((decomposed_word[i:i+l] for l in (3, 2, 1) if decomposed_word[i:i+l] in VIETNAMESE_BOPOMOFO_MAP), None)
+            if match:
+                syllable += VIETNAMESE_BOPOMOFO_MAP[match]
+                i += len(match)
+            else:
+                syllable += decomposed_word[i]
+                i += 1
+        
+        bopomofo_words.append(syllable + tone)
+    return '/'.join(bopomofo_words)
+
 def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
     guides = {}
     if target_language == "日文" and KAKASI_ENABLED:
@@ -160,6 +201,10 @@ def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
                 guides['romaji'] = ','.join(p.capitalize() for p in romaji_text.split())
             except Exception as e: logger.error(f"韓文羅馬拼音處理失敗: {e}")
         if HANGUL_JAMO_ENABLED: guides['bopomofo'] = korean_to_bopomofo(text)
+    # <--- 新增點: 處理越南文發音
+    elif target_language == "越南文":
+        guides['romaji'] = text # 越南文羅馬字即為其本身
+        guides['bopomofo'] = vietnamese_to_bopomofo(text)
     elif target_language in ["繁體中文", "簡體中文"] and PINYIN_ENABLED:
         try:
             pinyin_full = ' '.join(p[0] for p in pinyin(text, style=Style.NORMAL))
@@ -198,33 +243,11 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")), QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答"))
     ]
 
-# <--- 修改點: 更新Flex Menu的配色為高對比度的黑字白底主題
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
-    buttons = [
-        ButtonComponent(
-            style="primary", 
-            height="sm", 
-            action=act, 
-            margin="md", 
-            color="#00B900"  # 按鈕維持清晰的綠色
-        ) for act in actions
-    ]
+    buttons = [ButtonComponent(style="primary", height="sm", action=act, margin="md", color="#00B900") for act in actions]
     bubble = BubbleContainer(
-        header=BoxComponent(
-            layout="vertical", 
-            contents=[
-                TextComponent(text=title, weight="bold", size="xl", color="#000000", align="center"), # <--- 標題文字改為黑色
-                TextComponent(text=subtitle, size="sm", color="#666666", wrap=True, align="center", margin="md") # <--- 副標題文字改為深灰色
-            ], 
-            backgroundColor="#FFFFFF"  # <--- 頂部背景改為白色
-        ), 
-        body=BoxComponent(
-            layout="vertical", 
-            contents=buttons, 
-            spacing="sm", 
-            paddingAll="12px", 
-            backgroundColor="#FAFAFA"  # 主體背景用非常淺的灰色與頂部區分
-        )
+        header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", color="#000000", align="center"), TextComponent(text=subtitle, size="sm", color="#666666", wrap=True, align="center", margin="md")], backgroundColor="#FFFFFF"), 
+        body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px", backgroundColor="#FAFAFA")
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
 
@@ -240,8 +263,19 @@ def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
     return build_flex_menu("💰 金融服務", "快速查詢最新金融資訊", actions)
 def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""; actions = [MessageAction(label="🎰 大樂透", text=f"{prefix}大樂透"), MessageAction(label="🎯 威力彩", text=f"{prefix}威力彩"), MessageAction(label="🔢 539", text=f"{prefix}539")]; return build_flex_menu("🎰 彩票服務", "最新開獎資訊", actions)
+
+# <--- 修改點: 在翻譯選單中加入越南文選項
 def flex_menu_translate() -> FlexSendMessage:
-    actions = [MessageAction(label="🇺🇸 翻英文", text="翻譯->英文"), MessageAction(label="🇹🇼 翻繁體中文", text="翻譯->繁體中文"), MessageAction(label="🇯🇵 翻日文", text="翻譯->日文"), MessageAction(label="🇰🇷 翻韓文", text="翻譯->韓文"), MessageAction(label="❌ 結束翻譯", text="翻譯->結束")]; return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", actions)
+    actions = [
+        MessageAction(label="🇺🇸 翻英文", text="翻譯->英文"), 
+        MessageAction(label="🇻🇳 翻越南文", text="翻譯->越南文"),
+        MessageAction(label="🇯🇵 翻日文", text="翻譯->日文"), 
+        MessageAction(label="🇰🇷 翻韓文", text="翻譯->韓文"), 
+        MessageAction(label="🇹🇼 翻繁體中文", text="翻譯->繁體中文"), 
+        MessageAction(label="❌ 結束翻譯", text="翻譯->結束")
+    ]
+    return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", actions)
+
 def flex_menu_persona() -> FlexSendMessage:
     actions = [MessageAction(label="🌸 甜美女友", text="甜"), MessageAction(label="😏 傲嬌女友", text="鹹"), MessageAction(label="🎀 萌系女友", text="萌"), MessageAction(label="🧊 酷系御姐", text="酷"), MessageAction(label="🎲 隨機人設", text="random")]; return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
 
@@ -297,10 +331,17 @@ def handle_message(event: MessageEvent):
         final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n{translated_text}"
         
         phonetic_parts = []
-        if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
+        # <--- 修改點: 調整發音標註的標題
+        if guides.get('romaji'):
+            if target_lang == '越南文':
+                phonetic_parts.append(f"國語字: {guides['romaji']}")
+            else:
+                phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
+
         if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
+        
         if guides.get('bopomofo'):
-            if target_language in ["繁體中文", "簡體中文"]:
+            if target_lang in ["繁體中文", "簡體中文"]:
                 bopomofo_text = '/'.join(guides['bopomofo'].split())
                 phonetic_parts.append(f"注音: {bopomofo_text}")
             else:
