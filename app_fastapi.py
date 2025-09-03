@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v28 - 修正英文翻譯Bug)
+aibot FastAPI 應用程序初始化 (v29 - 優化翻譯指令以應對模型不穩定)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -94,13 +94,9 @@ try:
 except ImportError:
     def stock_gpt(code): return f"{code}股票功能暫時不可用"
 
-# <--- 新增點: 建立語言對照表，確保AI能正確理解指令
 LANGUAGE_MAP = {
-    "英文": "English",
-    "日文": "Japanese",
-    "韓文": "Korean",
-    "越南文": "Vietnamese",
-    "繁體中文": "Traditional Chinese"
+    "英文": "English", "日文": "Japanese", "韓文": "Korean",
+    "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"
 }
 
 # 全域發音映射表與人設
@@ -222,9 +218,25 @@ async def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
         logger.error(f"Groq API 呼叫失敗: {e}"); response = await groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
         return response.choices[0].message.content.strip()
 
+# <--- 修改點: 使用更穩定、更結構化的指令格式來要求AI進行翻譯
 async def translate_text(text: str, target_language: str) -> str:
-    messages = [{"role": "system", "content": f"You are a professional translator. Translate the following text to {target_language}. Output only the translated text itself."}, {"role": "user", "content": text}]
+    system_prompt = f"""You are a professional translation engine.
+Translate the user's text from the source language to the target language specified in the JSON block.
+Output *only* the translated text itself, without any other explanation."""
+    
+    user_prompt = f"""
+{{
+  "source_language": "auto-detect",
+  "target_language": "{target_language}",
+  "text_to_translate": "{text}"
+}}
+"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
     return await groq_chat_completion(messages, 800, 0.3)
+
 
 async def analyze_sentiment(text: str) -> str:
     messages = [{"role": "system", "content": "Analyze the sentiment of the user's message. Respond with only one of the following: positive, neutral, negative, angry, sad, happy."}, {"role": "user", "content": text}]
@@ -326,7 +338,6 @@ def handle_message(event: MessageEvent):
 
     if chat_id in translation_states:
         display_lang = translation_states[chat_id]
-        # <--- 修改點: 使用語言對照表，確保AI能正確理解
         prompt_lang = LANGUAGE_MAP.get(display_lang, display_lang)
         
         translated_text = asyncio.run(translate_text(msg, prompt_lang))
