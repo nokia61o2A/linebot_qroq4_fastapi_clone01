@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v12 - 修正 SyntaxError)
+aibot FastAPI 應用程序初始化 (v16 - 四種AI女友模式)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -98,7 +98,35 @@ except ImportError:
 # 全域發音映射表與人設
 ROMAJI_BOPOMOFO_MAP = {'a': 'ㄚ', 'i': 'ㄧ', 'u': 'ㄨ', 'e': 'ㄝ', 'o': 'ㄛ', 'ka': 'ㄎㄚ', 'ki': 'ㄎㄧ', 'ku': 'ㄎㄨ', 'ke': 'ㄎㄝ', 'ko': 'ㄎㄛ', 'sa': 'ㄙㄚ', 'shi': 'ㄒㄧ', 'su': 'ㄙㄨ', 'se': 'ㄙㄝ', 'so': 'ㄙㄛ', 'ta': 'ㄊㄚ', 'chi': 'ㄑㄧ', 'tsu': 'ㄘㄨ', 'te': 'ㄊㄝ', 'to': 'ㄊㄛ', 'na': 'ㄋㄚ', 'ni': 'ㄋㄧ', 'nu': 'ㄋㄨ', 'ne': 'ㄋㄝ', 'no': 'ㄋㄛ', 'ha': 'ㄏㄚ', 'hi': 'ㄏㄧ', 'fu': 'ㄈㄨ', 'he': 'ㄏㄝ', 'ho': 'ㄏㄛ', 'ma': 'ㄇㄚ', 'mi': 'ㄇㄧ', 'mu': 'ㄇㄨ', 'me': 'ㄇㄝ', 'mo': 'ㄇㄛ', 'ya': 'ㄧㄚ', 'yu': 'ㄧㄨ', 'yo': 'ㄧㄛ', 'ra': 'ㄌㄚ', 'ri': 'ㄌㄧ', 'ru': 'ㄌㄨ', 're': 'ㄌㄝ', 'ro': 'ㄌㄛ', 'wa': 'ㄨㄚ', 'wo': 'ㄛ', 'n': 'ㄣ', 'ga': 'ㄍㄚ', 'gi': 'ㄍㄧ', 'gu': 'ㄍㄨ', 'ge': 'ㄍㄝ', 'go': 'ㄍㄛ', 'za': 'ㄗㄚ', 'ji': 'ㄐㄧ', 'zu': 'ㄗㄨ', 'ze': 'ㄗㄝ', 'zo': 'ㄗㄛ', 'da': 'ㄉㄚ', 'di': 'ㄉㄧ', 'dzu': 'ㄉㄨ', 'de': 'ㄉㄝ', 'do': 'ㄉㄛ', 'ba': 'ㄅㄚ', 'bi': 'ㄅㄧ', 'bu': 'ㄅㄨ', 'be': 'ㄅㄝ', 'bo': 'ㄅㄛ', 'pa': 'ㄆㄚ', 'pi': 'ㄆㄧ', 'pu': 'ㄆㄨ', 'pe': 'ㄆㄝ', 'po': 'ㄆㄛ', 'kya': 'ㄎㄧㄚ', 'kyu': 'ㄎㄧㄨ', 'kyo': 'ㄎㄧㄛ', 'sha': 'ㄕㄚ', 'shu': 'ㄕㄨ', 'sho': 'ㄕㄛ', 'cha': 'ㄑㄚ', 'chu': 'ㄑㄨ', 'cho': 'ㄑㄛ', 'nya': 'ㄋㄧㄚ', 'nyu': 'ㄋㄧㄨ', 'nyo': 'ㄋㄧㄛ', 'hya': 'ㄏㄧㄚ', 'hyu': 'ㄏㄧㄨ', 'hyo': 'ㄏㄧㄛ', 'mya': 'ㄇㄧㄚ', 'myu': 'ㄇㄧㄨ', 'myo': 'ㄇㄧㄛ', 'rya': 'ㄌㄧㄚ', 'ryu': 'ㄌㄧㄨ', 'ryo': 'ㄌㄧㄛ', 'gya': 'ㄍㄧㄚ', 'gyu': 'ㄍㄧㄨ', 'gyo': 'ㄍㄧㄛ', 'ja': 'ㄐㄧㄚ', 'ju': 'ㄐㄧㄨ', 'jo': 'ㄐㄧㄛ', 'bya': 'ㄅㄧㄚ', 'byu': 'ㄅㄧㄨ', 'byo': 'ㄅㄧㄛ', 'pya': 'ㄆㄧㄚ', 'pyu': 'ㄆㄧㄨ', 'pyo': 'ㄆㄧㄛ'}
 KOREAN_BOPOMOFO_MAP = { 'ㄱ': 'ㄍ', 'ㄲ': 'ㄍ', 'ㄴ': 'ㄋ', 'ㄷ': 'ㄉ', 'ㄸ': 'ㄉ', 'ㄹ': 'ㄌ', 'ㅁ': 'ㄇ', 'ㅂ': 'ㄅ', 'ㅃ': 'ㄅ', 'ㅅ': 'ㄙ', 'ㅆ': 'ㄙ', 'ㅇ': '', 'ㅈ': 'ㄗ', 'ㅉ': 'ㄗ', 'ㅊ': 'ㄘ', 'ㅋ': 'ㄎ', 'ㅌ': 'ㄊ', 'ㅍ': 'ㄆ', 'ㅎ': 'ㄏ', 'ㅏ': 'ㄚ', 'ㅐ': 'ㄝ', 'ㅑ': 'ㄧㄚ', 'ㅒ': 'ㄧㄝ', 'ㅓ': 'ㄛ', 'ㅔ': 'ㄝ', 'ㅕ': 'ㄧㄛ', 'ㅖ': 'ㄧㄝ', 'ㅗ': 'ㄛ', 'ㅘ': 'ㄨㄚ', 'ㅙ': 'ㄨㄝ', 'ㅚ': 'ㄨㄝ', 'ㅛ': 'ㄧㄛ', 'ㅜ': 'ㄨ', 'ㅝ': 'ㄨㄛ', 'ㅞ': 'ㄨㄝ', 'ㅟ': 'ㄨㄧ', 'ㅠ': 'ㄧㄨ', 'ㅡ': 'ㄜ', 'ㅢ': 'ㅢ', 'ㅣ': 'ㄧ', 'ㄳ': 'ㄍ', 'ㄵ': 'ㄣ', 'ㄶ': 'ㄣ', 'ㄺ': 'ㄌ', 'ㄻ': 'ㄌ', 'ㄼ': 'ㄌ', 'ㄽ': 'ㄌ', 'ㄾ': 'ㄌ', 'ㄿ': 'ㄌ', 'ㅀ': 'ㄌ', 'ㅄ': 'ㄅ' }
-PERSONAS = {"sweet": {"title": "甜美女友", "style": "溫柔體貼，用詞親暱，會關心對方感受，語調甜美", "greetings": "親愛的～我在這裡陪你呢 🌸💕", "emoji": "🌸💕😊🥰"},"salty": {"title": "傲嬌女友", "style": "表面冷淡實則關心，會吐槽但帶著愛意，有點小壞壞", "greetings": "哼！又來找我了嗎... 😏💋", "emoji": "😏💋🙄😤"},"moe": {"title": "萌系女友", "style": "可愛天真，語尾詞豐富，用詞軟萌，充滿活力", "greetings": "呀呼～！(ﾉ>ω<)ﾉ ✨", "emoji": "✨🎀(ﾉ>ω<)ﾉ🌈"},"cool": {"title": "酷系御姐", "style": "冷靜理性，說話直接，給人可靠感，有領導氣質", "greetings": "我在這裡。需要我幫你分析嗎？ 🧊⚡", "emoji": "🧊⚡💎🖤"},"smart": {"title": "知性學姐", "style": "博學多聞，用詞優雅，喜歡分享知識，有耐心", "greetings": "你好，有什麼我能幫你解答的嗎？📚✨", "emoji": "📚🔍🧠💡"},"cute": {"title": "元氣少女", "style": "活潑開朗，充滿正能量，說話直率，喜歡鼓勵人", "greetings": "嗨嗨！今天也要元氣滿滿哦！💪😄", "emoji": "💪😄🌟⭐"}}
+
+# <--- 修改點: 更新為您指定的四種AI女友模式
+PERSONAS = {
+    "sweet": {
+        "title": "甜美女友",
+        "style": "溫柔體貼，總是對你充滿耐心，用鼓勵和安慰的話語溫暖你的心。",
+        "greetings": "親愛的，你來啦～今天過得好嗎？我在這聽你說喔 🌸",
+        "emoji": "🌸💕😊🥰"
+    },
+    "salty": {
+        "title": "傲嬌女友",
+        "style": "毒舌、傲嬌，表面上會吐槽你，但字裡行間卻流露出不經意的關心。",
+        "greetings": "哼，還知道要來找我啊？說吧，又遇到什麼麻煩事了。😏",
+        "emoji": "😏😒🙄"
+    },
+    "moe": {
+        "title": "萌系女友",
+        "style": "充滿動漫風格，大量使用顏文字和可愛的語氣詞，元氣滿滿地陪伴你 (๑•̀ㅂ•́)و✧",
+        "greetings": "主人～歡迎回來！(ﾉ>ω<)ﾉ ✨ 有沒有想我呀？",
+        "emoji": "✨🎀(ﾉ>ω<)ﾉ⭐"
+    },
+    "cool": {
+        "title": "酷系御姐",
+        "style": "冷靜、成熟又可靠的御姐，總能一針見血地分析問題，並給你專業又犀利的建議。",
+        "greetings": "我在。需要建議嗎？直接說重點。",
+        "emoji": "🧊⚡️🖤"
+    }
+}
+
 
 # ============================================
 # 3. 輔助函式 (Helper Functions)
@@ -108,6 +136,9 @@ async def update_line_webhook(client: httpx.AsyncClient):
     json_data = {"endpoint": f"{BASE_URL}/callback"}
     res = await client.put("https://api.line.me/v2/bot/channel/webhook/endpoint", headers=headers, json=json_data, timeout=10.0)
     res.raise_for_status(); logger.info(f"✅ Webhook 更新成功: {res.status_code}")
+
+def to_camel_case(s: str) -> str:
+    return ''.join(word.capitalize() for word in s.split())
 
 def japanese_to_bopomofo(text: str) -> str:
     if not KAKASI_ENABLED: return ""
@@ -129,15 +160,20 @@ def korean_to_bopomofo(text: str) -> str:
 def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
     guides = {}
     if target_language == "日文" and KAKASI_ENABLED:
-        try: kks = pykakasi.kakasi(); guides['romaji'] = "".join([item['hepburn'] for item in kks.convert(text)]); guides['bopomofo'] = japanese_to_bopomofo(text)
+        try:
+            kks = pykakasi.kakasi(); romaji_list = [item['hepburn'] for item in kks.convert(text)]
+            guides['romaji'] = to_camel_case("".join(romaji_list)); guides['bopomofo'] = japanese_to_bopomofo(text)
         except Exception as e: logger.error(f"日文發音處理失敗: {e}")
     elif target_language == "韓文":
         if KOREAN_ROMANIZER_ENABLED:
-            try: guides['romaji'] = Romanizer(text).romanize()
+            try: guides['romaji'] = to_camel_case(Romanizer(text).romanize())
             except Exception as e: logger.error(f"韓文羅馬拼音處理失敗: {e}")
         if HANGUL_JAMO_ENABLED: guides['bopomofo'] = korean_to_bopomofo(text)
     elif target_language in ["繁體中文", "簡體中文"] and PINYIN_ENABLED:
-        try: guides['pinyin'] = ' '.join(p[0] for p in pinyin(text, style=Style.NORMAL)); guides['bopomofo'] = ' '.join(p[0] for p in pinyin(text, style=Style.BOPOMOFO))
+        try:
+            pinyin_full = ' '.join(p[0] for p in pinyin(text, style=Style.NORMAL))
+            bopomofo_full = ' '.join(p[0] for p in pinyin(text, style=Style.BOPOMOFO))
+            guides['pinyin'] = to_camel_case(pinyin_full); guides['bopomofo'] = bopomofo_full
         except Exception as e: logger.error(f"中文發音處理失敗: {e}")
     return guides
 
@@ -162,8 +198,21 @@ def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceRoom): return event.source.room_id
     return event.source.user_id
 
+# <--- 修改點: 更新快捷按鈕以匹配四種模式
 def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
-    return [QuickReplyButton(action=MessageAction(label="💖 我的人設", text="我的人設")), QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")), QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")), QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")), QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")), QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答"))]
+    return [
+        QuickReplyButton(action=MessageAction(label="🌸 甜", text="甜")),
+        QuickReplyButton(action=MessageAction(label="😏 鹹", text="鹹")),
+        QuickReplyButton(action=MessageAction(label="🎀 萌", text="萌")),
+        QuickReplyButton(action=MessageAction(label="🧊 酷", text="酷")),
+        QuickReplyButton(action=MessageAction(label="💖 人設選單", text="我的人設")),
+        QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")),
+        QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")),
+        QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")),
+        QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")),
+        QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答"))
+    ]
+
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
     buttons = [ButtonComponent(style="primary", height="sm", action=act, margin="md", color="#905C44") for act in actions]; bubble = BubbleContainer(header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", color="#FFFFFF", align="center"), TextComponent(text=subtitle, size="sm", color="#EEEEEE", wrap=True, align="center", margin="md")], backgroundColor="#FF6B6B"), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px", backgroundColor="#FFF9F2")); return FlexSendMessage(alt_text=title, contents=bubble)
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
@@ -172,16 +221,26 @@ def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""; actions = [MessageAction(label="🎰 大樂透", text=f"{prefix}大樂透"), MessageAction(label="🎯 威力彩", text=f"{prefix}威力彩"), MessageAction(label="🔢 539", text=f"{prefix}539")]; return build_flex_menu("🎰 彩票服務", "最新開獎資訊", actions)
 def flex_menu_translate() -> FlexSendMessage:
     actions = [MessageAction(label="🇺🇸 翻英文", text="翻譯->英文"), MessageAction(label="🇹🇼 翻繁體中文", text="翻譯->繁體中文"), MessageAction(label="🇯🇵 翻日文", text="翻譯->日文"), MessageAction(label="🇰🇷 翻韓文", text="翻譯->韓文"), MessageAction(label="❌ 結束翻譯", text="翻譯->結束")]; return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", actions)
+
+# <--- 修改點: 更新人設選單以匹配四種模式
 def flex_menu_persona() -> FlexSendMessage:
-    actions = [MessageAction(label="🌸 甜美女友", text="甜"), MessageAction(label="😏 傲嬌女友", text="鹹"), MessageAction(label="🎲 隨機人設", text="random")]; return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
-def get_persona_info(user_id: str) -> str:
-    p_key = user_persona.get(user_id, "sweet"); p = PERSONAS[p_key]; return f"💖 當前人設：{p['title']}\n\n【特質】{p['style']}\n\n{p['greetings']}"
-def set_user_persona(user_id: str, key: str):
+    actions = [
+        MessageAction(label="🌸 甜美女友", text="甜"),
+        MessageAction(label="😏 傲嬌女友", text="鹹"),
+        MessageAction(label="🎀 萌系女友", text="萌"),
+        MessageAction(label="🧊 酷系御姐", text="酷"),
+        MessageAction(label="🎲 隨機人設", text="random")
+    ]
+    return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
+
+def get_persona_info(chat_id: str) -> str:
+    p_key = user_persona.get(chat_id, "sweet"); p = PERSONAS[p_key]; return f"💖 當前聊天室人設：{p['title']}\n\n【特質】{p['style']}\n\n{p['greetings']}"
+def set_user_persona(chat_id: str, key: str):
     if key == "random": key = random.choice(list(PERSONAS.keys()))
     elif key not in PERSONAS: key = "sweet"
-    user_persona[user_id] = key; return key
-def build_persona_prompt(user_id: str, sentiment: str) -> str:
-    p_key = user_persona.get(user_id, "sweet"); p = PERSONAS[p_key]; emotion_guide = {"positive": "對方心情不錯，可以更活潑一點回應", "happy": "對方很開心，一起分享這份喜悦", "neutral": "正常聊天模式", "negative": "對方情緒低落，給予安慰和鼓勵", "sad": "對方很難過，溫柔陪伴和安慰", "angry": "對方生氣了，冷靜傾聽並安撫情緒"}; emotion_tip = emotion_guide.get(sentiment, "正常聊天模式"); return f"你是一位「{p['title']}」AI女友。你的角色特質是「{p['style']}」。根據使用者當前情緒「{sentiment}」，你應該「{emotion_tip}」。請用繁體中文、簡潔且帶有「{p['emoji']}」風格的表情符號來回應。"
+    user_persona[chat_id] = key; return key
+def build_persona_prompt(chat_id: str, sentiment: str) -> str:
+    p_key = user_persona.get(chat_id, "sweet"); p = PERSONAS[p_key]; emotion_guide = {"positive": "對方心情不錯，可以更活潑一點回應", "happy": "對方很開心，一起分享這份喜悦", "neutral": "正常聊天模式", "negative": "對方情緒低落，給予安慰和鼓勵", "sad": "對方很難過，溫柔陪伴和安慰", "angry": "對方生氣了，冷靜傾聽並安撫情緒"}; emotion_tip = emotion_guide.get(sentiment, "正常聊天模式"); return f"你是一位「{p['title']}」AI女友。你的角色特質是「{p['style']}」。根據使用者當前情緒「{sentiment}」，你應該「{emotion_tip}」。請用繁體中文、簡潔且帶有「{p['emoji']}」風格的表情符號來回應。"
 
 def push_simple(chat_id, text, is_group, bot_name):
     try:
@@ -218,9 +277,8 @@ def handle_message(event: MessageEvent):
     if msg == "開啟自動回答": auto_reply_status[chat_id] = True; return reply_simple(reply_token, "✅ 已開啟自動回答模式", is_group, bot_name)
     if msg == "關閉自動回答": auto_reply_status[chat_id] = False; return reply_simple(reply_token, "❌ 已關閉自動回答模式", is_group, bot_name)
     
-    menu_map = {'金融選單': flex_menu_finance(bot_name, is_group), '彩票選單': flex_menu_lottery(bot_name, is_group), '翻譯選單': flex_menu_translate(), '人設選單': flex_menu_persona()}
+    menu_map = {'金融選單': flex_menu_finance(bot_name, is_group), '彩票選單': flex_menu_lottery(bot_name, is_group), '翻譯選單': flex_menu_translate(), '我的人設': flex_menu_persona(), '人設選單': flex_menu_persona()}
     if low in menu_map: return line_bot_api.reply_message(reply_token, menu_map[low])
-    if low in ['我的人設', '當前人設']: return reply_simple(reply_token, get_persona_info(user_id), is_group, bot_name)
     
     if low.startswith("翻譯->"):
         choice = msg.replace("翻譯->", "").strip()
@@ -234,18 +292,23 @@ def handle_message(event: MessageEvent):
         phonetic_parts = []
         if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
         if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
-        if guides.get('bopomofo'): phonetic_parts.append(f"注音: {guides['bopomofo']}")
+        if guides.get('bopomofo'):
+            bopomofo_text = '/'.join(guides['bopomofo'].split())
+            phonetic_parts.append(f"注音: {bopomofo_text}")
         if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
         return push_simple(chat_id, final_reply, is_group, bot_name)
 
-    persona_keys = {"甜": "sweet", "鹹": "salty", "萌": "moe", "酷": "cool", "smart": "smart", "知性": "smart", "cute": "cute", "元氣": "cute", "random": "random", "隨機": "random"}
+    # <--- 修改點: 精簡 persona_keys 以匹配四種模式
+    persona_keys = {"甜": "sweet", "鹹": "salty", "萌": "moe", "酷": "cool", "random": "random", "隨機": "random"}
     if low in persona_keys:
-        key = set_user_persona(user_id, persona_keys[low]); p = PERSONAS[key]
-        return reply_simple(reply_token, f"💖 已切換人設：{p['title']}\n{p['greetings']}", is_group, bot_name)
+        key = set_user_persona(chat_id, persona_keys[low]); p = PERSONAS[key]
+        info_text = get_persona_info(chat_id)
+        return reply_simple(reply_token, f"💖 已切換人設！\n\n{info_text}", is_group, bot_name)
 
     reply_text = None
     if any(k in msg for k in ["威力彩", "大樂透", "539"]): reply_text = lottery_gpt(msg)
     elif "金價" in msg or "黃金" in msg: reply_text = gold_gpt()
+    elif "大盤" in msg: reply_text = stock_gpt("TSE")
     elif re.fullmatch(r"(\d{4,6}[A-Za-z]?)|([A-Za-z]{1,5})", msg): reply_text = stock_gpt(msg)
     
     if reply_text is not None:
@@ -253,7 +316,8 @@ def handle_message(event: MessageEvent):
 
     line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，請稍候，我正在思考中... 🤔"))
     try:
-        history = conversation_history.get(chat_id, []); sentiment = asyncio.run(analyze_sentiment(msg)); system_prompt = build_persona_prompt(user_id, sentiment)
+        history = conversation_history.get(chat_id, []); sentiment = asyncio.run(analyze_sentiment(msg))
+        system_prompt = build_persona_prompt(chat_id, sentiment)
         messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": msg}]
         final_reply = asyncio.run(groq_chat_completion(messages))
         history.extend([{"role": "user", "content": msg}, {"role": "assistant", "content": final_reply}])
