@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v24 - 更新Flex Menu為LINE經典配色)
+aibot FastAPI 應用程序初始化 (v25 - 修正Flex Menu標題為黑字白底)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -198,7 +198,7 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")), QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答"))
     ]
 
-# <--- 修改點: 更新Flex Menu的配色
+# <--- 修改點: 更新Flex Menu的配色為高對比度的黑字白底主題
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
     buttons = [
         ButtonComponent(
@@ -206,24 +206,24 @@ def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> 
             height="sm", 
             action=act, 
             margin="md", 
-            color="#00B900"  # <--- 按鈕顏色改為LINE綠色
+            color="#00B900"  # 按鈕維持清晰的綠色
         ) for act in actions
     ]
     bubble = BubbleContainer(
         header=BoxComponent(
             layout="vertical", 
             contents=[
-                TextComponent(text=title, weight="bold", size="xl", color="#FFFFFF", align="center"),
-                TextComponent(text=subtitle, size="sm", color="#FFFFFF", wrap=True, align="center", margin="md") # <--- 副標題文字改為純白
+                TextComponent(text=title, weight="bold", size="xl", color="#000000", align="center"), # <--- 標題文字改為黑色
+                TextComponent(text=subtitle, size="sm", color="#666666", wrap=True, align="center", margin="md") # <--- 副標題文字改為深灰色
             ], 
-            backgroundColor="#00B900"  # <--- 頂部背景改為LINE綠色
+            backgroundColor="#FFFFFF"  # <--- 頂部背景改為白色
         ), 
         body=BoxComponent(
             layout="vertical", 
             contents=buttons, 
             spacing="sm", 
             paddingAll="12px", 
-            backgroundColor="#FFFFFF"  # <--- 主體背景改為純白
+            backgroundColor="#FAFAFA"  # 主體背景用非常淺的灰色與頂部區分
         )
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
