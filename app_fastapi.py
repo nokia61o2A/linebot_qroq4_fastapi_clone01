@@ -202,7 +202,7 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         QuickReplyButton(action=MessageAction(label="😏 鹹", text="鹹")),
         QuickReplyButton(action=MessageAction(label="🎀 萌", text="萌")),
         QuickReplyButton(action=MessageAction(label="🧊 酷", text="酷")),
-        QuickReplyButton(action=MessageAction(label="💖 人設選單", text="我的人設")),
+        # QuickReplyButton(action=MessageAction(label="💖 人設選單", text="我的人設")),
         QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")),
         QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")),
         QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")),
