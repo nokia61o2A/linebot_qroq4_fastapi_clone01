@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v16 - 四種AI女友模式)
+aibot FastAPI 應用程序初始化 (v17 - 修正大盤查詢功能)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -99,7 +99,6 @@ except ImportError:
 ROMAJI_BOPOMOFO_MAP = {'a': 'ㄚ', 'i': 'ㄧ', 'u': 'ㄨ', 'e': 'ㄝ', 'o': 'ㄛ', 'ka': 'ㄎㄚ', 'ki': 'ㄎㄧ', 'ku': 'ㄎㄨ', 'ke': 'ㄎㄝ', 'ko': 'ㄎㄛ', 'sa': 'ㄙㄚ', 'shi': 'ㄒㄧ', 'su': 'ㄙㄨ', 'se': 'ㄙㄝ', 'so': 'ㄙㄛ', 'ta': 'ㄊㄚ', 'chi': 'ㄑㄧ', 'tsu': 'ㄘㄨ', 'te': 'ㄊㄝ', 'to': 'ㄊㄛ', 'na': 'ㄋㄚ', 'ni': 'ㄋㄧ', 'nu': 'ㄋㄨ', 'ne': 'ㄋㄝ', 'no': 'ㄋㄛ', 'ha': 'ㄏㄚ', 'hi': 'ㄏㄧ', 'fu': 'ㄈㄨ', 'he': 'ㄏㄝ', 'ho': 'ㄏㄛ', 'ma': 'ㄇㄚ', 'mi': 'ㄇㄧ', 'mu': 'ㄇㄨ', 'me': 'ㄇㄝ', 'mo': 'ㄇㄛ', 'ya': 'ㄧㄚ', 'yu': 'ㄧㄨ', 'yo': 'ㄧㄛ', 'ra': 'ㄌㄚ', 'ri': 'ㄌㄧ', 'ru': 'ㄌㄨ', 're': 'ㄌㄝ', 'ro': 'ㄌㄛ', 'wa': 'ㄨㄚ', 'wo': 'ㄛ', 'n': 'ㄣ', 'ga': 'ㄍㄚ', 'gi': 'ㄍㄧ', 'gu': 'ㄍㄨ', 'ge': 'ㄍㄝ', 'go': 'ㄍㄛ', 'za': 'ㄗㄚ', 'ji': 'ㄐㄧ', 'zu': 'ㄗㄨ', 'ze': 'ㄗㄝ', 'zo': 'ㄗㄛ', 'da': 'ㄉㄚ', 'di': 'ㄉㄧ', 'dzu': 'ㄉㄨ', 'de': 'ㄉㄝ', 'do': 'ㄉㄛ', 'ba': 'ㄅㄚ', 'bi': 'ㄅㄧ', 'bu': 'ㄅㄨ', 'be': 'ㄅㄝ', 'bo': 'ㄅㄛ', 'pa': 'ㄆㄚ', 'pi': 'ㄆㄧ', 'pu': 'ㄆㄨ', 'pe': 'ㄆㄝ', 'po': 'ㄆㄛ', 'kya': 'ㄎㄧㄚ', 'kyu': 'ㄎㄧㄨ', 'kyo': 'ㄎㄧㄛ', 'sha': 'ㄕㄚ', 'shu': 'ㄕㄨ', 'sho': 'ㄕㄛ', 'cha': 'ㄑㄚ', 'chu': 'ㄑㄨ', 'cho': 'ㄑㄛ', 'nya': 'ㄋㄧㄚ', 'nyu': 'ㄋㄧㄨ', 'nyo': 'ㄋㄧㄛ', 'hya': 'ㄏㄧㄚ', 'hyu': 'ㄏㄧㄨ', 'hyo': 'ㄏㄧㄛ', 'mya': 'ㄇㄧㄚ', 'myu': 'ㄇㄧㄨ', 'myo': 'ㄇㄧㄛ', 'rya': 'ㄌㄧㄚ', 'ryu': 'ㄌㄧㄨ', 'ryo': 'ㄌㄧㄛ', 'gya': 'ㄍㄧㄚ', 'gyu': 'ㄍㄧㄨ', 'gyo': 'ㄍㄧㄛ', 'ja': 'ㄐㄧㄚ', 'ju': 'ㄐㄧㄨ', 'jo': 'ㄐㄧㄛ', 'bya': 'ㄅㄧㄚ', 'byu': 'ㄅㄧㄨ', 'byo': 'ㄅㄧㄛ', 'pya': 'ㄆㄧㄚ', 'pyu': 'ㄆㄧㄨ', 'pyo': 'ㄆㄧㄛ'}
 KOREAN_BOPOMOFO_MAP = { 'ㄱ': 'ㄍ', 'ㄲ': 'ㄍ', 'ㄴ': 'ㄋ', 'ㄷ': 'ㄉ', 'ㄸ': 'ㄉ', 'ㄹ': 'ㄌ', 'ㅁ': 'ㄇ', 'ㅂ': 'ㄅ', 'ㅃ': 'ㄅ', 'ㅅ': 'ㄙ', 'ㅆ': 'ㄙ', 'ㅇ': '', 'ㅈ': 'ㄗ', 'ㅉ': 'ㄗ', 'ㅊ': 'ㄘ', 'ㅋ': 'ㄎ', 'ㅌ': 'ㄊ', 'ㅍ': 'ㄆ', 'ㅎ': 'ㄏ', 'ㅏ': 'ㄚ', 'ㅐ': 'ㄝ', 'ㅑ': 'ㄧㄚ', 'ㅒ': 'ㄧㄝ', 'ㅓ': 'ㄛ', 'ㅔ': 'ㄝ', 'ㅕ': 'ㄧㄛ', 'ㅖ': 'ㄧㄝ', 'ㅗ': 'ㄛ', 'ㅘ': 'ㄨㄚ', 'ㅙ': 'ㄨㄝ', 'ㅚ': 'ㄨㄝ', 'ㅛ': 'ㄧㄛ', 'ㅜ': 'ㄨ', 'ㅝ': 'ㄨㄛ', 'ㅞ': 'ㄨㄝ', 'ㅟ': 'ㄨㄧ', 'ㅠ': 'ㄧㄨ', 'ㅡ': 'ㄜ', 'ㅢ': 'ㅢ', 'ㅣ': 'ㄧ', 'ㄳ': 'ㄍ', 'ㄵ': 'ㄣ', 'ㄶ': 'ㄣ', 'ㄺ': 'ㄌ', 'ㄻ': 'ㄌ', 'ㄼ': 'ㄌ', 'ㄽ': 'ㄌ', 'ㄾ': 'ㄌ', 'ㄿ': 'ㄌ', 'ㅀ': 'ㄌ', 'ㅄ': 'ㄅ' }
 
-# <--- 修改點: 更新為您指定的四種AI女友模式
 PERSONAS = {
     "sweet": {
         "title": "甜美女友",
@@ -126,7 +125,6 @@ PERSONAS = {
         "emoji": "🧊⚡️🖤"
     }
 }
-
 
 # ============================================
 # 3. 輔助函式 (Helper Functions)
@@ -198,7 +196,6 @@ def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceRoom): return event.source.room_id
     return event.source.user_id
 
-# <--- 修改點: 更新快捷按鈕以匹配四種模式
 def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
     return [
         QuickReplyButton(action=MessageAction(label="🌸 甜", text="甜")),
@@ -221,8 +218,6 @@ def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""; actions = [MessageAction(label="🎰 大樂透", text=f"{prefix}大樂透"), MessageAction(label="🎯 威力彩", text=f"{prefix}威力彩"), MessageAction(label="🔢 539", text=f"{prefix}539")]; return build_flex_menu("🎰 彩票服務", "最新開獎資訊", actions)
 def flex_menu_translate() -> FlexSendMessage:
     actions = [MessageAction(label="🇺🇸 翻英文", text="翻譯->英文"), MessageAction(label="🇹🇼 翻繁體中文", text="翻譯->繁體中文"), MessageAction(label="🇯🇵 翻日文", text="翻譯->日文"), MessageAction(label="🇰🇷 翻韓文", text="翻譯->韓文"), MessageAction(label="❌ 結束翻譯", text="翻譯->結束")]; return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", actions)
-
-# <--- 修改點: 更新人設選單以匹配四種模式
 def flex_menu_persona() -> FlexSendMessage:
     actions = [
         MessageAction(label="🌸 甜美女友", text="甜"),
@@ -298,7 +293,6 @@ def handle_message(event: MessageEvent):
         if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
         return push_simple(chat_id, final_reply, is_group, bot_name)
 
-    # <--- 修改點: 精簡 persona_keys 以匹配四種模式
     persona_keys = {"甜": "sweet", "鹹": "salty", "萌": "moe", "酷": "cool", "random": "random", "隨機": "random"}
     if low in persona_keys:
         key = set_user_persona(chat_id, persona_keys[low]); p = PERSONAS[key]
@@ -306,10 +300,20 @@ def handle_message(event: MessageEvent):
         return reply_simple(reply_token, f"💖 已切換人設！\n\n{info_text}", is_group, bot_name)
 
     reply_text = None
-    if any(k in msg for k in ["威力彩", "大樂透", "539"]): reply_text = lottery_gpt(msg)
-    elif "金價" in msg or "黃金" in msg: reply_text = gold_gpt()
-    elif "大盤" in msg: reply_text = stock_gpt("TSE")
-    elif re.fullmatch(r"(\d{4,6}[A-Za-z]?)|([A-Za-z]{1,5})", msg): reply_text = stock_gpt(msg)
+    # <--- 修改點: 整合並修正股票/大盤查詢邏輯
+    stock_code_to_query = None
+    if "大盤" in msg:
+        # 使用標準的台股加權指數代碼，若您的模組使用不同代碼(如 TWSE)，可在此修改
+        stock_code_to_query = "^TWII" 
+    elif re.fullmatch(r"(\d{4,6}[A-Za-z]?)|([A-Za-z]{1,5})", msg):
+        stock_code_to_query = msg.upper()
+    
+    if stock_code_to_query:
+        reply_text = stock_gpt(stock_code_to_query)
+    elif any(k in msg for k in ["威力彩", "大樂透", "539"]):
+        reply_text = lottery_gpt(msg)
+    elif "金價" in msg or "黃金" in msg:
+        reply_text = gold_gpt()
     
     if reply_text is not None:
         return reply_simple(reply_token, reply_text, is_group, bot_name)
