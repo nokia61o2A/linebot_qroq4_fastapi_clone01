@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v20 - 緊急修復翻譯功能Bug)
+aibot FastAPI 應用程序初始化 (v22 - 確認為免費方案最終版)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -269,11 +269,9 @@ def handle_message(event: MessageEvent):
         if choice == "結束": translation_states.pop(chat_id, None); return reply_simple(reply_token, "✅ 已結束翻譯模式", is_group, bot_name)
         else: translation_states[chat_id] = choice; return reply_simple(reply_token, f"🌐 本聊天室翻譯模式已啟用 -> {choice}", is_group, bot_name)
 
-    # <--- 修改點: 將翻譯相關的邏輯全部收納在這個區塊內，修復 NameError Bug
     if chat_id in translation_states:
+        # <--- 修改點: 移除 "處理中" 訊息
         target_lang = translation_states[chat_id]
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=f"好的，正在為您翻譯成 {target_lang}... ✍️"))
-        
         translated_text = asyncio.run(translate_text(msg, target_lang))
         guides = get_phonetic_guides(translated_text, target_lang)
         final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n{translated_text}"
@@ -281,7 +279,6 @@ def handle_message(event: MessageEvent):
         phonetic_parts = []
         if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
         if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
-        
         if guides.get('bopomofo'):
             if target_lang in ["繁體中文", "簡體中文"]:
                 bopomofo_text = '/'.join(guides['bopomofo'].split())
@@ -290,7 +287,8 @@ def handle_message(event: MessageEvent):
                 phonetic_parts.append(f"注音: {guides['bopomofo']}")
 
         if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
-        return push_simple(chat_id, final_reply, is_group, bot_name)
+        # <--- 修改點: 將 push_simple 改為 reply_simple 以節省額度
+        return reply_simple(reply_token, final_reply, is_group, bot_name)
 
     persona_keys = {"甜": "sweet", "鹹": "salty", "萌": "moe", "酷": "cool", "random": "random", "隨機": "random"}
     if low in persona_keys:
@@ -317,7 +315,7 @@ def handle_message(event: MessageEvent):
     if reply_text is not None:
         return reply_simple(reply_token, reply_text, is_group, bot_name)
 
-    line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，請稍候，我正在思考中... 🤔"))
+    # <--- 修改點: 移除 "思考中" 訊息
     try:
         history = conversation_history.get(chat_id, []); sentiment = asyncio.run(analyze_sentiment(msg))
         system_prompt = build_persona_prompt(chat_id, sentiment)
@@ -327,8 +325,9 @@ def handle_message(event: MessageEvent):
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
     except Exception as e:
         logger.error(f"AI 回覆失敗: {e}", exc_info=True); final_reply = "抱歉，我剛剛走神了 😅，可以再說一次嗎？"
-
-    return push_simple(chat_id, final_reply, is_group, bot_name)
+    
+    # <--- 修改點: 將 push_simple 改為 reply_simple 以節省額度
+    return reply_simple(reply_token, final_reply, is_group, bot_name)
 
 @handler.add(PostbackEvent)
 def handle_postback(event): pass
