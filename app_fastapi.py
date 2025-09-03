@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v17 - 修正大盤查詢功能)
+aibot FastAPI 應用程序初始化 (v18 - 修正日文翻譯格式)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -100,30 +100,10 @@ ROMAJI_BOPOMOFO_MAP = {'a': 'ㄚ', 'i': 'ㄧ', 'u': 'ㄨ', 'e': 'ㄝ', 'o': 'ㄛ
 KOREAN_BOPOMOFO_MAP = { 'ㄱ': 'ㄍ', 'ㄲ': 'ㄍ', 'ㄴ': 'ㄋ', 'ㄷ': 'ㄉ', 'ㄸ': 'ㄉ', 'ㄹ': 'ㄌ', 'ㅁ': 'ㄇ', 'ㅂ': 'ㄅ', 'ㅃ': 'ㄅ', 'ㅅ': 'ㄙ', 'ㅆ': 'ㄙ', 'ㅇ': '', 'ㅈ': 'ㄗ', 'ㅉ': 'ㄗ', 'ㅊ': 'ㄘ', 'ㅋ': 'ㄎ', 'ㅌ': 'ㄊ', 'ㅍ': 'ㄆ', 'ㅎ': 'ㄏ', 'ㅏ': 'ㄚ', 'ㅐ': 'ㄝ', 'ㅑ': 'ㄧㄚ', 'ㅒ': 'ㄧㄝ', 'ㅓ': 'ㄛ', 'ㅔ': 'ㄝ', 'ㅕ': 'ㄧㄛ', 'ㅖ': 'ㄧㄝ', 'ㅗ': 'ㄛ', 'ㅘ': 'ㄨㄚ', 'ㅙ': 'ㄨㄝ', 'ㅚ': 'ㄨㄝ', 'ㅛ': 'ㄧㄛ', 'ㅜ': 'ㄨ', 'ㅝ': 'ㄨㄛ', 'ㅞ': 'ㄨㄝ', 'ㅟ': 'ㄨㄧ', 'ㅠ': 'ㄧㄨ', 'ㅡ': 'ㄜ', 'ㅢ': 'ㅢ', 'ㅣ': 'ㄧ', 'ㄳ': 'ㄍ', 'ㄵ': 'ㄣ', 'ㄶ': 'ㄣ', 'ㄺ': 'ㄌ', 'ㄻ': 'ㄌ', 'ㄼ': 'ㄌ', 'ㄽ': 'ㄌ', 'ㄾ': 'ㄌ', 'ㄿ': 'ㄌ', 'ㅀ': 'ㄌ', 'ㅄ': 'ㄅ' }
 
 PERSONAS = {
-    "sweet": {
-        "title": "甜美女友",
-        "style": "溫柔體貼，總是對你充滿耐心，用鼓勵和安慰的話語溫暖你的心。",
-        "greetings": "親愛的，你來啦～今天過得好嗎？我在這聽你說喔 🌸",
-        "emoji": "🌸💕😊🥰"
-    },
-    "salty": {
-        "title": "傲嬌女友",
-        "style": "毒舌、傲嬌，表面上會吐槽你，但字裡行間卻流露出不經意的關心。",
-        "greetings": "哼，還知道要來找我啊？說吧，又遇到什麼麻煩事了。😏",
-        "emoji": "😏😒🙄"
-    },
-    "moe": {
-        "title": "萌系女友",
-        "style": "充滿動漫風格，大量使用顏文字和可愛的語氣詞，元氣滿滿地陪伴你 (๑•̀ㅂ•́)و✧",
-        "greetings": "主人～歡迎回來！(ﾉ>ω<)ﾉ ✨ 有沒有想我呀？",
-        "emoji": "✨🎀(ﾉ>ω<)ﾉ⭐"
-    },
-    "cool": {
-        "title": "酷系御姐",
-        "style": "冷靜、成熟又可靠的御姐，總能一針見血地分析問題，並給你專業又犀利的建議。",
-        "greetings": "我在。需要建議嗎？直接說重點。",
-        "emoji": "🧊⚡️🖤"
-    }
+    "sweet": {"title": "甜美女友", "style": "溫柔體貼，總是對你充滿耐心，用鼓勵和安慰的話語溫暖你的心。", "greetings": "親愛的，你來啦～今天過得好嗎？我在這聽你說喔 🌸", "emoji": "🌸💕😊🥰"},
+    "salty": {"title": "傲嬌女友", "style": "毒舌、傲嬌，表面上會吐槽你，但字裡行間卻流露出不經意的關心。", "greetings": "哼，還知道要來找我啊？說吧，又遇到什麼麻煩事了。😏", "emoji": "😏😒🙄"},
+    "moe": {"title": "萌系女友", "style": "充滿動漫風格，大量使用顏文字和可愛的語氣詞，元氣滿滿地陪伴你 (๑•̀ㅂ•́)و✧", "greetings": "主人～歡迎回來！(ﾉ>ω<)ﾉ ✨ 有沒有想我呀？", "emoji": "✨🎀(ﾉ>ω<)ﾉ⭐"},
+    "cool": {"title": "酷系御姐", "style": "冷靜、成熟又可靠的御姐，總能一針見血地分析問題，並給你專業又犀利的建議。", "greetings": "我在。需要建議嗎？直接說重點。", "emoji": "🧊⚡️🖤"}
 }
 
 # ============================================
@@ -141,38 +121,68 @@ def to_camel_case(s: str) -> str:
 def japanese_to_bopomofo(text: str) -> str:
     if not KAKASI_ENABLED: return ""
     try:
-        kks = pykakasi.kakasi(); result = kks.convert(text); romaji = "".join([item.get('romaji', item.get('orig', '')) for item in result])
+        # This function now specifically converts a romaji string to bopomofo
         bopomofo_str, i = "", 0
-        while i < len(romaji):
-            match = next((romaji[i:i+l] for l in (3, 2, 1) if romaji[i:i+l] in ROMAJI_BOPOMOFO_MAP), None)
-            if match: bopomofo_str += ROMAJI_BOPOMOFO_MAP[match]; i += len(match)
-            else: bopomofo_str += romaji[i]; i += 1
+        while i < len(text):
+            match = next((text[i:i+l] for l in (3, 2, 1) if text[i:i+l] in ROMAJI_BOPOMOFO_MAP), None)
+            if match:
+                bopomofo_str += ROMAJI_BOPOMOFO_MAP[match]
+                i += len(match)
+            else:
+                bopomofo_str += text[i]
+                i += 1
         return bopomofo_str
-    except Exception as e: logger.error(f"日文轉注音失敗: {e}"); return ""
+    except Exception as e:
+        logger.error(f"日文羅馬拼音轉注音失敗: {e}")
+        return ""
 
 def korean_to_bopomofo(text: str) -> str:
     if not HANGUL_JAMO_ENABLED: return ""
     try: return "".join([KOREAN_BOPOMOFO_MAP.get(char, char) for char in decompose(text)])
     except Exception as e: logger.error(f"韓文轉注音失敗: {e}"); return ""
 
+# <--- 修改點: 重寫日文發音處理邏輯以修復Bug並統一格式
 def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
     guides = {}
     if target_language == "日文" and KAKASI_ENABLED:
         try:
-            kks = pykakasi.kakasi(); romaji_list = [item['hepburn'] for item in kks.convert(text)]
-            guides['romaji'] = to_camel_case("".join(romaji_list)); guides['bopomofo'] = japanese_to_bopomofo(text)
-        except Exception as e: logger.error(f"日文發音處理失敗: {e}")
+            kks = pykakasi.kakasi()
+            result = kks.convert(text)
+            
+            romaji_parts = []
+            bopomofo_parts = []
+            
+            for item in result:
+                # 只處理實際的詞語，過濾掉標點符號等非字母字元
+                if item['hepburn'].isalpha():
+                    romaji_parts.append(item['hepburn'])
+                    bopomofo_parts.append(japanese_to_bopomofo(item['hepburn']))
+
+            # 格式化羅馬拼音：每個詞組首字大寫，用逗號分隔
+            guides['romaji'] = ','.join(p.capitalize() for p in romaji_parts)
+            # 格式化注音：用斜線分隔
+            guides['bopomofo'] = '/'.join(bopomofo_parts)
+
+        except Exception as e:
+            logger.error(f"日文發音處理失敗: {e}")
     elif target_language == "韓文":
         if KOREAN_ROMANIZER_ENABLED:
-            try: guides['romaji'] = to_camel_case(Romanizer(text).romanize())
-            except Exception as e: logger.error(f"韓文羅馬拼音處理失敗: {e}")
-        if HANGUL_JAMO_ENABLED: guides['bopomofo'] = korean_to_bopomofo(text)
+            try:
+                # 韓文格式也盡量對齊
+                romaji_text = Romanizer(text).romanize()
+                guides['romaji'] = ','.join(p.capitalize() for p in romaji_text.split())
+            except Exception as e:
+                logger.error(f"韓文羅馬拼音處理失敗: {e}")
+        if HANGUL_JAMO_ENABLED:
+            guides['bopomofo'] = korean_to_bopomofo(text)
     elif target_language in ["繁體中文", "簡體中文"] and PINYIN_ENABLED:
         try:
             pinyin_full = ' '.join(p[0] for p in pinyin(text, style=Style.NORMAL))
             bopomofo_full = ' '.join(p[0] for p in pinyin(text, style=Style.BOPOMOFO))
-            guides['pinyin'] = to_camel_case(pinyin_full); guides['bopomofo'] = bopomofo_full
-        except Exception as e: logger.error(f"中文發音處理失敗: {e}")
+            guides['pinyin'] = to_camel_case(pinyin_full)
+            guides['bopomofo'] = bopomofo_full
+        except Exception as e:
+            logger.error(f"中文發音處理失敗: {e}")
     return guides
 
 async def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
@@ -198,16 +208,11 @@ def get_chat_id(event: MessageEvent) -> str:
 
 def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
     return [
-        QuickReplyButton(action=MessageAction(label="🌸 甜", text="甜")),
-        QuickReplyButton(action=MessageAction(label="😏 鹹", text="鹹")),
-        QuickReplyButton(action=MessageAction(label="🎀 萌", text="萌")),
-        QuickReplyButton(action=MessageAction(label="🧊 酷", text="酷")),
-        # QuickReplyButton(action=MessageAction(label="💖 人設選單", text="我的人設")),
-        QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")),
-        QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")),
-        QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")),
-        QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")),
-        QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答"))
+        QuickReplyButton(action=MessageAction(label="🌸 甜", text="甜")), QuickReplyButton(action=MessageAction(label="😏 鹹", text="鹹")),
+        QuickReplyButton(action=MessageAction(label="🎀 萌", text="萌")), QuickReplyButton(action=MessageAction(label="🧊 酷", text="酷")),
+        QuickReplyButton(action=MessageAction(label="💖 人設選單", text="我的人設")), QuickReplyButton(action=MessageAction(label="💰 金融選單", text="金融選單")),
+        QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")), QuickReplyButton(action=MessageAction(label="🌐 翻譯選單", text="翻譯選單")),
+        QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")), QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答"))
     ]
 
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
@@ -219,14 +224,7 @@ def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
 def flex_menu_translate() -> FlexSendMessage:
     actions = [MessageAction(label="🇺🇸 翻英文", text="翻譯->英文"), MessageAction(label="🇹🇼 翻繁體中文", text="翻譯->繁體中文"), MessageAction(label="🇯🇵 翻日文", text="翻譯->日文"), MessageAction(label="🇰🇷 翻韓文", text="翻譯->韓文"), MessageAction(label="❌ 結束翻譯", text="翻譯->結束")]; return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", actions)
 def flex_menu_persona() -> FlexSendMessage:
-    actions = [
-        MessageAction(label="🌸 甜美女友", text="甜"),
-        MessageAction(label="😏 傲嬌女友", text="鹹"),
-        MessageAction(label="🎀 萌系女友", text="萌"),
-        MessageAction(label="🧊 酷系御姐", text="酷"),
-        MessageAction(label="🎲 隨機人設", text="random")
-    ]
-    return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
+    actions = [MessageAction(label="🌸 甜美女友", text="甜"), MessageAction(label="😏 傲嬌女友", text="鹹"), MessageAction(label="🎀 萌系女友", text="萌"), MessageAction(label="🧊 酷系御姐", text="酷"), MessageAction(label="🎲 隨機人設", text="random")]; return build_flex_menu("💖 人設選擇", "切換 AI 女友的說話風格", actions)
 
 def get_persona_info(chat_id: str) -> str:
     p_key = user_persona.get(chat_id, "sweet"); p = PERSONAS[p_key]; return f"💖 當前聊天室人設：{p['title']}\n\n【特質】{p['style']}\n\n{p['greetings']}"
@@ -282,14 +280,24 @@ def handle_message(event: MessageEvent):
 
     if chat_id in translation_states:
         line_bot_api.reply_message(reply_token, TextSendMessage(text=f"好的，正在為您翻譯成 {translation_states[chat_id]}... ✍️"))
-        target_lang = translation_states[chat_id]; translated_text = asyncio.run(translate_text(msg, target_lang)); guides = get_phonetic_guides(translated_text, target_lang)
+        target_lang = translation_states[chat_id]
+        translated_text = asyncio.run(translate_text(msg, target_lang))
+        guides = get_phonetic_guides(translated_text, target_lang)
         final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n{translated_text}"
+        
         phonetic_parts = []
         if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
         if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
+        
+        # <--- 修改點: 根據 get_phonetic_guides 的新格式調整顯示邏輯
         if guides.get('bopomofo'):
-            bopomofo_text = '/'.join(guides['bopomofo'].split())
-            phonetic_parts.append(f"注音: {bopomofo_text}")
+            # 中文注音是空格分隔，其他語言的注音已經由 get_phonetic_guides 處理好格式
+            if target_language in ["繁體中文", "簡體中文"]:
+                bopomofo_text = '/'.join(guides['bopomofo'].split())
+                phonetic_parts.append(f"注音: {bopomofo_text}")
+            else:
+                phonetic_parts.append(f"注音: {guides['bopomofo']}")
+
         if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
         return push_simple(chat_id, final_reply, is_group, bot_name)
 
@@ -300,10 +308,8 @@ def handle_message(event: MessageEvent):
         return reply_simple(reply_token, f"💖 已切換人設！\n\n{info_text}", is_group, bot_name)
 
     reply_text = None
-    # <--- 修改點: 整合並修正股票/大盤查詢邏輯
     stock_code_to_query = None
     if "大盤" in msg:
-        # 使用標準的台股加權指數代碼，若您的模組使用不同代碼(如 TWSE)，可在此修改
         stock_code_to_query = "^TWII" 
     elif re.fullmatch(r"(\d{4,6}[A-Za-z]?)|([A-Za-z]{1,5})", msg):
         stock_code_to_query = msg.upper()
