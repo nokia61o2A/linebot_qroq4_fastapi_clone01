@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v22 - 確認為免費方案最終版)
+aibot FastAPI 應用程序初始化 (v23 - 徹底移除Push訊息，修復免費方案額度問題)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -226,12 +226,9 @@ def set_user_persona(chat_id: str, key: str):
 def build_persona_prompt(chat_id: str, sentiment: str) -> str:
     p_key = user_persona.get(chat_id, "sweet"); p = PERSONAS[p_key]; emotion_guide = {"positive": "對方心情不錯，可以更活潑一點回應", "happy": "對方很開心，一起分享這份喜悦", "neutral": "正常聊天模式", "negative": "對方情緒低落，給予安慰和鼓勵", "sad": "對方很難過，溫柔陪伴和安慰", "angry": "對方生氣了，冷靜傾聽並安撫情緒"}; emotion_tip = emotion_guide.get(sentiment, "正常聊天模式"); return f"你是一位「{p['title']}」AI女友。你的角色特質是「{p['style']}」。根據使用者當前情緒「{sentiment}」，你應該「{emotion_tip}」。請用繁體中文、簡潔且帶有「{p['emoji']}」風格的表情符號來回應。"
 
-def push_simple(chat_id, text, is_group, bot_name):
-    try:
-        quick_items = build_quick_reply_items(is_group, bot_name)
-        message = TextSendMessage(text=text, quick_reply=QuickReply(items=quick_items))
-        line_bot_api.push_message(chat_id, message)
-    except LineBotApiError as e: logger.error(f"Push 訊息失敗: {e}")
+# <--- 修改點: 徹底移除 push_simple 函式
+# def push_simple(chat_id, text, is_group, bot_name):
+#     ...
 
 def reply_simple(reply_token, text, is_group, bot_name):
     try:
@@ -270,7 +267,6 @@ def handle_message(event: MessageEvent):
         else: translation_states[chat_id] = choice; return reply_simple(reply_token, f"🌐 本聊天室翻譯模式已啟用 -> {choice}", is_group, bot_name)
 
     if chat_id in translation_states:
-        # <--- 修改點: 移除 "處理中" 訊息
         target_lang = translation_states[chat_id]
         translated_text = asyncio.run(translate_text(msg, target_lang))
         guides = get_phonetic_guides(translated_text, target_lang)
@@ -287,7 +283,6 @@ def handle_message(event: MessageEvent):
                 phonetic_parts.append(f"注音: {guides['bopomofo']}")
 
         if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
-        # <--- 修改點: 將 push_simple 改為 reply_simple 以節省額度
         return reply_simple(reply_token, final_reply, is_group, bot_name)
 
     persona_keys = {"甜": "sweet", "鹹": "salty", "萌": "moe", "酷": "cool", "random": "random", "隨機": "random"}
@@ -315,7 +310,6 @@ def handle_message(event: MessageEvent):
     if reply_text is not None:
         return reply_simple(reply_token, reply_text, is_group, bot_name)
 
-    # <--- 修改點: 移除 "思考中" 訊息
     try:
         history = conversation_history.get(chat_id, []); sentiment = asyncio.run(analyze_sentiment(msg))
         system_prompt = build_persona_prompt(chat_id, sentiment)
@@ -326,7 +320,6 @@ def handle_message(event: MessageEvent):
     except Exception as e:
         logger.error(f"AI 回覆失敗: {e}", exc_info=True); final_reply = "抱歉，我剛剛走神了 😅，可以再說一次嗎？"
     
-    # <--- 修改點: 將 push_simple 改為 reply_simple 以節省額度
     return reply_simple(reply_token, final_reply, is_group, bot_name)
 
 @handler.add(PostbackEvent)
