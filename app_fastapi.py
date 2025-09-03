@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v19 - 新增美股大盤查詢)
+aibot FastAPI 應用程序初始化 (v20 - 緊急修復翻譯功能Bug)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -200,8 +200,6 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
 
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
     buttons = [ButtonComponent(style="primary", height="sm", action=act, margin="md", color="#905C44") for act in actions]; bubble = BubbleContainer(header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", color="#FFFFFF", align="center"), TextComponent(text=subtitle, size="sm", color="#EEEEEE", wrap=True, align="center", margin="md")], backgroundColor="#FF6B6B"), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px", backgroundColor="#FFF9F2")); return FlexSendMessage(alt_text=title, contents=bubble)
-
-# <--- 修改點: 在金融選單中加入美股大盤按鈕
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""
     actions = [
@@ -212,7 +210,6 @@ def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
         MessageAction(label="📊 查詢個股 (例: 2330)", text=f"{prefix}2330")
     ]
     return build_flex_menu("💰 金融服務", "快速查詢最新金融資訊", actions)
-
 def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""; actions = [MessageAction(label="🎰 大樂透", text=f"{prefix}大樂透"), MessageAction(label="🎯 威力彩", text=f"{prefix}威力彩"), MessageAction(label="🔢 539", text=f"{prefix}539")]; return build_flex_menu("🎰 彩票服務", "最新開獎資訊", actions)
 def flex_menu_translate() -> FlexSendMessage:
@@ -264,7 +261,6 @@ def handle_message(event: MessageEvent):
     if msg == "開啟自動回答": auto_reply_status[chat_id] = True; return reply_simple(reply_token, "✅ 已開啟自動回答模式", is_group, bot_name)
     if msg == "關閉自動回答": auto_reply_status[chat_id] = False; return reply_simple(reply_token, "❌ 已關閉自動回答模式", is_group, bot_name)
     
-    # 將 "台股大盤" 從選單關鍵字中移除，讓它進入下方的邏輯判斷
     menu_map = {'金融選單': flex_menu_finance(bot_name, is_group), '彩票選單': flex_menu_lottery(bot_name, is_group), '翻譯選單': flex_menu_translate(), '我的人設': flex_menu_persona(), '人設選單': flex_menu_persona()}
     if low in menu_map: return line_bot_api.reply_message(reply_token, menu_map[low])
     
@@ -273,19 +269,26 @@ def handle_message(event: MessageEvent):
         if choice == "結束": translation_states.pop(chat_id, None); return reply_simple(reply_token, "✅ 已結束翻譯模式", is_group, bot_name)
         else: translation_states[chat_id] = choice; return reply_simple(reply_token, f"🌐 本聊天室翻譯模式已啟用 -> {choice}", is_group, bot_name)
 
+    # <--- 修改點: 將翻譯相關的邏輯全部收納在這個區塊內，修復 NameError Bug
     if chat_id in translation_states:
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=f"好的，正在為您翻譯成 {translation_states[chat_id]}... ✍️"))
-        target_lang = translation_states[chat_id]; translated_text = asyncio.run(translate_text(msg, target_lang)); guides = get_phonetic_guides(translated_text, target_lang)
+        target_lang = translation_states[chat_id]
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=f"好的，正在為您翻譯成 {target_lang}... ✍️"))
+        
+        translated_text = asyncio.run(translate_text(msg, target_lang))
+        guides = get_phonetic_guides(translated_text, target_lang)
         final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n{translated_text}"
+        
         phonetic_parts = []
         if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
         if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
+        
         if guides.get('bopomofo'):
-            if target_language in ["繁體中文", "簡體中文"]:
+            if target_lang in ["繁體中文", "簡體中文"]:
                 bopomofo_text = '/'.join(guides['bopomofo'].split())
                 phonetic_parts.append(f"注音: {bopomofo_text}")
             else:
                 phonetic_parts.append(f"注音: {guides['bopomofo']}")
+
         if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
         return push_simple(chat_id, final_reply, is_group, bot_name)
 
@@ -296,12 +299,10 @@ def handle_message(event: MessageEvent):
         return reply_simple(reply_token, f"💖 已切換人設！\n\n{info_text}", is_group, bot_name)
 
     reply_text = None
-    # <--- 修改點: 增加對 "美股大盤" 的判斷
     stock_code_to_query = None
     if "台股大盤" in msg or "大盤" in msg:
         stock_code_to_query = "^TWII" 
     elif "美股大盤" in msg:
-        # 使用道瓊工業平均指數代碼，您也可以換成 S&P 500 (^GSPC) 或 Nasdaq (^IXIC)
         stock_code_to_query = "^DJI"
     elif re.fullmatch(r"(\d{4,6}[A-Za-z]?)|([A-Za-z]{1,5})", msg):
         stock_code_to_query = msg.upper()
