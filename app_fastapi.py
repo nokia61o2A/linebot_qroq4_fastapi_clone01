@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v18 - 修正日文翻譯格式)
+aibot FastAPI 應用程序初始化 (v19 - 新增美股大盤查詢)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -121,7 +121,6 @@ def to_camel_case(s: str) -> str:
 def japanese_to_bopomofo(text: str) -> str:
     if not KAKASI_ENABLED: return ""
     try:
-        # This function now specifically converts a romaji string to bopomofo
         bopomofo_str, i = "", 0
         while i < len(text):
             match = next((text[i:i+l] for l in (3, 2, 1) if text[i:i+l] in ROMAJI_BOPOMOFO_MAP), None)
@@ -141,48 +140,32 @@ def korean_to_bopomofo(text: str) -> str:
     try: return "".join([KOREAN_BOPOMOFO_MAP.get(char, char) for char in decompose(text)])
     except Exception as e: logger.error(f"韓文轉注音失敗: {e}"); return ""
 
-# <--- 修改點: 重寫日文發音處理邏輯以修復Bug並統一格式
 def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
     guides = {}
     if target_language == "日文" and KAKASI_ENABLED:
         try:
-            kks = pykakasi.kakasi()
-            result = kks.convert(text)
-            
-            romaji_parts = []
-            bopomofo_parts = []
-            
+            kks = pykakasi.kakasi(); result = kks.convert(text)
+            romaji_parts = []; bopomofo_parts = []
             for item in result:
-                # 只處理實際的詞語，過濾掉標點符號等非字母字元
                 if item['hepburn'].isalpha():
                     romaji_parts.append(item['hepburn'])
                     bopomofo_parts.append(japanese_to_bopomofo(item['hepburn']))
-
-            # 格式化羅馬拼音：每個詞組首字大寫，用逗號分隔
             guides['romaji'] = ','.join(p.capitalize() for p in romaji_parts)
-            # 格式化注音：用斜線分隔
             guides['bopomofo'] = '/'.join(bopomofo_parts)
-
-        except Exception as e:
-            logger.error(f"日文發音處理失敗: {e}")
+        except Exception as e: logger.error(f"日文發音處理失敗: {e}")
     elif target_language == "韓文":
         if KOREAN_ROMANIZER_ENABLED:
             try:
-                # 韓文格式也盡量對齊
                 romaji_text = Romanizer(text).romanize()
                 guides['romaji'] = ','.join(p.capitalize() for p in romaji_text.split())
-            except Exception as e:
-                logger.error(f"韓文羅馬拼音處理失敗: {e}")
-        if HANGUL_JAMO_ENABLED:
-            guides['bopomofo'] = korean_to_bopomofo(text)
+            except Exception as e: logger.error(f"韓文羅馬拼音處理失敗: {e}")
+        if HANGUL_JAMO_ENABLED: guides['bopomofo'] = korean_to_bopomofo(text)
     elif target_language in ["繁體中文", "簡體中文"] and PINYIN_ENABLED:
         try:
             pinyin_full = ' '.join(p[0] for p in pinyin(text, style=Style.NORMAL))
             bopomofo_full = ' '.join(p[0] for p in pinyin(text, style=Style.BOPOMOFO))
-            guides['pinyin'] = to_camel_case(pinyin_full)
-            guides['bopomofo'] = bopomofo_full
-        except Exception as e:
-            logger.error(f"中文發音處理失敗: {e}")
+            guides['pinyin'] = to_camel_case(pinyin_full); guides['bopomofo'] = bopomofo_full
+        except Exception as e: logger.error(f"中文發音處理失敗: {e}")
     return guides
 
 async def groq_chat_completion(messages, max_tokens=600, temperature=0.7):
@@ -217,8 +200,19 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
 
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
     buttons = [ButtonComponent(style="primary", height="sm", action=act, margin="md", color="#905C44") for act in actions]; bubble = BubbleContainer(header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", color="#FFFFFF", align="center"), TextComponent(text=subtitle, size="sm", color="#EEEEEE", wrap=True, align="center", margin="md")], backgroundColor="#FF6B6B"), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px", backgroundColor="#FFF9F2")); return FlexSendMessage(alt_text=title, contents=bubble)
+
+# <--- 修改點: 在金融選單中加入美股大盤按鈕
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
-    prefix = f"@{bot_name} " if is_group else ""; actions = [MessageAction(label="📈 台股大盤", text=f"{prefix}大盤"), MessageAction(label="💰 金價查詢", text=f"{prefix}金價"), MessageAction(label="💴 日元匯率", text=f"{prefix}JPY")]; return build_flex_menu("💰 金融服務", "快速查詢最新資訊", actions)
+    prefix = f"@{bot_name} " if is_group else ""
+    actions = [
+        MessageAction(label="🇹🇼 台股大盤", text=f"{prefix}台股大盤"),
+        MessageAction(label="🇺🇸 美股大盤", text=f"{prefix}美股大盤"),
+        MessageAction(label="💰 金價查詢", text=f"{prefix}金價"),
+        MessageAction(label="💴 日元匯率", text=f"{prefix}JPY"),
+        MessageAction(label="📊 查詢個股 (例: 2330)", text=f"{prefix}2330")
+    ]
+    return build_flex_menu("💰 金融服務", "快速查詢最新金融資訊", actions)
+
 def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""; actions = [MessageAction(label="🎰 大樂透", text=f"{prefix}大樂透"), MessageAction(label="🎯 威力彩", text=f"{prefix}威力彩"), MessageAction(label="🔢 539", text=f"{prefix}539")]; return build_flex_menu("🎰 彩票服務", "最新開獎資訊", actions)
 def flex_menu_translate() -> FlexSendMessage:
@@ -270,6 +264,7 @@ def handle_message(event: MessageEvent):
     if msg == "開啟自動回答": auto_reply_status[chat_id] = True; return reply_simple(reply_token, "✅ 已開啟自動回答模式", is_group, bot_name)
     if msg == "關閉自動回答": auto_reply_status[chat_id] = False; return reply_simple(reply_token, "❌ 已關閉自動回答模式", is_group, bot_name)
     
+    # 將 "台股大盤" 從選單關鍵字中移除，讓它進入下方的邏輯判斷
     menu_map = {'金融選單': flex_menu_finance(bot_name, is_group), '彩票選單': flex_menu_lottery(bot_name, is_group), '翻譯選單': flex_menu_translate(), '我的人設': flex_menu_persona(), '人設選單': flex_menu_persona()}
     if low in menu_map: return line_bot_api.reply_message(reply_token, menu_map[low])
     
@@ -280,24 +275,17 @@ def handle_message(event: MessageEvent):
 
     if chat_id in translation_states:
         line_bot_api.reply_message(reply_token, TextSendMessage(text=f"好的，正在為您翻譯成 {translation_states[chat_id]}... ✍️"))
-        target_lang = translation_states[chat_id]
-        translated_text = asyncio.run(translate_text(msg, target_lang))
-        guides = get_phonetic_guides(translated_text, target_lang)
+        target_lang = translation_states[chat_id]; translated_text = asyncio.run(translate_text(msg, target_lang)); guides = get_phonetic_guides(translated_text, target_lang)
         final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n{translated_text}"
-        
         phonetic_parts = []
         if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
         if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
-        
-        # <--- 修改點: 根據 get_phonetic_guides 的新格式調整顯示邏輯
         if guides.get('bopomofo'):
-            # 中文注音是空格分隔，其他語言的注音已經由 get_phonetic_guides 處理好格式
             if target_language in ["繁體中文", "簡體中文"]:
                 bopomofo_text = '/'.join(guides['bopomofo'].split())
                 phonetic_parts.append(f"注音: {bopomofo_text}")
             else:
                 phonetic_parts.append(f"注音: {guides['bopomofo']}")
-
         if phonetic_parts: final_reply += f"\n\n( {', '.join(phonetic_parts)} )"
         return push_simple(chat_id, final_reply, is_group, bot_name)
 
@@ -308,9 +296,13 @@ def handle_message(event: MessageEvent):
         return reply_simple(reply_token, f"💖 已切換人設！\n\n{info_text}", is_group, bot_name)
 
     reply_text = None
+    # <--- 修改點: 增加對 "美股大盤" 的判斷
     stock_code_to_query = None
-    if "大盤" in msg:
+    if "台股大盤" in msg or "大盤" in msg:
         stock_code_to_query = "^TWII" 
+    elif "美股大盤" in msg:
+        # 使用道瓊工業平均指數代碼，您也可以換成 S&P 500 (^GSPC) 或 Nasdaq (^IXIC)
+        stock_code_to_query = "^DJI"
     elif re.fullmatch(r"(\d{4,6}[A-Za-z]?)|([A-Za-z]{1,5})", msg):
         stock_code_to_query = msg.upper()
     
