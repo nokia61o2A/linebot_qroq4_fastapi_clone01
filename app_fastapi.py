@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v23 - 徹底移除Push訊息，修復免費方案額度問題)
+aibot FastAPI 應用程序初始化 (v24 - 更新Flex Menu為LINE經典配色)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -198,8 +198,36 @@ def build_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyBut
         QuickReplyButton(action=MessageAction(label="✅ 開啟自動回答", text="開啟自動回答")), QuickReplyButton(action=MessageAction(label="❌ 關閉自動回答", text="關閉自動回答"))
     ]
 
+# <--- 修改點: 更新Flex Menu的配色
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
-    buttons = [ButtonComponent(style="primary", height="sm", action=act, margin="md", color="#905C44") for act in actions]; bubble = BubbleContainer(header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", color="#FFFFFF", align="center"), TextComponent(text=subtitle, size="sm", color="#EEEEEE", wrap=True, align="center", margin="md")], backgroundColor="#FF6B6B"), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px", backgroundColor="#FFF9F2")); return FlexSendMessage(alt_text=title, contents=bubble)
+    buttons = [
+        ButtonComponent(
+            style="primary", 
+            height="sm", 
+            action=act, 
+            margin="md", 
+            color="#00B900"  # <--- 按鈕顏色改為LINE綠色
+        ) for act in actions
+    ]
+    bubble = BubbleContainer(
+        header=BoxComponent(
+            layout="vertical", 
+            contents=[
+                TextComponent(text=title, weight="bold", size="xl", color="#FFFFFF", align="center"),
+                TextComponent(text=subtitle, size="sm", color="#FFFFFF", wrap=True, align="center", margin="md") # <--- 副標題文字改為純白
+            ], 
+            backgroundColor="#00B900"  # <--- 頂部背景改為LINE綠色
+        ), 
+        body=BoxComponent(
+            layout="vertical", 
+            contents=buttons, 
+            spacing="sm", 
+            paddingAll="12px", 
+            backgroundColor="#FFFFFF"  # <--- 主體背景改為純白
+        )
+    )
+    return FlexSendMessage(alt_text=title, contents=bubble)
+
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""
     actions = [
@@ -225,10 +253,6 @@ def set_user_persona(chat_id: str, key: str):
     user_persona[chat_id] = key; return key
 def build_persona_prompt(chat_id: str, sentiment: str) -> str:
     p_key = user_persona.get(chat_id, "sweet"); p = PERSONAS[p_key]; emotion_guide = {"positive": "對方心情不錯，可以更活潑一點回應", "happy": "對方很開心，一起分享這份喜悦", "neutral": "正常聊天模式", "negative": "對方情緒低落，給予安慰和鼓勵", "sad": "對方很難過，溫柔陪伴和安慰", "angry": "對方生氣了，冷靜傾聽並安撫情緒"}; emotion_tip = emotion_guide.get(sentiment, "正常聊天模式"); return f"你是一位「{p['title']}」AI女友。你的角色特質是「{p['style']}」。根據使用者當前情緒「{sentiment}」，你應該「{emotion_tip}」。請用繁體中文、簡潔且帶有「{p['emoji']}」風格的表情符號來回應。"
-
-# <--- 修改點: 徹底移除 push_simple 函式
-# def push_simple(chat_id, text, is_group, bot_name):
-#     ...
 
 def reply_simple(reply_token, text, is_group, bot_name):
     try:
@@ -276,7 +300,7 @@ def handle_message(event: MessageEvent):
         if guides.get('romaji'): phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
         if guides.get('pinyin'): phonetic_parts.append(f"漢語拼音: {guides['pinyin']}")
         if guides.get('bopomofo'):
-            if target_lang in ["繁體中文", "簡體中文"]:
+            if target_language in ["繁體中文", "簡體中文"]:
                 bopomofo_text = '/'.join(guides['bopomofo'].split())
                 phonetic_parts.append(f"注音: {bopomofo_text}")
             else:
