@@ -1,5 +1,5 @@
 """
-aibot FastAPI 應用程序初始化 (v26 - 新增越南文翻譯與注音模擬)
+aibot FastAPI 應用程序初始化 (v27 - 修正越南文空耳格式)
 """
 # ============================================
 # 1. 匯入 (Imports)
@@ -11,7 +11,6 @@ import logging
 import random
 from contextlib import asynccontextmanager
 from typing import Dict, List
-import unicodedata
 
 import httpx
 from fastapi import FastAPI, APIRouter, Request, HTTPException
@@ -82,7 +81,6 @@ GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-70b-versatile"
 conversation_history, MAX_HISTORY_LEN = {}, 10
 auto_reply_status, user_persona, translation_states = {}, {}, {}
 
-# 🔥 核心修正: 將所有自訂模組匯入改為標準多行格式，避免語法錯誤
 try:
     from my_commands.lottery_gpt import lottery_gpt
 except ImportError:
@@ -100,10 +98,13 @@ except ImportError:
 ROMAJI_BOPOMOFO_MAP = {'a': 'ㄚ', 'i': 'ㄧ', 'u': 'ㄨ', 'e': 'ㄝ', 'o': 'ㄛ', 'ka': 'ㄎㄚ', 'ki': 'ㄎㄧ', 'ku': 'ㄎㄨ', 'ke': 'ㄎㄝ', 'ko': 'ㄎㄛ', 'sa': 'ㄙㄚ', 'shi': 'ㄒㄧ', 'su': 'ㄙㄨ', 'se': 'ㄙㄝ', 'so': 'ㄙㄛ', 'ta': 'ㄊㄚ', 'chi': 'ㄑㄧ', 'tsu': 'ㄘㄨ', 'te': 'ㄊㄝ', 'to': 'ㄊㄛ', 'na': 'ㄋㄚ', 'ni': 'ㄋㄧ', 'nu': 'ㄋㄨ', 'ne': 'ㄋㄝ', 'no': 'ㄋㄛ', 'ha': 'ㄏㄚ', 'hi': 'ㄏㄧ', 'fu': 'ㄈㄨ', 'he': 'ㄏㄝ', 'ho': 'ㄏㄛ', 'ma': 'ㄇㄚ', 'mi': 'ㄇㄧ', 'mu': 'ㄇㄨ', 'me': 'ㄇㄝ', 'mo': 'ㄇㄛ', 'ya': 'ㄧㄚ', 'yu': 'ㄧㄨ', 'yo': 'ㄧㄛ', 'ra': 'ㄌㄚ', 'ri': 'ㄌㄧ', 'ru': 'ㄌㄨ', 're': 'ㄌㄝ', 'ro': 'ㄌㄛ', 'wa': 'ㄨㄚ', 'wo': 'ㄛ', 'n': 'ㄣ', 'ga': 'ㄍㄚ', 'gi': 'ㄍㄧ', 'gu': 'ㄍㄨ', 'ge': 'ㄍㄝ', 'go': 'ㄍㄛ', 'za': 'ㄗㄚ', 'ji': 'ㄐㄧ', 'zu': 'ㄗㄨ', 'ze': 'ㄗㄝ', 'zo': 'ㄗㄛ', 'da': 'ㄉㄚ', 'di': 'ㄉㄧ', 'dzu': 'ㄉㄨ', 'de': 'ㄉㄝ', 'do': 'ㄉㄛ', 'ba': 'ㄅㄚ', 'bi': 'ㄅㄧ', 'bu': 'ㄅㄨ', 'be': 'ㄅㄝ', 'bo': 'ㄅㄛ', 'pa': 'ㄆㄚ', 'pi': 'ㄆㄧ', 'pu': 'ㄆㄨ', 'pe': 'ㄆㄝ', 'po': 'ㄆㄛ', 'kya': 'ㄎㄧㄚ', 'kyu': 'ㄎㄧㄨ', 'kyo': 'ㄎㄧㄛ', 'sha': 'ㄕㄚ', 'shu': 'ㄕㄨ', 'sho': 'ㄕㄛ', 'cha': 'ㄑㄚ', 'chu': 'ㄑㄨ', 'cho': 'ㄑㄛ', 'nya': 'ㄋㄧㄚ', 'nyu': 'ㄋㄧㄨ', 'nyo': 'ㄋㄧㄛ', 'hya': 'ㄏㄧㄚ', 'hyu': 'ㄏㄧㄨ', 'hyo': 'ㄏㄧㄛ', 'mya': 'ㄇㄧㄚ', 'myu': 'ㄇㄧㄨ', 'myo': 'ㄇㄧㄛ', 'rya': 'ㄌㄧㄚ', 'ryu': 'ㄌㄧㄨ', 'ryo': 'ㄌㄧㄛ', 'gya': 'ㄍㄧㄚ', 'gyu': 'ㄍㄧㄨ', 'gyo': 'ㄍㄧㄛ', 'ja': 'ㄐㄧㄚ', 'ju': 'ㄐㄧㄨ', 'jo': 'ㄐㄧㄛ', 'bya': 'ㄅㄧㄚ', 'byu': 'ㄅㄧㄨ', 'byo': 'ㄅㄧㄛ', 'pya': 'ㄆㄧㄚ', 'pyu': 'ㄆㄧㄨ', 'pyo': 'ㄆㄧㄛ'}
 KOREAN_BOPOMOFO_MAP = { 'ㄱ': 'ㄍ', 'ㄲ': 'ㄍ', 'ㄴ': 'ㄋ', 'ㄷ': 'ㄉ', 'ㄸ': 'ㄉ', 'ㄹ': 'ㄌ', 'ㅁ': 'ㄇ', 'ㅂ': 'ㄅ', 'ㅃ': 'ㄅ', 'ㅅ': 'ㄙ', 'ㅆ': 'ㄙ', 'ㅇ': '', 'ㅈ': 'ㄗ', 'ㅉ': 'ㄗ', 'ㅊ': 'ㄘ', 'ㅋ': 'ㄎ', 'ㅌ': 'ㄊ', 'ㅍ': 'ㄆ', 'ㅎ': 'ㄏ', 'ㅏ': 'ㄚ', 'ㅐ': 'ㄝ', 'ㅑ': 'ㄧㄚ', 'ㅒ': 'ㄧㄝ', 'ㅓ': 'ㄛ', 'ㅔ': 'ㄝ', 'ㅕ': 'ㄧㄛ', 'ㅖ': 'ㄧㄝ', 'ㅗ': 'ㄛ', 'ㅘ': 'ㄨㄚ', 'ㅙ': 'ㄨㄝ', 'ㅚ': 'ㄨㄝ', 'ㅛ': 'ㄧㄛ', 'ㅜ': 'ㄨ', 'ㅝ': 'ㄨㄛ', 'ㅞ': 'ㄨㄝ', 'ㅟ': 'ㄨㄧ', 'ㅠ': 'ㄧㄨ', 'ㅡ': 'ㄜ', 'ㅢ': 'ㅢ', 'ㅣ': 'ㄧ', 'ㄳ': 'ㄍ', 'ㄵ': 'ㄣ', 'ㄶ': 'ㄣ', 'ㄺ': 'ㄌ', 'ㄻ': 'ㄌ', 'ㄼ': 'ㄌ', 'ㄽ': 'ㄌ', 'ㄾ': 'ㄌ', 'ㄿ': 'ㄌ', 'ㅀ': 'ㄌ', 'ㅄ': 'ㄅ' }
 
-# <--- 新增點: 越南文注音模擬映射表
-VIETNAMESE_BOPOMOFO_MAP = {'a': 'ㄚ', 'ă': 'ㄚ', 'â': 'ㄜ', 'b': 'ㄅ', 'c': 'ㄍ', 'ch': 'ㄐ', 'd': 'ㄗ', 'đ': 'ㄉ', 'e': 'ㄝ', 'ê': 'ㄝ', 'g': 'ㄍ', 'gh': 'ㄍ', 'gi': 'ㄗ', 'h': 'ㄏ', 'i': 'ㄧ', 'k': 'ㄍ', 'kh': 'ㄎ', 'l': 'ㄌ', 'm': 'ㄇ', 'n': 'ㄋ', 'ng': 'ㄥ', 'ngh': 'ㄥ', 'nh': 'ㄋ', 'o': 'ㄛ', 'ô': 'ㄛ', 'ơ': 'ㄜ', 'p': 'ㄅ', 'ph': 'ㄈ', 'qu': 'ㄨ', 'r': 'ㄌ', 's': 'ㄕ', 't': 'ㄉ', 'th': 'ㄊ', 'tr': 'ㄐ', 'u': 'ㄨ', 'ư': 'ือ', 'v': 'ㄨ', 'x': 'ㄙ', 'y': 'ㄧ'}
-VIETNAMESE_TONE_MAP = {' huyền': 'ˋ', ' sắc': 'ˊ', ' hỏi': 'ˇ', ' ngã': 'ˇ', ' nặng': '˙'}
-VIETNAMESE_CHAR_DECOMPOSE = {'à': 'a huyền', 'ằ': 'ă huyền', 'ầ': 'â huyền', 'è': 'e huyền', 'ề': 'ê huyền', 'ì': 'i huyền', 'ò': 'o huyền', 'ồ': 'ô huyền', 'ờ': 'ơ huyền', 'ù': 'u huyền', 'ừ': 'ư huyền', 'ỳ': 'y huyền', 'á': 'a sắc', 'ắ': 'ă sắc', 'ấ': 'â sắc', 'é': 'e sắc', 'ế': 'ê sắc', 'í': 'i sắc', 'ó': 'o sắc', 'ố': 'ô sắc', 'ớ': 'ơ sắc', 'ú': 'u sắc', 'ứ': 'ư sắc', 'ý': 'y sắc', 'ả': 'a hỏi', 'ẳ': 'ă hỏi', 'ẩ': 'â hỏi', 'ẻ': 'e hỏi', 'ể': 'ê hỏi', 'ỉ': 'i hỏi', 'ỏ': 'o hỏi', 'ổ': 'ô hỏi', 'ở': 'ơ hỏi', 'ủ': 'u hỏi', 'ử': 'ư hỏi', 'ỷ': 'y hỏi', 'ã': 'a ngã', 'ẵ': 'ă ngã', 'ẫ': 'â ngã', 'ẽ': 'e ngã', 'ễ': 'ê ngã', 'ĩ': 'i ngã', 'õ': 'o ngã', 'ỗ': 'ô ngã', 'ỡ': 'ơ ngã', 'ũ': 'u ngã', 'ữ': 'ư ngã', 'ỹ': 'y ngã', 'ạ': 'a nặng', 'ặ': 'ă nặng', 'ậ': 'â nặng', 'ẹ': 'e nặng', 'ệ': 'ê nặng', 'ị': 'i nặng', 'ọ': 'o nặng', 'ộ': 'ô nặng', 'ợ': 'ơ nặng', 'ụ': 'u nặng', 'ự': 'ư nặng', 'ỵ': 'y nặng'}
+# <--- 新增點/修改點: 全面更新越南文注音模擬系統
+VIET_CHAR_DECOMPOSE = {'ă': ('a', ''), 'â': ('a', ''), 'ê': ('e', ''), 'ô': ('o', ''), 'ơ': ('o', ''), 'ư': ('u', ''), 'à': ('a', 'huyền'), 'ằ': ('a', 'huyền'), 'ầ': ('a', 'huyền'), 'è': ('e', 'huyền'), 'ề': ('e', 'huyền'), 'ì': ('i', 'huyền'), 'ò': ('o', 'huyền'), 'ồ': ('o', 'huyền'), 'ờ': ('o', 'huyền'), 'ù': ('u', 'huyền'), 'ừ': ('u', 'huyền'), 'ỳ': ('y', 'huyền'), 'á': ('a', 'sắc'), 'ắ': ('a', 'sắc'), 'ấ': ('a', 'sắc'), 'é': ('e', 'sắc'), 'ế': ('e', 'sắc'), 'í': ('i', 'sắc'), 'ó': ('o', 'sắc'), 'ố': ('o', 'sắc'), 'ớ': ('o', 'sắc'), 'ú': ('u', 'sắc'), 'ứ': ('u', 'sắc'), 'ý': ('y', 'sắc'), 'ả': ('a', 'hỏi'), 'ẳ': ('a', 'hỏi'), 'ẩ': ('a', 'hỏi'), 'ẻ': ('e', 'hỏi'), 'ể': ('e', 'hỏi'), 'ỉ': ('i', 'hỏi'), 'ỏ': ('o', 'hỏi'), 'ổ': ('o', 'hỏi'), 'ở': ('o', 'hỏi'), 'ủ': ('u', 'hỏi'), 'ử': ('u', 'hỏi'), 'ỷ': ('y', 'hỏi'), 'ã': ('a', 'ngã'), 'ẵ': ('a', 'ngã'), 'ẫ': ('a', 'ngã'), 'ẽ': ('e', 'ngã'), 'ễ': ('e', 'ngã'), 'ĩ': ('i', 'ngã'), 'õ': ('o', 'ngã'), 'ỗ': ('o', 'ngã'), 'ỡ': ('o', 'ngã'), 'ũ': ('u', 'ngã'), 'ữ': ('u', 'ngã'), 'ỹ': ('y', 'ngã'), 'ạ': ('a', 'nặng'), 'ặ': ('a', 'nặng'), 'ậ': ('a', 'nặng'), 'ẹ': ('e', 'nặng'), 'ệ': ('e', 'nặng'), 'ị': ('i', 'nặng'), 'ọ': ('o', 'nặng'), 'ộ': ('o', 'nặng'), 'ợ': ('o', 'nặng'), 'ụ': ('u', 'nặng'), 'ự': ('u', 'nặng'), 'ỵ': ('y', 'nặng')}
+VIET_TONE_BOPOMOFO = {'ngang': '', 'huyền': 'ˋ', 'sắc': 'ˊ', 'hỏi': 'ˇ', 'ngã': 'ˇ', 'nặng': '˙'}
+VIET_TONE_SEPARATOR = {'ngang': '/', 'huyền': '＼/', 'sắc': '／/', 'hỏi': '?/', 'ngã': '~/', 'nặng': './'}
+VIET_VOWELS = {'a': 'ㄚ', 'ă': 'ㄚ', 'â': 'ㄜ', 'e': 'ㄝ', 'ê': 'ㄝ', 'i': 'ㄧ', 'y': 'ㄧ', 'o': 'ㄛ', 'ô': 'ㄛ', 'ơ': 'ㄜ', 'u': 'ㄨ', 'ư': 'ư', 'ia': 'ㄧㄚ', 'ya': 'ㄧㄚ', 'iê': 'ㄧㄝ', 'yê': 'ㄧㄝ', 'ua': 'ㄨㄚ', 'uô': 'ㄨㄛ', 'ưa': 'ưa', 'ươ': 'ươ', 'uy': 'ㄨㄧ', 'uâ': 'ㄨㄜ', 'ua': 'ㄨㄚ', 'oă': 'ㄨㄚ', 'oe': 'ㄨㄝ', 'ay': 'ㄞ', 'ây': 'ㄟ', 'ao': 'ㄠ', 'au': 'ㄠ', 'âu': 'ㄡ', 'eo': 'ㄝㄛ', 'êu': 'ㄧㄡ', 'iu': 'ㄧㄨ', 'oi': 'ㄛㄧ', 'ôi': 'ㄛㄧ', 'ơi': 'ㄜㄧ', 'ui': 'ㄨㄧ', 'ưi': 'ưi', 'uyu': 'ㄨㄧㄨ', 'oai': 'ㄨㄞ', 'oay': 'ㄨㄞ', 'uây': 'ㄨㄟ', 'ươi': 'ươi'}
+VIET_INITIALS = {'b': 'ㄅ', 'ch': 'ㄑ', 'd': 'ㄗ', 'đ': 'ㄉ', 'g': 'ㄍ', 'gh': 'ㄍ', 'h': 'ㄏ', 'k': 'ㄍ', 'kh': 'ㄎ', 'l': 'ㄌ', 'm': 'ㄇ', 'n': 'ㄋ', 'nh': 'ㄋ', 'p': 'ㄆ', 'ph': 'ㄈ', 'qu': 'ㄎㄨ', 'r': 'ㄖ', 's': 'ㄕ', 't': 'ㄊ', 'th': 'ㄊ', 'tr': 'ㄐ', 'v': 'ㄨ', 'x': 'ㄒ'}
+VIET_FINALS = {'c': 'ㄍ', 'ch': 'ㄍ', 'm': 'ㄇ', 'n': 'ㄣ', 'ng': 'ㄥ', 'nh': 'ㄣ', 'p': 'ㄅ', 't': 'ㄉ', 'u': 'ㄨ', 'y': 'ㄧ', 'i': 'ㄧ', 'o': 'ㄛ'}
 
 PERSONAS = {
     "sweet": {"title": "甜美女友", "style": "溫柔體貼，總是對你充滿耐心，用鼓勵和安慰的話語溫暖你的心。", "greetings": "親愛的，你來啦～今天過得好嗎？我在這聽你說喔 🌸", "emoji": "🌸💕😊🥰"},
@@ -130,56 +131,72 @@ def japanese_to_bopomofo(text: str) -> str:
         bopomofo_str, i = "", 0
         while i < len(text):
             match = next((text[i:i+l] for l in (3, 2, 1) if text[i:i+l] in ROMAJI_BOPOMOFO_MAP), None)
-            if match:
-                bopomofo_str += ROMAJI_BOPOMOFO_MAP[match]
-                i += len(match)
-            else:
-                bopomofo_str += text[i]
-                i += 1
+            if match: bopomofo_str += ROMAJI_BOPOMOFO_MAP[match]; i += len(match)
+            else: bopomofo_str += text[i]; i += 1
         return bopomofo_str
-    except Exception as e:
-        logger.error(f"日文羅馬拼音轉注音失敗: {e}")
-        return ""
+    except Exception as e: logger.error(f"日文羅馬拼音轉注音失敗: {e}"); return ""
 
 def korean_to_bopomofo(text: str) -> str:
     if not HANGUL_JAMO_ENABLED: return ""
     try: return "".join([KOREAN_BOPOMOFO_MAP.get(char, char) for char in decompose(text)])
     except Exception as e: logger.error(f"韓文轉注音失敗: {e}"); return ""
 
-# <--- 新增點: 越南文轉注音模擬函式
 def vietnamese_to_bopomofo(text: str) -> str:
     words = text.lower().split()
-    bopomofo_words = []
-    for word in words:
-        decomposed_word = ""
+    output_parts = []
+    
+    for i, word in enumerate(words):
+        original_word = word
+        # 1. Decompose tone and character
+        base_word = ""
+        tone = 'ngang'
         for char in word:
-            if char in VIETNAMESE_CHAR_DECOMPOSE:
-                decomposed_word += VIETNAMESE_CHAR_DECOMPOSE[char]
+            if char in VIET_CHAR_DECOMPOSE:
+                base_char, tone_name = VIET_CHAR_DECOMPOSE[char]
+                base_word += base_char
+                if tone_name: tone = tone_name
             else:
-                decomposed_word += char
+                base_word += char
         
-        # 處理聲調
-        tone = ''
-        for t_key, t_val in VIETNAMESE_TONE_MAP.items():
-            if t_key in decomposed_word:
-                tone = t_val
-                decomposed_word = decomposed_word.replace(t_key, '')
+        # 2. Syllable parsing (simple version)
+        bopomofo_syllable = ""
+        # Find initial
+        initial = ""
+        for l in (3, 2, 1):
+            if base_word.startswith(tuple(VIET_INITIALS.keys())) and base_word[0:l] in VIET_INITIALS:
+                initial = VIET_INITIALS[base_word[0:l]]
+                base_word = base_word[l:]
                 break
-
-        # 處理子音組合
-        syllable = ""
-        i = 0
-        while i < len(decomposed_word):
-            match = next((decomposed_word[i:i+l] for l in (3, 2, 1) if decomposed_word[i:i+l] in VIETNAMESE_BOPOMOFO_MAP), None)
-            if match:
-                syllable += VIETNAMESE_BOPOMOFO_MAP[match]
-                i += len(match)
-            else:
-                syllable += decomposed_word[i]
-                i += 1
         
-        bopomofo_words.append(syllable + tone)
-    return '/'.join(bopomofo_words)
+        # Find final
+        final = ""
+        for l in (2, 1):
+             if base_word.endswith(tuple(VIET_FINALS.keys())) and base_word[-l:] in VIET_FINALS:
+                 final = VIET_FINALS[base_word[-l:]]
+                 base_word = base_word[:-l]
+                 break
+        
+        # Vowel
+        vowel = VIET_VOWELS.get(base_word, "")
+        
+        bopomofo_syllable = initial + vowel + final + VIET_TONE_BOPOMOFO[tone]
+        
+        # Add separator based on the NEXT word's tone, or nothing if it's the last word
+        separator = ""
+        if i < len(words) - 1:
+            next_word = words[i+1]
+            next_tone = 'ngang'
+            for char in next_word:
+                if char in VIET_CHAR_DECOMPOSE:
+                    _, tone_name = VIET_CHAR_DECOMPOSE[char]
+                    if tone_name:
+                        next_tone = tone_name
+                        break
+            separator = VIET_TONE_SEPARATOR.get(next_tone, '/')
+
+        output_parts.append(bopomofo_syllable + separator)
+        
+    return ''.join(output_parts).strip('/')
 
 def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
     guides = {}
@@ -201,9 +218,8 @@ def get_phonetic_guides(text: str, target_language: str) -> Dict[str, str]:
                 guides['romaji'] = ','.join(p.capitalize() for p in romaji_text.split())
             except Exception as e: logger.error(f"韓文羅馬拼音處理失敗: {e}")
         if HANGUL_JAMO_ENABLED: guides['bopomofo'] = korean_to_bopomofo(text)
-    # <--- 新增點: 處理越南文發音
     elif target_language == "越南文":
-        guides['romaji'] = text # 越南文羅馬字即為其本身
+        guides['romaji'] = text 
         guides['bopomofo'] = vietnamese_to_bopomofo(text)
     elif target_language in ["繁體中文", "簡體中文"] and PINYIN_ENABLED:
         try:
@@ -264,7 +280,6 @@ def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
 def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""; actions = [MessageAction(label="🎰 大樂透", text=f"{prefix}大樂透"), MessageAction(label="🎯 威力彩", text=f"{prefix}威力彩"), MessageAction(label="🔢 539", text=f"{prefix}539")]; return build_flex_menu("🎰 彩票服務", "最新開獎資訊", actions)
 
-# <--- 修改點: 在翻譯選單中加入越南文選項
 def flex_menu_translate() -> FlexSendMessage:
     actions = [
         MessageAction(label="🇺🇸 翻英文", text="翻譯->英文"), 
@@ -331,10 +346,10 @@ def handle_message(event: MessageEvent):
         final_reply = f"🌐 翻譯結果 ({target_lang})：\n\n{translated_text}"
         
         phonetic_parts = []
-        # <--- 修改點: 調整發音標註的標題
         if guides.get('romaji'):
+            # <--- 修改點: 標籤改為 "耳空字"
             if target_lang == '越南文':
-                phonetic_parts.append(f"國語字: {guides['romaji']}")
+                phonetic_parts.append(f"耳空字: {guides['romaji']}")
             else:
                 phonetic_parts.append(f"羅馬拼音: {guides['romaji']}")
 
