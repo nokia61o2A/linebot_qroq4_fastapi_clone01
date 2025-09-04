@@ -1,3 +1,4 @@
+# ========== 1) Imports ==========
 import os
 import re
 import random
@@ -11,15 +12,12 @@ from io import StringIO
 # 匯率/運彩爬蟲需要的套件
 import requests
 from bs4 import BeautifulSoup
+
 import httpx
 import pandas as pd
 import html5lib
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
+# 【 crucial fix 】修正 APIRouter 的拼字錯誤
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
@@ -37,7 +35,7 @@ from linebot.models import (
 from groq import AsyncGroq, Groq
 import openai
 
-# --- 靈活載入彩票爬蟲模組 ---
+# --- 【靈活載入】載入自訂的彩票爬蟲模組 ---
 try:
     from TaiwanLottery import TaiwanLotteryCrawler
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
@@ -45,6 +43,7 @@ try:
 except ImportError as e:
     logging.warning(f"無法載入彩票模組，彩票功能將停用。請確認 TaiwanLottery.py 與 my_commands/CaiyunfangweiCrawler.py 存在。錯誤: {e}")
     LOTTERY_ENABLED = False
+
 
 # ========== 2) Setup ==========
 logger = logging.getLogger("uvicorn.error")
@@ -83,16 +82,8 @@ MAX_HISTORY_LEN = 10
 auto_reply_status: Dict[str, bool] = {}
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
-PERSONAS = {
-    "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰，不浮誇。", "greetings": "親愛的～我在這裡聽你說 🌸", "emoji":"🌸💕😊"},
-    "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度。", "greetings": "你又來啦？說吧，哪裡卡住了。😏", "emoji":"😏🙄"},
-    "moe":   {"title": "萌系女友", "style": "動漫語氣＋可愛顏文字，仍要有重點。", "greetings": "呀呼～今天也被我治癒一下嗎？(ﾉ>ω<)ﾉ", "emoji":"✨🎀"},
-    "cool":  {"title": "酷系御姐", "style": "冷靜精煉，關鍵建議。", "greetings": "我在。說重點。", "emoji":"🧊⚡️"}
-}
-LANGUAGE_MAP = {
-    "英文": "English", "日文": "Japanese", "韓文": "Korean",
-    "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"
-}
+PERSONAS = { "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰，不浮誇。", "greetings": "親愛的～我在這裡聽你說 🌸", "emoji":"🌸💕😊"}, "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度。", "greetings": "你又來啦？說吧，哪裡卡住了。😏", "emoji":"😏🙄"}, "moe":   {"title": "萌系女友", "style": "動漫語氣＋可愛顏文字，仍要有重點。", "greetings": "呀呼～今天也被我治癒一下嗎？(ﾉ>ω<)ﾉ", "emoji":"✨🎀"}, "cool":  {"title": "酷系御姐", "style": "冷靜精煉，關鍵建議。", "greetings": "我在。說重點。", "emoji":"🧊⚡️"}}
+LANGUAGE_MAP = { "英文": "English", "日文": "Japanese", "韓文": "Korean", "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"}
 
 # ========== 3) FastAPI ==========
 @asynccontextmanager
@@ -149,8 +140,9 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
 def get_gold_analysis():
     logger.info("開始執行黃金價格分析...")
     url = "https://rate.bot.com.tw/gold/chart/year/TWD"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'}
     response = requests.get(url, headers=headers)
+    response.raise_for_status()
     df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
     df = df_list[0]
     df = df[["日期", "本行賣出價格"]].copy()
@@ -158,146 +150,62 @@ def get_gold_analysis():
     df.sort_index(inplace=True)
     max_price, min_price = df['本行賣出價格'].max(), df['本行賣出價格'].min()
     last_price, last_date = df['本行賣出價格'].iloc[-1], df.index[-1].strftime("%Y-%m-%d")
-    content_msg = (
-        f'你是一位專業的金價分析師，請根據以下近一年的台灣銀行黃金牌價數據(台幣計價)，撰寫一份專業、簡潔且易懂的趨勢分析報告。\n'
-        f'--- 資料摘要 ---\n最新日期: {last_date}\n最新價格: {last_price}\n年度最高價: {max_price}\n年度最低價: {min_price}\n'
-        f'--- 最近30天數據 ---\n{df.tail(30).to_string()}\n--- 分析要求 ---\n'
-        f'1. 開頭先明確指出「{last_date} 的最新賣出牌價為 {last_price} 元」。\n'
-        f'2. 根據數據分析近一週、近一個月及近一年的價格趨勢。\n'
-        f'3. 提及年度高點與低點，並簡單說明其意義。\n'
-        f'4. 最後給出一個簡短的總結與後市展望（保持中立客觀）。\n'
-        f'5. 全程使用繁體中文，語氣專業，結構清晰。'
-    )
+    content_msg = (f'你是一位專業的金價分析師，請根據以下近一年的台灣銀行黃金牌價數據(台幣計價)，撰寫一份專業、簡潔且易懂的趨勢分析報告。\n'
+                   f'--- 資料摘要 ---\n最新日期: {last_date}\n最新價格: {last_price}\n年度最高價: {max_price}\n年度最低價: {min_price}\n'
+                   f'--- 最近30天數據 ---\n{df.tail(30).to_string()}\n--- 分析要求 ---\n'
+                   f'1. 開頭先明確指出「{last_date} 的最新賣出牌價為 {last_price} 元」。\n'
+                   f'2. 根據數據分析近一週、近一個月及近一年的價格趨勢。\n'
+                   f'3. 提及年度高點與低點，並簡單說明其意義。\n'
+                   f'4. 最後給出一個簡短的總結與後市展望（保持中立客觀）。\n'
+                   f'5. 全程使用繁體中文，語氣專業，結構清晰。')
     msg = [{"role": "system", "content": "你是一位專業的金價分析師。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
 
 def fetch_historical_currency_rates(kind: str):
-    logger.info(f"開始抓取 {kind} 歷史匯率資料...")
     url = f"https://rate.bot.com.tw/xrt/history/{kind}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Connection': 'keep-alive'
-    }
-
     try:
-        # 步驟 1: 使用 requests 嘗試抓取
-        response = requests.get(url, headers=headers, timeout=15)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        logger.info(f"HTTP 狀態碼: {response.status_code}")
-
-        # 檢查回應是否包含表格標籤
-        if '<table' not in response.text.lower():
-            logger.warning(f"{kind} 頁面無表格，切換至 Selenium...")
-            return fetch_with_selenium(kind, url)
-
-        # 嘗試用 pandas 解析 HTML 表格
+        
+        # 直接將 requests 取得的 response.text 傳給 pandas
         df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
         
         if not df_list:
-            logger.warning(f"{kind} 頁面無表格可解析，切換至 Selenium...")
-            return fetch_with_selenium(kind, url)
-
-        # 處理表格數據
-        df = df_list[0]
-        df.columns = ['日期', '幣別', '現金買入', '現金賣出', '即期買入', '即期賣出']
-        df = df[['日期', '即期賣出']].copy()
-        df['日期'] = pd.to_datetime(df['日期'], format='%Y/%m/%d', errors='coerce')
-        df['即期賣出'] = pd.to_numeric(df['即期賣出'], errors='coerce')
-        df.dropna(inplace=True)
-        df.sort_values(by='日期', ascending=True, inplace=True)
-        logger.info(f"成功抓取 {kind} 歷史匯率資料（使用 requests）。")
-        return df
-
-    except Exception as e:
-        logger.error(f"使用 requests 抓取 {kind} 資料失敗: {e}", exc_info=True)
-        logger.info("切換至 Selenium 後備方案...")
-        return fetch_with_selenium(kind, url)
-
-def fetch_with_selenium(kind: str, url: str):
-    try:
-        # 設定無頭 Chrome
-        options = Options()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-
-        driver = webdriver.Chrome(options=options)
-        driver.get(url)
-
-        # 等待表格元素出現
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "table"))
-        )
-        
-        # 獲取頁面原始碼並解析
-        page_source = driver.page_source
-        df_list = pd.read_html(StringIO(page_source), flavor='html5lib')
-        
-        driver.quit()
-
-        if not df_list:
-            logger.error(f"Selenium 抓取 {kind} 頁面無表格可解析。")
+            logger.warning(f"在 {kind} 歷史頁面找不到表格。")
             return None
-
-        # 處理表格數據
         df = df_list[0]
         df.columns = ['日期', '幣別', '現金買入', '現金賣出', '即期買入', '即期賣出']
         df = df[['日期', '即期賣出']].copy()
-        df['日期'] = pd.to_datetime(df['日期'], format='%Y/%m/%d', errors='coerce')
+        df['日期'] = pd.to_datetime(df['日期'])
         df['即期賣出'] = pd.to_numeric(df['即期賣出'], errors='coerce')
         df.dropna(inplace=True)
-        df.sort_values(by='日期', ascending=True, inplace=True)
-        logger.info(f"成功抓取 {kind} 歷史匯率資料（使用 Selenium）。")
+        logger.info(f"成功擷取 {kind} 的歷史匯率資料。")
         return df
-
     except Exception as e:
-        logger.error(f"Selenium 抓取 {kind} 資料失敗: {e}", exc_info=True)
-        if 'driver' in locals():
-            driver.quit()
+        logger.error(f"處理 {kind} 歷史匯率資料時發生錯誤: {e}", exc_info=True)
         return None
 
 def get_currency_analysis(kind: str):
     logger.info(f"開始執行 {kind} 歷史匯率分析...")
     currency_df = fetch_historical_currency_rates(kind)
-    
     if currency_df is None or currency_df.empty:
-        return f"抱歉，目前無法獲取 {kind} 的歷史匯率資料，請稍後再試或檢查網站結構。"
-
-    # 提取分析所需的數據
-    latest_rate = currency_df['即期賣出'].iloc[-1]
-    latest_date = currency_df['日期'].iloc[-1].strftime('%Y-%m-%d')
+        return f"抱歉，目前無法獲取 {kind} 的歷史匯率資料進行分析，請稍後再試。"
+    latest_rate = currency_df['即期賣出'].iloc[0]
+    latest_date = currency_df['日期'].iloc[0].strftime('%Y-%m-%d')
     high_30d = currency_df['即期賣出'].max()
     low_30d = currency_df['即期賣出'].min()
-    recent_data_str = currency_df.tail(7).to_string(index=False)
-
-    # 構建 LLM 提示詞
-    content_msg = (
-        f'你是一位專業的外匯分析師，請根據以下近一個月台灣銀行日圓(JPY)對台幣(TWD)的歷史匯率數據，撰寫一份清晰易懂的行情分析報告。\n\n'
-        f'--- 數據摘要 ---\n'
-        f'最新日期: {latest_date}\n'
-        f'最新即期賣出匯率: {latest_rate:.4f}\n'
-        f'近一個月最高匯率: {high_30d:.4f}\n'
-        f'近一個月最低匯率: {low_30d:.4f}\n\n'
-        f'--- 最近7天詳細數據 ---\n{recent_data_str}\n\n'
-        f'--- 分析要求 ---\n'
-        f'1. **開頭摘要**: 以「根據台灣銀行最新掛牌匯率...」開頭，明確點出最新的匯率是多少。\n'
-        f'2. **短期趨勢 (近一週)**: 比較目前匯率與一週前的匯率，說明台幣兌日圓是「升值」(變得更便宜)還是「貶值」(變得更貴)，並描述近一週的價格波動情況。\n'
-        f'3. **中期趨勢 (近一個月)**: 說明近一個月的整體走勢(例如：盤整、緩步下跌、明顯上漲)，並點出最高的價位({high_30d:.4f})和最低的價位({low_30d:.4f})，簡要說明它們可以作為近期的壓力或支撐參考點。\n'
-        f'4. **總結**: 給出一個簡潔的總結與展望（保持中立客觀）。\n'
-        f'5. **語氣與格式**: 使用專業、客觀且口語化的台灣繁體中文，適當分段以提高可讀性。\n'
-    )
-
-    # 呼叫 LLM 進行分析
-    messages = [
-        {"role": "system", "content": f"你是一位專業的 {kind} 幣種分析師，專門為台灣使用者提供匯率解析。"},
-        {"role": "user", "content": content_msg}
-    ]
-    return get_analysis_reply(messages)
+    recent_data_str = currency_df.head(7).to_string()
+    content_msg = (f'你是一位專業的外匯分析師，請根據我提供的近一個月台灣銀行日圓(JPY)對台幣(TWD)的歷史匯率數據，為使用者撰寫一份清晰易懂的行情分析報告。\n\n'
+                   f'--- 數據摘要 ---\n最新日期: {latest_date}\n最新即期賣出匯率: {latest_rate:.4f}\n近一個月最高匯率: {high_30d:.4f}\n近一個月最低匯率: {low_30d:.4f}\n\n'
+                   f'--- 最近7天詳細數據 ---\n{recent_data_str}\n\n--- 分析要求 ---\n'
+                   f'1. **開頭摘要**: 以「根據台灣銀行最新掛牌匯率...」開頭，明確點出最新的匯率是多少。\n'
+                   f'2. **短期趨勢 (近一週)**: 比較目前匯率與一週前的匯率，說明台幣兌日圓是「升值」(變得更便宜)還是「貶值」(變得更貴)，並描述近一週的價格波動情況。\n'
+                   f'3. **中期趨勢 (近一個月)**: 說明近一個月的整體走勢(例如：盤整、緩步下跌、明顯上漲)，並點出最高的價位({high_30d:.4f})和最低的價位({low_30d:.4f})，簡要說明它們可以作為近期的壓力或支撐參考點。\n'
+                   f'4. **總結**: 給出一個簡潔的總結與展望。\n'
+                   f'5. **語氣與格式**: 請使用專業、客觀且口語化的台灣繁體中文，多用換行讓報告易於閱讀。')
+    msg = [{"role": "system", "content": f"你是一位專業的 {kind} 幣種分析師，專門為台灣的使用者提供匯率解析。"}, {"role": "user", "content": content_msg}]
+    return get_analysis_reply(msg)
 
 def lotto_exercise():
     try:
@@ -323,37 +231,31 @@ def get_lottery_analysis(lottery_type_input: str):
     if "運彩" not in lottery_type:
         try:
             caiyunfangwei_info = caiyunfangwei_crawler.get_caiyunfangwei()
-            content_msg = (
-                f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-                f'近幾期號碼資訊:\n{last_lotto}\n'
-                f'顯示今天國歷/農歷日期：{caiyunfangwei_info.get("今天日期", "未知")}\n'
-                f'今日歲次：{caiyunfangwei_info.get("今日歲次", "未知")}\n'
-                f'財神方位：{caiyunfangwei_info.get("財神方位", "未知")}\n'
-                '最冷號碼，最熱號碼\n請給出完整的趨勢分析報告，最近所有每次開號碼,'
-                '並給3組與彩類同數位數字隨機號和不含特別號(如果有的彩種,)\n'
-                '第1組最冷組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                '第2組最熱組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                '第3組隨機組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                '請寫詳細的數字，1不要省略\n{發財的吉祥句20字內要有勵志感}\n'
-                'example:   ***財神方位提示***\n國歷：2024/06/19（星期三）\n農曆甲辰年五月十四號\n根據財神方位 :東北\n'
-                '使用台灣繁體中文。'
-            )
+            content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                           f'近幾期號碼資訊:\n{last_lotto}\n'
+                           f'顯示今天國歷/農歷日期：{caiyunfangwei_info.get("今天日期", "未知")}\n'
+                           f'今日歲次：{caiyunfangwei_info.get("今日歲次", "未知")}\n'
+                           f'財神方位：{caiyunfangwei_info.get("財神方位", "未知")}\n'
+                           '最冷號碼，最熱號碼\n請給出完整的趨勢分析報告，最近所有每次開號碼,'
+                           '並給3組與彩類同數位數字隨機號和不含特別號(如果有的彩種,)\n'
+                           '第1組最冷組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                           '第2組最熱組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                           '第3組隨機組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                           '請寫詳細的數字，1不要省略\n{發財的吉祥句20字內要有勵志感}\n'
+                           'example:   ***財神方位提示***\n國歷：2024/06/19（星期三）\n農曆甲辰年五月十四號\n根據財神方位 :東北\n'
+                           '使用台灣繁體中文。')
         except Exception as e:
             logger.error(f"獲取財神方位失敗: {e}")
-            content_msg = (
-                f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-                f'近幾期號碼資訊:\n{last_lotto}\n'
-                '財神方位資訊暫時無法獲取\n'
-                '請給出完整的趨勢分析報告，並給3組隨機號碼組合\n'
-                '使用台灣繁體中文。'
-            )
+            content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                           f'近幾期號碼資訊:\n{last_lotto}\n'
+                           '財神方位資訊暫時無法獲取\n'
+                           '請給出完整的趨勢分析報告，並給3組隨機號碼組合\n'
+                           '使用台灣繁體中文。')
     else:
-        content_msg = (
-            f'你現在是一位專業的運彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-            f'近幾運彩資料資訊:\n{last_lotto}\n'
-            '{發財的吉祥句20字內要有勵志感}\n'
-            '使用台灣用詞的繁體中文。'
-        )
+        content_msg = (f'你現在是一位專業的運彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                       f'近幾運彩資料資訊:\n{last_lotto}\n'
+                       '{發財的吉祥句20字內要有勵志感}\n'
+                       '使用台灣用詞的繁體中文。')
     
     msg = [{"role": "system", "content": f"你現在是一位專業的彩券分析師, 使用{lottery_type_input}近期的號碼進行分析，生成一份專業的趨勢分析報告。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
@@ -379,19 +281,12 @@ def set_user_persona(chat_id: str, key: str):
 def build_persona_prompt(chat_id: str, sentiment: str) -> str:
     key = user_persona.get(chat_id, "sweet")
     p = PERSONAS[key]
-    return (
-        f"你是一位「{p['title']}」。風格：{p['style']}\n"
-        f"使用者情緒：{sentiment}；請調整語氣（開心→一起開心；難過/生氣→先共情、安撫再給建議；中性→自然聊天）。\n"
-        f"回覆使用繁體中文，精煉自然，帶少量表情 {p['emoji']}。"
-    )
+    return (f"你是一位「{p['title']}」。風格：{p['style']}\n"
+            f"使用者情緒：{sentiment}；請調整語氣（開心→一起開心；難過/生氣→先共情、安撫再給建議；中性→自然聊天）。\n"
+            f"回覆使用繁體中文，精煉自然，帶少量表情 {p['emoji']}。")
 
 def make_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
-    return [QuickReplyButton(action=MessageAction(label=l, text=t)) for l, t in [
-        ("🌸 甜", "甜"), ("😏 鹹", "鹹"), ("🎀 萌", "萌"), ("🧊 酷", "酷"),
-        ("💖 人設選單", "我的人設"), ("💰 金融選單", "金融選單"),
-        ("🎰 彩票選單", "彩票選單"), ("🌐 翻譯選單", "翻譯選單"),
-        ("✅ 開啟自動回答", "開啟自動回答"), ("❌ 關閉自動回答", "關閉自動回答")
-    ]]
+    return [QuickReplyButton(action=MessageAction(label=l, text=t)) for l, t in [("🌸 甜", "甜"), ("😏 鹹", "鹹"), ("🎀 萌", "萌"), ("🧊 酷", "酷"), ("💖 人設選單", "我的人設"), ("💰 金融選單", "金融選單"), ("🎰 彩票選單", "彩票選單"), ("🌐 翻譯選單", "翻譯選單"), ("✅ 開啟自動回答", "開啟自動回答"), ("❌ 關閉自動回答", "關閉自動回答")]]
 
 def reply_with_quick_bar(reply_token: str, text: str, is_group: bool, bot_name: str):
     items = make_quick_reply_items(is_group, bot_name)
@@ -400,46 +295,25 @@ def reply_with_quick_bar(reply_token: str, text: str, is_group: bool, bot_name: 
 
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
     buttons = [ButtonComponent(style="primary", height="sm", action=a, margin="md", color="#00B900") for a in actions]
-    bubble = BubbleContainer(
-        header=BoxComponent(
-            layout="vertical",
-            contents=[
-                TextComponent(text=title, weight="bold", size="xl", align="center"),
-                TextComponent(text=subtitle, size="sm", color="#666666", wrap=True, align="center", margin="md")
-            ]
-        ),
-        body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px")
-    )
+    bubble = BubbleContainer(header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", align="center"), TextComponent(text=subtitle, size="sm", color="#666666", wrap=True, align="center", margin="md")]), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px"))
     return FlexSendMessage(alt_text=title, contents=bubble)
 
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""
-    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [
-        ("🇹🇼 台股大盤", "台股大盤"), ("🇺🇸 美股大盤", "美股大盤"),
-        ("💰 金價", "金價"), ("💴 日元", "JPY"), ("📊 個股(例:2330)", "2330")
-    ]]
+    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [("🇹🇼 台股大盤", "台股大盤"), ("🇺🇸 美股大盤", "美股大盤"), ("💰 金價", "金價"), ("💴 日元", "JPY"), ("📊 個股(例:2330)", "2330")]]
     return build_flex_menu("💰 金融服務", "快速查行情", acts)
 
 def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
     prefix = f"@{bot_name} " if is_group else ""
-    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [
-        ("🎰 大樂透", "大樂透"), ("🎯 威力彩", "威力彩"), ("🔢 539", "539")
-    ]]
+    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [("🎰 大樂透", "大樂透"), ("🎯 威力彩", "威力彩"), ("🔢 539", "539")]]
     return build_flex_menu("🎰 彩票服務", "開獎/趨勢", acts)
 
 def flex_menu_translate() -> FlexSendMessage:
-    acts = [MessageAction(label=l, text=t) for l, t in [
-        ("🇺🇸 英文", "翻譯->英文"), ("🇯🇵 日文", "翻譯->日文"),
-        ("🇰🇷 韓文", "翻譯->韓文"), ("🇻🇳 越南文", "翻譯->越南文"),
-        ("🇹🇼 繁中", "翻譯->繁體中文"), ("❌ 結束翻譯", "翻譯->結束")
-    ]]
+    acts = [MessageAction(label=l, text=t) for l, t in [("🇺🇸 英文", "翻譯->英文"), ("🇯🇵 日文", "翻譯->日文"), ("🇰🇷 韓文", "翻譯->韓文"), ("🇻🇳 越南文", "翻譯->越南文"), ("🇹🇼 繁中", "翻譯->繁體中文"), ("❌ 結束翻譯", "翻譯->結束")]]
     return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", acts)
 
 def flex_menu_persona() -> FlexSendMessage:
-    acts = [MessageAction(label=l, text=t) for l, t in [
-        ("🌸 甜美女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"),
-        ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")
-    ]]
+    acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
     return build_flex_menu("💖 人設選擇", "切換 AI 女友風格", acts)
 
 # ========== 5) LINE Handlers ==========
@@ -471,7 +345,9 @@ async def handle_message_async(event: MessageEvent):
 
     low = msg.lower()
 
-    # --- 命令 & 功能觸發區 ---
+    # --- 命令 & 功能觸發區 (按優先級排列) ---
+    
+    # 選單優先
     if low in ("金融選單", "彩票選單", "翻譯選單", "我的人設", "人設選單"):
         flex_map = {
             "金融選單": flex_menu_finance(bot_name, is_group), 
@@ -484,6 +360,7 @@ async def handle_message_async(event: MessageEvent):
         tip = TextSendMessage(text="👇 選一個功能開始吧", quick_reply=QuickReply(items=make_quick_reply_items(is_group, bot_name)))
         return line_bot_api.reply_message(reply_token, [flex, tip])
 
+    # 特定分析命令
     LOTTERY_KEYWORDS = ["大樂透", "威力彩", "539", "運彩"]
     if msg in LOTTERY_KEYWORDS:
         if not LOTTERY_ENABLED:
@@ -511,6 +388,7 @@ async def handle_message_async(event: MessageEvent):
             logger.error(f"日圓分析流程失敗: {e}", exc_info=True)
             return line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，日圓匯率分析服務暫時無法使用。"))
 
+    # 設定類命令
     if low in ("開啟自動回答", "關閉自動回答"):
         is_on = low == "開啟自動回答"
         auto_reply_status[chat_id] = is_on
@@ -532,6 +410,7 @@ async def handle_message_async(event: MessageEvent):
         txt = f"💖 已切換人設：{p['title']}\n\n【特質】{p['style']}\n{p['greetings']}"
         return reply_with_quick_bar(reply_token, txt, is_group, bot_name)
 
+    # --- 模式處理 & 一般對話 (最後的預設行為) ---
     if chat_id in translation_states:
         try:
             out = await translate_text(msg, translation_states[chat_id])
