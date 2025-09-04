@@ -21,3 +21,4 @@ hangul-jamo
 APScheduler==3.10.4
 tzlocal==5.2
 peewee==3.18.2
+html5lib
