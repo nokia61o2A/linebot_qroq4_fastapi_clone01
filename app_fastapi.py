@@ -7,6 +7,7 @@ import asyncio
 from typing import Dict, List
 from contextlib import asynccontextmanager
 import time
+from io import StringIO # 修正 FutureWarning 需要的模組
 
 # 匯率/運彩爬蟲需要的套件
 import requests
@@ -14,8 +15,7 @@ from bs4 import BeautifulSoup
 
 import httpx
 import pandas as pd
-# pandas.read_html 需要額外套件來解析網頁，請確保已安裝 (pip install lxml html5lib)
-import html5lib 
+import html5lib
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -157,12 +157,20 @@ def get_gold_analysis():
     msg = [{"role": "system", "content": "你是一位專業的金價分析師。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
 
+# 【 crucial fix 】修正匯率爬蟲函式
 def fetch_historical_currency_rates(kind: str):
     url = f"https://rate.bot.com.tw/xrt/history/{kind}"
     try:
-        response = requests.get(url, timeout=10)
+        # 新增 User-Agent 偽裝成瀏覽器
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        df_list = pd.read_html(response.text)
+        
+        # 使用 StringIO 修正 FutureWarning，並指定解析器
+        df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
+        
         if not df_list:
             logger.warning(f"在 {kind} 歷史頁面找不到表格。")
             return None
