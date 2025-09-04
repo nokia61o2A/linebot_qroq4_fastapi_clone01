@@ -42,7 +42,7 @@ try:
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
     LOTTERY_ENABLED = True
 except ImportError:
-    logging.warning("無法載入彩票模組，彩票功能將停用。請確認 TaiwanLottery.py 與 my_commands/CaiyunfangweiCrawler.py 存在。")
+    logging.warning("無法載入彩票模組，彩票功能將停用。")
     LOTTERY_ENABLED = False
 
 
@@ -164,59 +164,39 @@ def get_gold_analysis():
         logger.error(f"黃金價格爬取或分析失敗: {e}", exc_info=True)
         return "抱歉，目前無法獲取黃金價格，請稍後再試。"
 
-def fetch_historical_currency_api(target_currency: str, base_currency: str = 'TWD'):
-    today = datetime.now()
-    start_date = today - timedelta(days=30)
-    start_date_str = start_date.strftime('%Y-%m-%d')
-    today_str = today.strftime('%Y-%m-%d')
-    url = f"https://api.frankfurter.app/{start_date_str}..{today_str}?from={target_currency}&to={base_currency}"
+def get_currency_analysis(target_currency: str):
+    logger.info(f"開始執行 {target_currency} 匯率分析 (使用 open.er-api.com)...")
     try:
+        base_currency = 'TWD'
+        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-        rates = data.get('rates', {})
-        if not rates:
-            logger.warning(f"API 未返回 {target_currency} 的匯率數據。")
-            return None
-        df = pd.DataFrame(rates.items(), columns=['日期', '匯率'])
-        df['日期'] = pd.to_datetime(df['日期'])
-        df['即期賣出'] = df['匯率'].apply(lambda x: x.get(base_currency))
-        df = df.drop(columns=['匯率'])
-        df.sort_values(by='日期', ascending=False, inplace=True)
-        df.dropna(inplace=True)
-        logger.info(f"成功透過 API 獲取 {target_currency} 的歷史匯率資料。")
-        return df
+
+        if data.get("result") == "success":
+            rate = data["rates"].get(base_currency)
+            if rate is None:
+                return f"抱歉，API中找不到 {base_currency} 的匯率資訊。"
+            
+            twd_per_jpy = rate 
+            
+            content_msg = (f"你是一位外匯分析師，請根據最新即時匯率撰寫一則簡短的日圓(JPY)匯率快訊。\n"
+                           f"最新數據：1 日圓 (JPY) 可以兌換 {twd_per_jpy:.5f} 新台幣 (TWD)。\n"
+                           f"分析要求：\n1. 直接報告目前的匯率。\n2. 根據此匯率水平，簡要說明現在去日本旅遊或換匯是相對划算還是昂貴。\n3. 提供一句給換匯族的實用建議。\n4. 語氣輕鬆易懂，使用繁體中文。")
+            msg = [{"role": "system", "content": "你是一位專業的外匯分析師。"}, {"role": "user", "content": content_msg}]
+            return get_analysis_reply(msg)
+        else:
+            return f"抱歉，獲取匯率資料失敗：{data.get('error-type', '未知錯誤')}"
+            
     except requests.RequestException as e:
         logger.error(f"API 連接錯誤，無法獲取 {target_currency} 匯率: {e}")
-        return None
+        return f"抱歉，連接外匯 API 時發生網路錯誤，請稍後再試。"
     except Exception as e:
         logger.error(f"處理 {target_currency} API 資料時發生錯誤: {e}", exc_info=True)
-        return None
-
-def get_currency_analysis(kind: str):
-    logger.info(f"開始執行 {kind} 歷史匯率分析...")
-    currency_df = fetch_historical_currency_api(kind, 'TWD')
-    if currency_df is None or currency_df.empty:
-        return f"抱歉，目前無法透過API獲取 {kind} 的歷史匯率資料，請稍後再試。"
-    latest_rate = currency_df['即期賣出'].iloc[0]
-    latest_date = currency_df['日期'].iloc[0].strftime('%Y-%m-%d')
-    high_30d = currency_df['即期賣出'].max()
-    low_30d = currency_df['即期賣出'].min()
-    recent_data_str = currency_df.head(7).to_string()
-    content_msg = (f'你是一位專業的外匯分析師，請根據我提供的近一個月 {kind} 對台幣(TWD)的歷史匯率數據，為使用者撰寫一份清晰易懂的行情分析報告。\n\n'
-                   f'--- 數據摘要 ---\n最新日期: {latest_date}\n最新匯率(1 {kind} 兌 {1/latest_rate:.4f} TWD)\n近一個月最高價(最貴): {1/low_30d:.4f}\n近一個月最低價(最便宜): {1/high_30d:.4f}\n\n'
-                   f'--- 最近7天詳細數據 ---\n{recent_data_str}\n\n--- 分析要求 ---\n'
-                   f'1. **開頭摘要**: 明確點出最新的匯率 (1 {kind} 可兌換多少 TWD)。\n'
-                   f'2. **短期趨勢 (近一週)**: 比較目前匯率與一週前的匯率，說明換匯成本是「變貴」還是「變便宜」。\n'
-                   f'3. **中期趨勢 (近一個月)**: 說明近一個月的整體走勢，並點出最貴與最便宜的價位，簡要說明它們的參考意義。\n'
-                   f'4. **總結**: 給出一個簡潔的總結與給換匯族的一句話建議。\n'
-                   f'5. **語氣與格式**: 請使用專業、客觀且口語化的台灣繁體中文，多用換行讓報告易於閱讀。')
-    msg = [{"role": "system", "content": f"你是一位專業的 {kind} 幣種分析師，專門為台灣的使用者提供匯率解析。"}, {"role": "user", "content": content_msg}]
-    return get_analysis_reply(msg)
+        return f"抱歉，處理外匯資料時發生內部錯誤，請稍後再試。"
 
 def lotto_exercise():
     try:
-        # 請注意：此 API token 可能有每日使用限制
         params = {'sport': 'NBA', 'date': '2024-05-16', 'names': ['洛杉磯湖人', '金州勇士'], 'limit': 6}
         headers = {'X-JBot-Token': 'FREE_TOKEN_WITH_20_TIMES_PRE_DAY'}
         url = 'https://api.sportsbot.tech/v2/records'
@@ -321,7 +301,7 @@ def flex_menu_translate() -> FlexSendMessage:
     return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", acts)
 
 def flex_menu_persona() -> FlexSendMessage:
-    acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
+    acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
     return build_flex_menu("💖 人設選擇", "切換 AI 女友風格", acts)
 
 # ========== 5) LINE Handlers ==========
@@ -434,7 +414,7 @@ async def handle_message_async(event: MessageEvent):
         messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
         final_reply = await groq_chat_async(messages)
         history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}])
-        conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
+        conversation_history[chat_id] = history[-20:] # Keep last 10 turns
         return reply_with_quick_bar(reply_token, final_reply, is_group, bot_name)
     except Exception as e:
         logger.error(f"AI 回覆失敗: {e}", exc_info=True)
@@ -469,3 +449,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
+
