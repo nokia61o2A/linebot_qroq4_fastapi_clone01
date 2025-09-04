@@ -7,7 +7,7 @@ import asyncio
 from typing import Dict, List
 from contextlib import asynccontextmanager
 import time
-from io import StringIO # 修正 FutureWarning 需要的模組
+from io import StringIO
 
 # 匯率/運彩爬蟲需要的套件
 import requests
@@ -139,7 +139,9 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
 def get_gold_analysis():
     logger.info("開始執行黃金價格分析...")
     url = "https://rate.bot.com.tw/gold/chart/year/TWD"
-    df_list = pd.read_html(url)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'}
+    response = requests.get(url, headers=headers)
+    df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
     df = df_list[0]
     df = df[["日期", "本行賣出價格"]].copy()
     df.index = pd.to_datetime(df["日期"], format="%Y/%m/%d")
@@ -157,18 +159,14 @@ def get_gold_analysis():
     msg = [{"role": "system", "content": "你是一位專業的金價分析師。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
 
-# 【 crucial fix 】修正匯率爬蟲函式
 def fetch_historical_currency_rates(kind: str):
     url = f"https://rate.bot.com.tw/xrt/history/{kind}"
     try:
-        # 新增 User-Agent 偽裝成瀏覽器
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # 使用 StringIO 修正 FutureWarning，並指定解析器
+        # 直接將 requests 取得的 response.text 傳給 pandas
         df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
         
         if not df_list:
@@ -182,11 +180,8 @@ def fetch_historical_currency_rates(kind: str):
         df.dropna(inplace=True)
         logger.info(f"成功擷取 {kind} 的歷史匯率資料。")
         return df
-    except requests.RequestException as e:
-        logger.error(f"網路連接錯誤，無法獲取 {kind} 歷史匯率: {e}")
-        return None
     except Exception as e:
-        logger.error(f"處理 {kind} 歷史匯率資料時發生錯誤: {e}")
+        logger.error(f"處理 {kind} 歷史匯率資料時發生錯誤: {e}", exc_info=True)
         return None
 
 def get_currency_analysis(kind: str):
