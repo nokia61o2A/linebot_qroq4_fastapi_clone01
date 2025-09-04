@@ -10,14 +10,15 @@ import time
 from io import StringIO
 from datetime import datetime, timedelta
 
-# 匯率/運彩/黃金爬蟲需要的套件
+# --- 數據處理與爬蟲 ---
 import requests
 from bs4 import BeautifulSoup
 import httpx
 import pandas as pd
 import html5lib
+import yfinance as yf
 
-# FastAPI 與 LINE Bot SDK
+# --- FastAPI 與 LINE Bot SDK ---
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
@@ -32,11 +33,11 @@ from linebot.models import (
     TextComponent, ButtonComponent
 )
 
-# AI 相關
+# --- AI 相關 ---
 from groq import AsyncGroq, Groq
 import openai
 
-# --- 【靈活載入】載入自訂的彩票爬蟲模組 ---
+# --- 【靈活載入】載入自訂的彩票與股票爬蟲模組 ---
 try:
     from TaiwanLottery import TaiwanLotteryCrawler
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
@@ -45,6 +46,16 @@ except ImportError:
     logging.warning("無法載入彩票模組，彩票功能將停用。")
     LOTTERY_ENABLED = False
 
+try:
+    from my_commands.stock.stock_price import stock_price
+    from my_commands.stock.stock_news import stock_news
+    from my_commands.stock.stock_value import stock_fundamental
+    from my_commands.stock.stock_rate import stock_dividend
+    from my_commands.stock.YahooStock import YahooStock
+    STOCK_ENABLED = True
+except ImportError as e:
+    logging.warning(f"無法載入股票模組，股票功能將停用。錯誤: {e}")
+    STOCK_ENABLED = False
 
 # ========== 2) Setup ==========
 logger = logging.getLogger("uvicorn.error")
@@ -58,7 +69,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not all([BASE_URL, CHANNEL_TOKEN, CHANNEL_SECRET, GROQ_API_KEY]):
-    raise RuntimeError("缺少必要環境變數 (BASE_URL, CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, GROQ_API_KEY)")
+    raise RuntimeError("缺少必要環境變數")
 
 # --- API 用戶端初始化 ---
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
@@ -81,6 +92,7 @@ if LOTTERY_ENABLED:
 
 # --- 狀態字典與常數 ---
 conversation_history: Dict[str, List[dict]] = {}
+MAX_HISTORY_LEN = 10
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
 auto_reply_status: Dict[str, bool] = {}
@@ -145,6 +157,7 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
         resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
         return resp.choices[0].message.content.strip()
 
+# --- 金融 & 彩票分析 ---
 def get_gold_analysis():
     logger.info("開始執行黃金價格分析...")
     try:
@@ -165,21 +178,17 @@ def get_gold_analysis():
         return "抱歉，目前無法獲取黃金價格，請稍後再試。"
 
 def get_currency_analysis(target_currency: str):
-    logger.info(f"開始執行 {target_currency} 匯率分析 (使用 open.er-api.com)...")
+    logger.info(f"開始執行 {target_currency} 匯率分析...")
     try:
         base_currency = 'TWD'
         url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-
         if data.get("result") == "success":
             rate = data["rates"].get(base_currency)
-            if rate is None:
-                return f"抱歉，API中找不到 {base_currency} 的匯率資訊。"
-            
+            if rate is None: return f"抱歉，API中找不到 {base_currency} 的匯率資訊。"
             twd_per_jpy = rate 
-            
             content_msg = (f"你是一位外匯分析師，請根據最新即時匯率撰寫一則簡短的日圓(JPY)匯率快訊。\n"
                            f"最新數據：1 日圓 (JPY) 可以兌換 {twd_per_jpy:.5f} 新台幣 (TWD)。\n"
                            f"分析要求：\n1. 直接報告目前的匯率。\n2. 根據此匯率水平，簡要說明現在去日本旅遊或換匯是相對划算還是昂貴。\n3. 提供一句給換匯族的實用建議。\n4. 語氣輕鬆易懂，使用繁體中文。")
@@ -187,25 +196,9 @@ def get_currency_analysis(target_currency: str):
             return get_analysis_reply(msg)
         else:
             return f"抱歉，獲取匯率資料失敗：{data.get('error-type', '未知錯誤')}"
-            
-    except requests.RequestException as e:
-        logger.error(f"API 連接錯誤，無法獲取 {target_currency} 匯率: {e}")
-        return f"抱歉，連接外匯 API 時發生網路錯誤，請稍後再試。"
     except Exception as e:
         logger.error(f"處理 {target_currency} API 資料時發生錯誤: {e}", exc_info=True)
         return f"抱歉，處理外匯資料時發生內部錯誤，請稍後再試。"
-
-def lotto_exercise():
-    try:
-        params = {'sport': 'NBA', 'date': '2024-05-16', 'names': ['洛杉磯湖人', '金州勇士'], 'limit': 6}
-        headers = {'X-JBot-Token': 'FREE_TOKEN_WITH_20_TIMES_PRE_DAY'}
-        url = 'https://api.sportsbot.tech/v2/records'
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        res.raise_for_status()
-        return res.json()
-    except Exception as e:
-        logger.error(f"運彩資料獲取失敗: {e}")
-        return f"運彩資料獲取失敗: {e}"
 
 def get_lottery_analysis(lottery_type_input: str):
     logger.info(f"開始執行 {lottery_type_input} 彩票分析...")
@@ -247,6 +240,76 @@ def get_lottery_analysis(lottery_type_input: str):
     
     msg = [{"role": "system", "content": f"你現在是一位專業的彩券分析師, 使用{lottery_type_input}近期的號碼進行分析，生成一份專業的趨勢分析報告。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
+
+stock_data_df = None
+def load_stock_data():
+    global stock_data_df
+    if stock_data_df is None:
+        try:
+            stock_data_df = pd.read_csv('name_df.csv')
+        except FileNotFoundError:
+            logger.error("`name_df.csv` not found. Stock name lookup will be disabled.")
+            stock_data_df = pd.DataFrame(columns=['股號', '股名'])
+    return stock_data_df
+
+def get_stock_name(stock_id):
+    stock_data_df = load_stock_data()
+    result = stock_data_df[stock_data_df['股號'] == stock_id]
+    return result.iloc[0]['股名'] if not result.empty else None
+
+def remove_full_width_spaces(data):
+    return data.replace('\u3000', ' ') if isinstance(data, str) else data
+
+def get_stock_analysis(stock_id_input: str):
+    logger.info(f"開始執行 {stock_id_input} 股票分析...")
+    stock_id = stock_id_input
+    stock_name = stock_id_input
+
+    if stock_id_input in ["台股大盤", "大盤"]:
+        stock_id = "^TWII"
+        stock_name = "台灣加權指數"
+    elif stock_id_input in ["美股大盤", "美盤", "美股"]:
+        stock_id = "^GSPC"
+        stock_name = "S&P 500 指數"
+    else:
+        found_name = get_stock_name(stock_id)
+        if found_name:
+            stock_name = found_name
+    
+    try:
+        newprice_stock = YahooStock(stock_id) 
+        price_data = stock_price(stock_id)
+        news_data = str(stock_news(stock_name))
+        news_data = remove_full_width_spaces(news_data)[:1024]
+
+        content_msg = (f'你現在是一位專業的證券分析師, 你會依據以下資料來進行分析並給出一份完整的分析報告:\n'
+                       f'**股票代碼:** {stock_id}, **股票名稱:** {newprice_stock.name}\n'
+                       f'**即時報價:** {vars(newprice_stock)}\n'
+                       f'**近期價格資訊:**\n {price_data}\n')
+
+        if stock_id not in ["^TWII", "^GSPC"]:
+            stock_value_data = stock_fundamental(stock_id)
+            stock_vividend_data = stock_dividend(stock_id)
+            content_msg += f'**每季營收資訊：**\n {stock_value_data if stock_value_data is not None else "無法取得"}\n'
+            content_msg += f'**配息資料：**\n {stock_vividend_data if stock_vividend_data is not None else "無法取得"}\n'
+
+        content_msg += f'**近期新聞資訊:** \n {news_data}\n'
+        content_msg += f'請給我 {stock_name} 近期的趨勢報告。請以詳細、嚴謹及專業的角度撰寫此報告，並提及重要的數字，請使用台灣地區的繁體中文回答。'
+        
+        stock_link = f"https://finance.yahoo.com/quote/{stock_id}"
+        
+        system_prompt = (f"你現在是一位專業的證券分析師。請基於近期的股價走勢、基本面分析、新聞資訊等進行綜合分析。\n"
+                         f"請提供以下內容：\n- **股名(股號)** ,現價(現漲跌幅),現價的資料的取得時間\n- 股價走勢\n- 基本面分析\n- 技術面分析\n- 消息面\n- 籌碼面\n- 推薦購買區間\n- 預計停利點\n- 建議買入張數\n- 市場趨勢\n- 配息分析\n- 綜合分析\n"
+                         f"然後生成一份專業的趨勢分析報告。\n"
+                         f"最後，請提供一個正確的股票連結：[股票資訊連結]({stock_link})。\n"
+                         f"回應請使用繁體中文並格式化為 Markdown。")
+
+        msg = [{"role": "system", "content": system_prompt}, {"role": "user", "content": content_msg}]
+        return get_analysis_reply(msg)
+
+    except Exception as e:
+        logger.error(f"股票分析流程失敗: {e}", exc_info=True)
+        return f"抱歉，分析 {stock_id_input} 時發生錯誤，請確認股票代碼是否正確。"
 
 # --- UI & 對話 Helpers ---
 async def analyze_sentiment(text: str) -> str:
@@ -301,7 +364,7 @@ def flex_menu_translate() -> FlexSendMessage:
     return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", acts)
 
 def flex_menu_persona() -> FlexSendMessage:
-    acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
+    acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
     return build_flex_menu("💖 人設選擇", "切換 AI 女友風格", acts)
 
 # ========== 5) LINE Handlers ==========
@@ -335,7 +398,6 @@ async def handle_message_async(event: MessageEvent):
 
     # --- 命令 & 功能觸發區 (按優先級排列) ---
     
-    # 選單優先
     if low in ("金融選單", "彩票選單", "翻譯選單", "我的人設", "人設選單"):
         flex_map = {
             "金融選單": flex_menu_finance(bot_name, is_group), 
@@ -348,7 +410,6 @@ async def handle_message_async(event: MessageEvent):
         tip = TextSendMessage(text="👇 選一個功能開始吧", quick_reply=QuickReply(items=make_quick_reply_items(is_group, bot_name)))
         return line_bot_api.reply_message(reply_token, [flex, tip])
 
-    # 特定分析命令
     LOTTERY_KEYWORDS = ["大樂透", "威力彩", "539", "運彩"]
     if msg in LOTTERY_KEYWORDS:
         if not LOTTERY_ENABLED:
@@ -358,6 +419,14 @@ async def handle_message_async(event: MessageEvent):
             return line_bot_api.reply_message(reply_token, TextSendMessage(text=analysis_report))
         except Exception as e:
             logger.error(f"彩票分析流程失敗: {e}", exc_info=True)
+            return line_bot_api.reply_message(reply_token, TextSendMessage(text=f"抱歉，分析 {msg} 時發生錯誤。"))
+
+    if STOCK_ENABLED and (re.match(r'^\d{4,6}[A-Za-z]?$', msg) or msg in ["台股大盤", "美股大盤"]):
+        try:
+            analysis_report = await run_in_threadpool(get_stock_analysis, msg)
+            return line_bot_api.reply_message(reply_token, TextSendMessage(text=analysis_report))
+        except Exception as e:
+            logger.error(f"股票分析流程失敗: {e}", exc_info=True)
             return line_bot_api.reply_message(reply_token, TextSendMessage(text=f"抱歉，分析 {msg} 時發生錯誤。"))
 
     if low in ("金價", "黃金"):
@@ -376,7 +445,6 @@ async def handle_message_async(event: MessageEvent):
             logger.error(f"日圓分析流程失敗: {e}", exc_info=True)
             return line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，日圓匯率分析服務暫時無法使用。"))
 
-    # 設定類命令
     if low in ("開啟自動回答", "關閉自動回答"):
         is_on = low == "開啟自動回答"
         auto_reply_status[chat_id] = is_on
@@ -414,7 +482,7 @@ async def handle_message_async(event: MessageEvent):
         messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
         final_reply = await groq_chat_async(messages)
         history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}])
-        conversation_history[chat_id] = history[-20:] # Keep last 10 turns
+        conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
         return reply_with_quick_bar(reply_token, final_reply, is_group, bot_name)
     except Exception as e:
         logger.error(f"AI 回覆失敗: {e}", exc_info=True)

@@ -18,7 +18,7 @@ from openai import OpenAI
 # 設定 API 金鑰
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # 初始化 OpenAI 客戶端
-client = OpenAI(
+client = OpenAI( 
     api_key = os.getenv("OPENAI_API_KEY"),
     base_url = "https://free.v36.cm/v1"
 )
