@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 
 import httpx
 import pandas as pd
-from fastapi import FastAPI, AProuter, Request, HTTPException
+from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
 
@@ -31,7 +31,7 @@ from linebot.models import (
 from groq import AsyncGroq, Groq
 import openai
 
-# --- 載入自訂的彩票爬蟲模組 ---
+# --- 【靈活載入】載入自訂的彩票爬蟲模組 ---
 try:
     from TaiwanLottery import TaiwanLotteryCrawler
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
@@ -141,76 +141,62 @@ def get_gold_analysis():
     df = df[["日期", "本行賣出價格"]].copy()
     df.index = pd.to_datetime(df["日期"], format="%Y/%m/%d")
     df.sort_index(inplace=True)
-    
-    max_price = df['本行賣出價格'].max()
-    min_price = df['本行賣出價格'].min()
-    last_price = df['本行賣出價格'].iloc[-1]
-    last_date = df.index[-1].strftime("%Y-%m-%d")
-    recent_data = df.tail(30).to_string()
-    
+    max_price, min_price = df['本行賣出價格'].max(), df['本行賣出價格'].min()
+    last_price, last_date = df['本行賣出價格'].iloc[-1], df.index[-1].strftime("%Y-%m-%d")
     content_msg = (f'你是一位專業的金價分析師，請根據以下近一年的台灣銀行黃金牌價數據(台幣計價)，撰寫一份專業、簡潔且易懂的趨勢分析報告。\n'
                    f'--- 資料摘要 ---\n最新日期: {last_date}\n最新價格: {last_price}\n年度最高價: {max_price}\n年度最低價: {min_price}\n'
-                   f'--- 最近30天數據 ---\n{recent_data}\n--- 分析要求 ---\n'
+                   f'--- 最近30天數據 ---\n{df.tail(30).to_string()}\n--- 分析要求 ---\n'
                    f'1. 開頭先明確指出「{last_date} 的最新賣出牌價為 {last_price} 元」。\n'
                    f'2. 根據數據分析近一週、近一個月及近一年的價格趨勢。\n'
                    f'3. 提及年度高點與低點，並簡單說明其意義。\n'
                    f'4. 最後給出一個簡短的總結與後市展望（保持中立客觀）。\n'
                    f'5. 全程使用繁體中文，語氣專業，結構清晰。')
-    
     msg = [{"role": "system", "content": "你是一位專業的金價分析師。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
 
-def fetch_currency_rates(kind: str):
-    url = f"https://rate.bot.com.tw/xrt/quote/day/{kind}"
-    max_retries, retry_count, retry_delay = 3, 0, 2
-    while retry_count < max_retries:
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                df_list = pd.read_html(response.text)
-                if df_list:
-                    df = df_list[0]
-                    df = df.iloc[:, [0, 4]]
-                    df.columns = ['掛牌時間', '即期賣出']
-                    logger.info(f"成功擷取 {kind} 匯率資料。")
-                    return df
-            else:
-                logger.warning(f"HTTP 請求 {kind} 失敗，狀態碼: {response.status_code}")
-        except requests.RequestException as e:
-            logger.warning(f"網路連接錯誤 (嘗試 {retry_count+1}/{max_retries}): {e}")
-        
-        retry_count += 1
-        if retry_count < max_retries:
-            time.sleep(retry_delay)
-            retry_delay *= 2
-    
-    logger.error(f"所有重試均失敗，無法獲取 {kind} 匯率資料。")
-    return None
+def fetch_historical_currency_rates(kind: str):
+    url = f"https://rate.bot.com.tw/xrt/history/{kind}"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        df_list = pd.read_html(response.text)
+        if not df_list:
+            logger.warning(f"在 {kind} 歷史頁面找不到表格。")
+            return None
+        df = df_list[0]
+        df.columns = ['日期', '幣別', '現金買入', '現金賣出', '即期買入', '即期賣出']
+        df = df[['日期', '即期賣出']].copy()
+        df['日期'] = pd.to_datetime(df['日期'])
+        df['即期賣出'] = pd.to_numeric(df['即期賣出'], errors='coerce')
+        df.dropna(inplace=True)
+        logger.info(f"成功擷取 {kind} 的歷史匯率資料。")
+        return df
+    except requests.RequestException as e:
+        logger.error(f"網路連接錯誤，無法獲取 {kind} 歷史匯率: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"處理 {kind} 歷史匯率資料時發生錯誤: {e}")
+        return None
 
 def get_currency_analysis(kind: str):
-    logger.info(f"開始執行 {kind} 匯率分析...")
-    currency_df = fetch_currency_rates(kind)
+    logger.info(f"開始執行 {kind} 歷史匯率分析...")
+    currency_df = fetch_historical_currency_rates(kind)
     if currency_df is None or currency_df.empty:
-        return f"抱歉，目前無法獲取 {kind} 的匯率資料，請稍後再試。"
-
-    currency_df['即期賣出'] = pd.to_numeric(currency_df['即期賣出'], errors='coerce')
-    currency_df.dropna(subset=['即期賣出'], inplace=True)
-    
-    if currency_df.empty: return f"抱歉，獲取的 {kind} 資料格式有誤，暫時無法分析。"
-        
-    max_price, min_price = currency_df['即期賣出'].max(), currency_df['即期賣出'].min()
-    last_price, last_time = currency_df['即期賣出'].iloc[0], currency_df['掛牌時間'].iloc[0]
-
-    content_msg = (f'你是一位專業的日圓(JPY)匯率分析師，請根據以下今日台灣銀行日圓的即期賣出價數據(JPY/TWD)，撰寫一份專業、簡潔且易懂的趨勢分析報告。\n'
-                   f'--- 今日數據摘要 ---\n最新時間: {last_time}\n最新匯率: {last_price}\n今日最高價: {max_price}\n今日最低價: {min_price}\n'
-                   f'--- 今日所有報價紀錄 ---\n{currency_df.to_string()}\n--- 分析要求 ---\n'
-                   f'1. 開頭明確指出「截至 {last_time} 的最新日圓即期賣出價為 {last_price}」。\n'
-                   f'2. 根據今日的價格波動（最高、最低、最新價），分析今日盤中趨勢。\n'
-                   f'3. 提出簡短的結論，例如「日圓今天呈現波動走升/走貶/盤整格局」。\n'
-                   f'4. 可選：基於常識，簡要提及可能影響日圓匯率的總體經濟因素（例如：日本央行政策、美金走勢等）。\n'
-                   f'5. 全程使用繁體中文，語氣專業，避免不確定的預測。')
-
-    msg = [{"role": "system", "content": f"你是一位專業的 {kind} 幣種分析師。"}, {"role": "user", "content": content_msg}]
+        return f"抱歉，目前無法獲取 {kind} 的歷史匯率資料進行分析，請稍後再試。"
+    latest_rate = currency_df['即期賣出'].iloc[0]
+    latest_date = currency_df['日期'].iloc[0].strftime('%Y-%m-%d')
+    high_30d = currency_df['即期賣出'].max()
+    low_30d = currency_df['即期賣出'].min()
+    recent_data_str = currency_df.head(7).to_string()
+    content_msg = (f'你是一位專業的外匯分析師，請根據我提供的近一個月台灣銀行日圓(JPY)對台幣(TWD)的歷史匯率數據，為使用者撰寫一份清晰易懂的行情分析報告。\n\n'
+                   f'--- 數據摘要 ---\n最新日期: {latest_date}\n最新即期賣出匯率: {latest_rate:.4f}\n近一個月最高匯率: {high_30d:.4f}\n近一個月最低匯率: {low_30d:.4f}\n\n'
+                   f'--- 最近7天詳細數據 ---\n{recent_data_str}\n\n--- 分析要求 ---\n'
+                   f'1. **開頭摘要**: 以「根據台灣銀行最新掛牌匯率...」開頭，明確點出最新的匯率是多少。\n'
+                   f'2. **短期趨勢 (近一週)**: 比較目前匯率與一週前的匯率，說明台幣兌日圓是「升值」(變得更便宜)還是「貶值」(變得更貴)，並描述近一週的價格波動情況。\n'
+                   f'3. **中期趨勢 (近一個月)**: 說明近一個月的整體走勢(例如：盤整、緩步下跌、明顯上漲)，並點出最高的價位({high_30d:.4f})和最低的價位({low_30d:.4f})，簡要說明它們可以作為近期的壓力或支撐參考點。\n'
+                   f'4. **總結**: 給出一個簡潔的總結與展望。\n'
+                   f'5. **語氣與格式**: 請使用專業、客觀且口語化的台灣繁體中文，多用換行讓報告易於閱讀。')
+    msg = [{"role": "system", "content": f"你是一位專業的 {kind} 幣種分析師，專門為台灣的使用者提供匯率解析。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
 
 def lotto_exercise():
@@ -228,7 +214,6 @@ def lotto_exercise():
 def get_lottery_analysis(lottery_type_input: str):
     logger.info(f"開始執行 {lottery_type_input} 彩票分析...")
     lottery_type = lottery_type_input.lower()
-
     if "威力" in lottery_type: last_lotto = lottery_crawler.super_lotto()
     elif "大樂" in lottery_type: last_lotto = lottery_crawler.lotto649()
     elif "539" in lottery_type: last_lotto = lottery_crawler.daily_cash()
@@ -322,7 +307,6 @@ def flex_menu_translate() -> FlexSendMessage:
 def flex_menu_persona() -> FlexSendMessage:
     acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
     return build_flex_menu("💖 人設選擇", "切換 AI 女友風格", acts)
-
 
 # ========== 5) LINE Handlers ==========
 @handler.add(MessageEvent, message=TextMessage)
