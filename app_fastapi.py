@@ -4,11 +4,14 @@ import re
 import random
 import logging
 import asyncio
+import time
 from typing import Dict, List
 from contextlib import asynccontextmanager
 
 import httpx
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
@@ -24,7 +27,7 @@ from linebot.models import (
 )
 
 from groq import AsyncGroq, Groq
-import openai
+from openai import OpenAI
 
 # ========== 2) Setup ==========
 logger = logging.getLogger("uvicorn.error")
@@ -38,12 +41,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not all([BASE_URL, CHANNEL_TOKEN, CHANNEL_SECRET, GROQ_API_KEY]):
     raise RuntimeError("缺少必要環境變數（BASE_URL / CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET / GROQ_API_KEY）")
+
 # OpenAI API Key 改為可選
 if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
 else:
-    logger.warning("未設定 OPENAI_API_KEY，黃金分析將僅使用 Groq 作為後備。")
-
+    openai_client = None
+    logger.warning("未設定 OPENAI_API_KEY，分析將僅使用 Groq 作為後備。")
 
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
@@ -51,8 +55,8 @@ handler = WebhookHandler(CHANNEL_SECRET)
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 sync_groq_client = Groq(api_key=GROQ_API_KEY)
 
-GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-8b-instant")
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-70b-versatile")
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
 # 對話/狀態
 conversation_history: Dict[str, List[dict]] = {}
@@ -91,67 +95,144 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.0.0")
 router = APIRouter()
 
-# ========== 4) Helpers ==========
-def get_chat_id(event: MessageEvent) -> str:
-    if isinstance(event.source, SourceGroup): return event.source.group_id
-    if isinstance(event.source, SourceRoom):  return event.source.room_id
-    return event.source.user_id
-
-async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
-    # ... (此函式內容不變)
+# ========== 4) Currency Analysis Functions ==========
+def get_analysis_reply(messages):
+    """統一的分析回覆函式，支援 OpenAI 和 Groq"""
     try:
-        resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_PRIMARY, messages=messages, max_tokens=max_tokens, temperature=temperature)
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"Groq 主要模型失敗: {e}")
-        resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
-        return resp.choices[0].message.content.strip()
-
-async def analyze_sentiment(text: str) -> str:
-    # ... (此函式內容不變)
-    msgs = [{"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."}, {"role":"user","content":text}]
-    out = await groq_chat_async(msgs, max_tokens=10, temperature=0)
-    return (out or "neutral").strip().lower()
-
-async def translate_text(text: str, target_lang_display: str) -> str:
-    # ... (此函式內容不變)
-    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
-    sys = "You are a precise translation engine. Output ONLY the translated text."
-    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
-    return await groq_chat_async([{"role":"system","content":sys},{"role":"user","content":usr}], 800, 0.2)
-
-def set_user_persona(chat_id: str, key: str):
-    # ... (此函式內容不變)
-    if key == "random": key = random.choice(list(PERSONAS.keys()))
-    if key not in PERSONAS: key = "sweet"
-    user_persona[chat_id] = key
-    return key
-
-def build_persona_prompt(chat_id: str, sentiment: str) -> str:
-    # ... (此函式內容不變)
-    key = user_persona.get(chat_id, "sweet")
-    p = PERSONAS[key]
-    return (f"你是一位「{p['title']}」。風格：{p['style']}\n"
-            f"使用者情緒：{sentiment}；請調整語氣（開心→一起開心；難過/生氣→先共情、安撫再給建議；中性→自然聊天）。\n"
-            f"回覆使用繁體中文，精煉自然，帶少量表情 {p['emoji']}。")
-
-def get_gold_analysis_reply(messages):
-    # ... (此函式內容不變)
-    try:
-        if not OPENAI_API_KEY: raise openai.OpenAIError("OpenAI API key is not set.")
-        response = openai.chat.completions.create(model="gpt-3.5-turbo-1106", messages=messages)
+        if not openai_client: 
+            raise Exception("OpenAI client not available")
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo-1106", 
+            messages=messages
+        )
         return response.choices[0].message.content
-    except openai.OpenAIError as openai_err:
+    except Exception as openai_err:
         logger.error(f"OpenAI API 失敗: {openai_err}")
         try:
-            response = sync_groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=messages, max_tokens=1000, temperature=1.2)
+            response = sync_groq_client.chat.completions.create(
+                model=GROQ_MODEL_PRIMARY, 
+                messages=messages, 
+                max_tokens=1000, 
+                temperature=1.2
+            )
             return response.choices[0].message.content
         except Exception as groq_err:
-            logger.error(f"Groq API 備援也失敗: {groq_err}")
-            return "抱歉，AI分析師目前連線不穩定，請稍後再試。"
+            logger.error(f"Groq 主要模型失敗: {groq_err}")
+            try:
+                response = sync_groq_client.chat.completions.create(
+                    model=GROQ_MODEL_FALLBACK, 
+                    messages=messages, 
+                    max_tokens=1000, 
+                    temperature=1.2
+                )
+                return response.choices[0].message.content
+            except Exception as fallback_err:
+                logger.error(f"Groq 備援也失敗: {fallback_err}")
+                return "抱歉，AI分析師目前連線不穩定，請稍後再試。"
+
+def fetch_currency_rates(kind):
+    """擷取匯率資料"""
+    url = f"https://rate.bot.com.tw/xrt/quote/day/{kind}"
+    
+    max_retries = 3
+    retry_count = 0
+    retry_delay = 2
+
+    while retry_count < max_retries:
+        try:
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                table = soup.find('table', class_='table table-striped table-bordered table-condensed table-hover')
+                if not table:
+                    logger.warning(f"找不到 {kind} 匯率資料的表格。")
+                    return None
+
+                rows = table.find('tbody').find_all('tr')
+
+                time_rates = []
+                spot_rates = []
+                selling_rates = []
+
+                for row in rows:
+                    columns = row.find_all('td')
+                    if len(columns) >= 5:
+                        time_rate = columns[0].text.strip()
+                        spot_rate = columns[2].text.strip()
+                        selling_rate = columns[3].text.strip()
+
+                        time_rates.append(time_rate)
+                        spot_rates.append(spot_rate)
+                        selling_rates.append(selling_rate)
+
+                df = pd.DataFrame({
+                    '日期時間': time_rates,
+                    '即期匯率': spot_rates,
+                    '本行賣出價格': selling_rates
+                })
+
+                return df
+            else:
+                logger.warning(f"HTTP 請求失敗，狀態碼: {response.status_code}")
+                
+        except (requests.ConnectionError, requests.Timeout, requests.RequestException) as e:
+            logger.error(f"網路連接錯誤 (嘗試 {retry_count+1}/{max_retries}): {str(e)}")
+            
+        retry_count += 1
+        if retry_count < max_retries:
+            logger.info(f"等待 {retry_delay} 秒後重試...")
+            time.sleep(retry_delay)
+            retry_delay *= 2
+
+    logger.error("所有重試都失敗，返回預設值")
+    return pd.DataFrame({
+        '日期時間': ['N/A'],
+        '即期匯率': ['0.0'],
+        '本行賣出價格': ['0.0']
+    })
+
+def generate_currency_content_msg(kind):
+    """生成匯率分析報告內容"""
+    money_prices_df = fetch_currency_rates(kind)
+    if money_prices_df is None or money_prices_df.empty or money_prices_df['日期時間'].iloc[0] == 'N/A':
+        return "無法獲取匯率資料，但服務仍在運行中。請稍後再試。"
+
+    money_prices_df['本行賣出價格'] = pd.to_numeric(money_prices_df['本行賣出價格'], errors='coerce')
+    max_price = money_prices_df['本行賣出價格'].max()
+    min_price = money_prices_df['本行賣出價格'].min()
+    last_date = money_prices_df['日期時間'].iloc[-1]
+
+    content_msg = f'你現在是一位專業的{kind}幣種分析師，使用以下資料來撰寫分析報告：\n'
+    content_msg += f'{money_prices_df.tail(30)} 顯示最近的30筆資料，\n'
+    content_msg += f'最新日期時間: {last_date}，最高價: {max_price}，最低價: {min_price}。\n'
+    content_msg += '請給出完整的趨勢分析報告，顯示每日匯率（日期時間、匯率）（幣種/台幣），使用繁體中文。'
+
+    return content_msg
+
+def get_currency_analysis(kind):
+    """取得匯率分析報告"""
+    logger.info(f"開始執行{kind}匯率分析...")
+    content_msg = generate_currency_content_msg(kind)
+    
+    if content_msg == "無法獲取匯率資料，但服務仍在運行中。請稍後再試。":
+        return content_msg
+
+    msg = [{
+        "role": "system",
+        "content": f"你現在是一位專業的{kind}幣種分析師，使用以下資料來撰寫分析報告。"
+    }, {
+        "role": "user",
+        "content": content_msg
+    }]
+
+    reply_data = get_analysis_reply(msg)
+    logger.info(f"{kind}匯率分析完成。")
+    return reply_data
 
 def fetch_and_process_gold_data():
-    # ... (此函式內容不變)
+    """擷取和處理黃金資料"""
     url = "https://rate.bot.com.tw/gold/chart/year/TWD"
     df_list = pd.read_html(url)
     df = df_list[0]
@@ -161,7 +242,7 @@ def fetch_and_process_gold_data():
     return df
 
 def generate_gold_content_msg():
-    # ... (此函式內容不變)
+    """生成黃金分析報告內容"""
     gold_prices_df = fetch_and_process_gold_data()
     max_price, min_price = gold_prices_df['本行賣出價格'].max(), gold_prices_df['本行賣出價格'].min()
     last_price = gold_prices_df['本行賣出價格'].iloc[-1]
@@ -177,56 +258,87 @@ def generate_gold_content_msg():
             f'5. 全程使用繁體中文，語氣專業，結構清晰。')
 
 def get_gold_analysis():
-    # ... (此函式內容不變)
+    """取得黃金分析報告"""
     logger.info("開始執行黃金價格分析...")
     content_msg = generate_gold_content_msg()
     msg = [{"role": "system", "content": "你是一位專業的金價分析師, 使用以下數據來撰寫專業、簡潔、易懂的分析報告。"}, {"role": "user", "content": content_msg}]
-    reply_data = get_gold_analysis_reply(msg)
+    reply_data = get_analysis_reply(msg)
     logger.info("黃金價格分析完成。")
     return reply_data
 
+# ========== 5) Other Helper Functions ==========
+def get_chat_id(event: MessageEvent) -> str:
+    if isinstance(event.source, SourceGroup): return event.source.group_id
+    if isinstance(event.source, SourceRoom):  return event.source.room_id
+    return event.source.user_id
+
+async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
+    try:
+        resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_PRIMARY, messages=messages, max_tokens=max_tokens, temperature=temperature)
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Groq 主要模型失敗: {e}")
+        resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
+        return resp.choices[0].message.content.strip()
+
+async def analyze_sentiment(text: str) -> str:
+    msgs = [{"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."}, {"role":"user","content":text}]
+    out = await groq_chat_async(msgs, max_tokens=10, temperature=0)
+    return (out or "neutral").strip().lower()
+
+async def translate_text(text: str, target_lang_display: str) -> str:
+    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
+    sys = "You are a precise translation engine. Output ONLY the translated text."
+    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
+    return await groq_chat_async([{"role":"system","content":sys},{"role":"user","content":usr}], 800, 0.2)
+
+def set_user_persona(chat_id: str, key: str):
+    if key == "random": key = random.choice(list(PERSONAS.keys()))
+    if key not in PERSONAS: key = "sweet"
+    user_persona[chat_id] = key
+    return key
+
+def build_persona_prompt(chat_id: str, sentiment: str) -> str:
+    key = user_persona.get(chat_id, "sweet")
+    p = PERSONAS[key]
+    return (f"你是一位「{p['title']}」。風格：{p['style']}\n"
+            f"使用者情緒：{sentiment}；請調整語氣（開心→一起開心；難過/生氣→先共情、安撫再給建議；中性→自然聊天）。\n"
+            f"回覆使用繁體中文，精煉自然，帶少量表情 {p['emoji']}。")
+
 def make_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
-    # ... (此函式內容不變)
     return [QuickReplyButton(action=MessageAction(label=l, text=t)) for l, t in [("🌸 甜", "甜"), ("😏 鹹", "鹹"), ("🎀 萌", "萌"), ("🧊 酷", "酷"), ("💖 人設選單", "我的人設"), ("💰 金融選單", "金融選單"), ("🎰 彩票選單", "彩票選單"), ("🌐 翻譯選單", "翻譯選單"), ("✅ 開啟自動回答", "開啟自動回答"), ("❌ 關閉自動回答", "關閉自動回答")]]
 
 def reply_with_quick_bar(reply_token: str, text: str, is_group: bool, bot_name: str):
-    # ... (此函式內容不變)
     items = make_quick_reply_items(is_group, bot_name)
     msg = TextSendMessage(text=text, quick_reply=QuickReply(items=items))
     line_bot_api.reply_message(reply_token, msg)
 
 def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
-    # ... (此函式內容不變)
     buttons = [ButtonComponent(style="primary", height="sm", action=a, margin="md", color="#00B900") for a in actions]
     bubble = BubbleContainer(header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", color="#000000", align="center"), TextComponent(text=subtitle, size="sm", color="#666666", wrap=True, align="center", margin="md")], backgroundColor="#FFFFFF"), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px", backgroundColor="#FAFAFA"))
     return FlexSendMessage(alt_text=title, contents=bubble)
 
 def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
-    # ... (此函式內容不變)
     prefix = f"@{bot_name} " if is_group else ""
-    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [("🇹🇼 台股大盤", "台股大盤"), ("🇺🇸 美股大盤", "美股大盤"), ("💰 金價", "金價"), ("💴 日元", "JPY"), ("📊 個股(例:2330)", "2330")]]
+    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [("🇹🇼 台股大盤", "台股大盤"), ("🇺🇸 美股大盤", "美股大盤"), ("💰 金價", "金價"), ("💴 日元", "日元"), ("🇪🇺 歐元", "歐元"), ("🇬🇧 英鎊", "英鎊"), ("📊 個股(例:2330)", "2330")]]
     return build_flex_menu("💰 金融服務", "快速查行情", acts)
 
 def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
-    # ... (此函式內容不變)
     prefix = f"@{bot_name} " if is_group else ""
     acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [("🎰 大樂透", "大樂透"), ("🎯 威力彩", "威力彩"), ("🔢 539", "539")]]
     return build_flex_menu("🎰 彩票服務", "開獎/趨勢", acts)
 
 def flex_menu_translate() -> FlexSendMessage:
-    # ... (此函式內容不變)
     acts = [MessageAction(label=l, text=t) for l, t in [("🇺🇸 英文", "翻譯->英文"), ("🇯🇵 日文", "翻譯->日文"), ("🇰🇷 韓文", "翻譯->韓文"), ("🇻🇳 越南文", "翻譯->越南文"), ("🇹🇼 繁中", "翻譯->繁體中文"), ("❌ 結束翻譯", "翻譯->結束")]]
     return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", acts)
 
 def flex_menu_persona() -> FlexSendMessage:
-    # ... (此函式內容不變)
     acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
     return build_flex_menu("💖 人設選擇", "切換 AI 女友風格", acts)
 
-# ========== 5) LINE Handlers ==========
+# ========== 6) LINE Handlers ==========
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event: MessageEvent):
-    # ... (此函式內容不變)
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(handle_message_async(event))
@@ -279,20 +391,33 @@ async def handle_message_async(event: MessageEvent):
         txt = f"💖 已切換人設：{p['title']}\n\n【特質】{p['style']}\n{p['greetings']}"
         return reply_with_quick_bar(reply_token, txt, is_group, bot_name)
         
-    # --- 【 MODIFIED for Free Tier 】 ---
+    # 金融分析功能
     if low in ("金價", "黃金"):
         try:
-            # 直接在背景執行耗時的同步任務
             analysis_report = await run_in_threadpool(get_gold_analysis)
-            # 使用原始的 reply_token 回覆最終結果
             line_bot_api.reply_message(reply_token, TextSendMessage(text=analysis_report))
         except Exception as e:
             logger.error(f"黃金分析流程失敗: {e}", exc_info=True)
-            # 如果失敗，也用 reply_message 回覆錯誤訊息
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(text="抱歉，金價分析服務暫時無法使用，請稍後再試。")
-            )
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，金價分析服務暫時無法使用，請稍後再試。"))
+        return
+
+    # 匯率分析功能
+    currency_map = {
+        "日元": "JPY", "日幣": "JPY", "jpy": "JPY",
+        "美元": "USD", "美金": "USD", "usd": "USD", 
+        "歐元": "EUR", "eur": "EUR",
+        "英鎊": "GBP", "gbp": "GBP",
+        "人民幣": "CNY", "cny": "CNY"
+    }
+    
+    if low in currency_map:
+        currency_code = currency_map[low]
+        try:
+            analysis_report = await run_in_threadpool(get_currency_analysis, currency_code)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=analysis_report))
+        except Exception as e:
+            logger.error(f"{currency_code}匯率分析流程失敗: {e}", exc_info=True)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"抱歉，{currency_code}匯率分析服務暫時無法使用，請稍後再試。"))
         return
 
     if chat_id in translation_states:
@@ -321,10 +446,9 @@ async def handle_message_async(event: MessageEvent):
 def handle_postback(event):
     pass
 
-# ========== 6) FastAPI Routes ==========
+# ========== 7) FastAPI Routes ==========
 @router.post("/callback")
 async def callback(request: Request):
-    # ... (此函式內容不變)
     body = await request.body()
     signature = request.headers.get("X-Line-Signature", "")
     try:
@@ -342,8 +466,8 @@ async def root():
 
 app.include_router(router)
 
-# ========== 7) Local run ==========
+# ========== 8) Local run ==========
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
+    uvicorn.run("app_fastapi
