@@ -14,6 +14,9 @@ from bs4 import BeautifulSoup
 
 import httpx
 import pandas as pd
+# pandas.read_html 需要額外套件來解析網頁，請確保已安裝 (pip install lxml html5lib)
+import html5lib 
+
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
