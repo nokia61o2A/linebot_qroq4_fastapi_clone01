@@ -10,12 +10,14 @@ import time
 from io import StringIO
 from datetime import datetime, timedelta
 
+# 匯率/運彩/黃金爬蟲需要的套件
 import requests
 from bs4 import BeautifulSoup
 import httpx
 import pandas as pd
 import html5lib
 
+# FastAPI 與 LINE Bot SDK
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
@@ -30,6 +32,7 @@ from linebot.models import (
     TextComponent, ButtonComponent
 )
 
+# AI 相關
 from groq import AsyncGroq, Groq
 import openai
 
@@ -39,13 +42,15 @@ try:
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
     LOTTERY_ENABLED = True
 except ImportError:
-    logging.warning("無法載入彩票模組，彩票功能將停用。")
+    logging.warning("無法載入彩票模組，彩票功能將停用。請確認 TaiwanLottery.py 與 my_commands/CaiyunfangweiCrawler.py 存在。")
     LOTTERY_ENABLED = False
+
 
 # ========== 2) Setup ==========
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 
+# --- 環境變數 ---
 BASE_URL = os.getenv("BASE_URL")
 CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
@@ -53,8 +58,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not all([BASE_URL, CHANNEL_TOKEN, CHANNEL_SECRET, GROQ_API_KEY]):
-    raise RuntimeError("缺少必要環境變數")
+    raise RuntimeError("缺少必要環境變數 (BASE_URL, CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, GROQ_API_KEY)")
 
+# --- API 用戶端初始化 ---
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
@@ -64,6 +70,7 @@ if OPENAI_API_KEY:
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 else:
     openai_client = None
+    logger.warning("未設定 OPENAI_API_KEY，分析功能將僅使用 Groq。")
 
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
@@ -72,13 +79,18 @@ if LOTTERY_ENABLED:
     lottery_crawler = TaiwanLotteryCrawler()
     caiyunfangwei_crawler = CaiyunfangweiCrawler()
 
-# 狀態字典
+# --- 狀態字典與常數 ---
 conversation_history: Dict[str, List[dict]] = {}
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
 auto_reply_status: Dict[str, bool] = {}
 
-PERSONAS = { "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰", "emoji":"🌸💕😊"}, "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度", "emoji":"😏🙄"}, "moe":   {"title": "萌系女友", "style": "動漫語氣＋可愛顏文字", "emoji":"✨🎀"}, "cool":  {"title": "酷系御姐", "style": "冷靜精煉，關鍵建議", "emoji":"🧊⚡️"}}
+PERSONAS = {
+    "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰", "greetings": "親愛的～我在這裡聽你說 🌸", "emoji":"🌸💕😊"},
+    "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度", "greetings": "你又來啦？說吧，哪裡卡住了。😏", "emoji":"😏🙄"},
+    "moe":   {"title": "萌系女友", "style": "動漫語氣＋可愛顏文字", "greetings": "呀呼～今天也被我治癒一下嗎？(ﾉ>ω<)ﾉ", "emoji":"✨🎀"},
+    "cool":  {"title": "酷系御姐", "style": "冷靜精煉，關鍵建議", "greetings": "我在。說重點。", "emoji":"🧊⚡️"}
+}
 LANGUAGE_MAP = { "英文": "English", "日文": "Japanese", "韓文": "Korean", "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"}
 
 # ========== 3) FastAPI ==========
@@ -142,7 +154,6 @@ def get_gold_analysis():
         response.raise_for_status()
         df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
         df = df_list[0]
-        # 取得 TWD 計價的牌價
         gold_price = df[df['商品'] == '黃金牌價']['本行賣出'].values[0]
         content_msg = (f"你是一位金融快報記者，請根據最新的台灣銀行黃金牌價提供一則簡短報導。\n"
                        f"最新數據：黃金（1公克）對台幣（TWD）的賣出價為 {gold_price} 元。\n"
@@ -153,41 +164,165 @@ def get_gold_analysis():
         logger.error(f"黃金價格爬取或分析失敗: {e}", exc_info=True)
         return "抱歉，目前無法獲取黃金價格，請稍後再試。"
 
-# 【 crucial fix 】改用您指定的 open.er-api.com API
-def get_currency_analysis(target_currency: str):
-    logger.info(f"開始執行 {target_currency} 匯率分析 (使用新 API)...")
+def fetch_historical_currency_api(target_currency: str, base_currency: str = 'TWD'):
+    today = datetime.now()
+    start_date = today - timedelta(days=30)
+    start_date_str = start_date.strftime('%Y-%m-%d')
+    today_str = today.strftime('%Y-%m-%d')
+    url = f"https://api.frankfurter.app/{start_date_str}..{today_str}?from={target_currency}&to={base_currency}"
     try:
-        # 基礎貨幣設為 TWD，目標是獲取 JPY->TWD 的匯率
-        base_currency = 'TWD'
-        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-
-        if data.get("result") == "success":
-            rate = data["rates"].get(base_currency)
-            if rate is None:
-                return f"抱歉，API中找不到 {base_currency} 的匯率資訊。"
-            
-            # 1 JPY = ? TWD，所以 1 TWD = 1/rate JPY
-            twd_per_jpy = 1 / rate
-            
-            content_msg = (f"你是一位外匯分析師，請根據最新即時匯率撰寫一則簡短的日圓(JPY)匯率快訊。\n"
-                           f"最新數據：1 日圓 (JPY) 可以兌換 {twd_per_jpy:.4f} 新台幣 (TWD)。\n"
-                           f"分析要求：\n1. 直接報告目前的匯率。\n2. 根據此匯率水平，簡要說明現在去日本旅遊或換匯是相對划算還是昂貴。\n3. 提供一句給換匯族的實用建議。\n4. 語氣輕鬆易懂，使用繁體中文。")
-            msg = [{"role": "system", "content": "你是一位專業的外匯分析師。"}, {"role": "user", "content": content_msg}]
-            return get_analysis_reply(msg)
-        else:
-            return "抱歉，獲取匯率資料失敗，請稍後再試。"
-            
+        rates = data.get('rates', {})
+        if not rates:
+            logger.warning(f"API 未返回 {target_currency} 的匯率數據。")
+            return None
+        df = pd.DataFrame(rates.items(), columns=['日期', '匯率'])
+        df['日期'] = pd.to_datetime(df['日期'])
+        df['即期賣出'] = df['匯率'].apply(lambda x: x.get(base_currency))
+        df = df.drop(columns=['匯率'])
+        df.sort_values(by='日期', ascending=False, inplace=True)
+        df.dropna(inplace=True)
+        logger.info(f"成功透過 API 獲取 {target_currency} 的歷史匯率資料。")
+        return df
     except requests.RequestException as e:
         logger.error(f"API 連接錯誤，無法獲取 {target_currency} 匯率: {e}")
-        return f"抱歉，連接外匯 API 時發生網路錯誤，請稍後再試。"
+        return None
     except Exception as e:
         logger.error(f"處理 {target_currency} API 資料時發生錯誤: {e}", exc_info=True)
-        return f"抱歉，處理外匯資料時發生內部錯誤，請稍後再試。"
+        return None
 
-# --- (彩票, UI, 對話 Helpers 等函式保持不變) ---
+def get_currency_analysis(kind: str):
+    logger.info(f"開始執行 {kind} 歷史匯率分析...")
+    currency_df = fetch_historical_currency_api(kind, 'TWD')
+    if currency_df is None or currency_df.empty:
+        return f"抱歉，目前無法透過API獲取 {kind} 的歷史匯率資料，請稍後再試。"
+    latest_rate = currency_df['即期賣出'].iloc[0]
+    latest_date = currency_df['日期'].iloc[0].strftime('%Y-%m-%d')
+    high_30d = currency_df['即期賣出'].max()
+    low_30d = currency_df['即期賣出'].min()
+    recent_data_str = currency_df.head(7).to_string()
+    content_msg = (f'你是一位專業的外匯分析師，請根據我提供的近一個月 {kind} 對台幣(TWD)的歷史匯率數據，為使用者撰寫一份清晰易懂的行情分析報告。\n\n'
+                   f'--- 數據摘要 ---\n最新日期: {latest_date}\n最新匯率(1 {kind} 兌 {1/latest_rate:.4f} TWD)\n近一個月最高價(最貴): {1/low_30d:.4f}\n近一個月最低價(最便宜): {1/high_30d:.4f}\n\n'
+                   f'--- 最近7天詳細數據 ---\n{recent_data_str}\n\n--- 分析要求 ---\n'
+                   f'1. **開頭摘要**: 明確點出最新的匯率 (1 {kind} 可兌換多少 TWD)。\n'
+                   f'2. **短期趨勢 (近一週)**: 比較目前匯率與一週前的匯率，說明換匯成本是「變貴」還是「變便宜」。\n'
+                   f'3. **中期趨勢 (近一個月)**: 說明近一個月的整體走勢，並點出最貴與最便宜的價位，簡要說明它們的參考意義。\n'
+                   f'4. **總結**: 給出一個簡潔的總結與給換匯族的一句話建議。\n'
+                   f'5. **語氣與格式**: 請使用專業、客觀且口語化的台灣繁體中文，多用換行讓報告易於閱讀。')
+    msg = [{"role": "system", "content": f"你是一位專業的 {kind} 幣種分析師，專門為台灣的使用者提供匯率解析。"}, {"role": "user", "content": content_msg}]
+    return get_analysis_reply(msg)
+
+def lotto_exercise():
+    try:
+        # 請注意：此 API token 可能有每日使用限制
+        params = {'sport': 'NBA', 'date': '2024-05-16', 'names': ['洛杉磯湖人', '金州勇士'], 'limit': 6}
+        headers = {'X-JBot-Token': 'FREE_TOKEN_WITH_20_TIMES_PRE_DAY'}
+        url = 'https://api.sportsbot.tech/v2/records'
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res.raise_for_status()
+        return res.json()
+    except Exception as e:
+        logger.error(f"運彩資料獲取失敗: {e}")
+        return f"運彩資料獲取失敗: {e}"
+
+def get_lottery_analysis(lottery_type_input: str):
+    logger.info(f"開始執行 {lottery_type_input} 彩票分析...")
+    lottery_type = lottery_type_input.lower()
+    if "威力" in lottery_type: last_lotto = lottery_crawler.super_lotto()
+    elif "大樂" in lottery_type: last_lotto = lottery_crawler.lotto649()
+    elif "539" in lottery_type: last_lotto = lottery_crawler.daily_cash()
+    elif "運彩" in lottery_type: last_lotto = lotto_exercise()
+    else: return f"抱歉，暫不支援 {lottery_type_input} 類型的分析。"
+
+    if "運彩" not in lottery_type:
+        try:
+            caiyunfangwei_info = caiyunfangwei_crawler.get_caiyunfangwei()
+            content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                           f'近幾期號碼資訊:\n{last_lotto}\n'
+                           f'顯示今天國歷/農歷日期：{caiyunfangwei_info.get("今天日期", "未知")}\n'
+                           f'今日歲次：{caiyunfangwei_info.get("今日歲次", "未知")}\n'
+                           f'財神方位：{caiyunfangwei_info.get("財神方位", "未知")}\n'
+                           '最冷號碼，最熱號碼\n請給出完整的趨勢分析報告，最近所有每次開號碼,'
+                           '並給3組與彩類同數位數字隨機號和不含特別號(如果有的彩種,)\n'
+                           '第1組最冷組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                           '第2組最熱組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                           '第3組隨機組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                           '請寫詳細的數字，1不要省略\n{發財的吉祥句20字內要有勵志感}\n'
+                           'example:   ***財神方位提示***\n國歷：2024/06/19（星期三）\n農曆甲辰年五月十四號\n根據財神方位 :東北\n'
+                           '使用台灣繁體中文。')
+        except Exception as e:
+            logger.error(f"獲取財神方位失敗: {e}")
+            content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                           f'近幾期號碼資訊:\n{last_lotto}\n'
+                           '財神方位資訊暫時無法獲取\n'
+                           '請給出完整的趨勢分析報告，並給3組隨機號碼組合\n'
+                           '使用台灣繁體中文。')
+    else:
+        content_msg = (f'你現在是一位專業的運彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                       f'近幾運彩資料資訊:\n{last_lotto}\n'
+                       '{發財的吉祥句20字內要有勵志感}\n'
+                       '使用台灣用詞的繁體中文。')
+    
+    msg = [{"role": "system", "content": f"你現在是一位專業的彩券分析師, 使用{lottery_type_input}近期的號碼進行分析，生成一份專業的趨勢分析報告。"}, {"role": "user", "content": content_msg}]
+    return get_analysis_reply(msg)
+
+# --- UI & 對話 Helpers ---
+async def analyze_sentiment(text: str) -> str:
+    msgs = [{"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."}, {"role":"user","content":text}]
+    out = await groq_chat_async(msgs, max_tokens=10, temperature=0)
+    return (out or "neutral").strip().lower()
+
+async def translate_text(text: str, target_lang_display: str) -> str:
+    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
+    sys = "You are a precise translation engine. Output ONLY the translated text."
+    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
+    return await groq_chat_async([{"role":"system","content":sys},{"role":"user","content":usr}], 800, 0.2)
+
+def set_user_persona(chat_id: str, key: str):
+    if key == "random": key = random.choice(list(PERSONAS.keys()))
+    if key not in PERSONAS: key = "sweet"
+    user_persona[chat_id] = key
+    return key
+
+def build_persona_prompt(chat_id: str, sentiment: str) -> str:
+    key = user_persona.get(chat_id, "sweet")
+    p = PERSONAS[key]
+    return (f"你是一位「{p['title']}」。風格：{p['style']}\n"
+            f"使用者情緒：{sentiment}；請調整語氣（開心→一起開心；難過/生氣→先共情、安撫再給建議；中性→自然聊天）。\n"
+            f"回覆使用繁體中文，精煉自然，帶少量表情 {p['emoji']}。")
+
+def make_quick_reply_items(is_group: bool, bot_name: str) -> List[QuickReplyButton]:
+    return [QuickReplyButton(action=MessageAction(label=l, text=t)) for l, t in [("🌸 甜", "甜"), ("😏 鹹", "鹹"), ("🎀 萌", "萌"), ("🧊 酷", "酷"), ("💖 人設選單", "我的人設"), ("💰 金融選單", "金融選單"), ("🎰 彩票選單", "彩票選單"), ("🌐 翻譯選單", "翻譯選單"), ("✅ 開啟自動回答", "開啟自動回答"), ("❌ 關閉自動回答", "關閉自動回答")]]
+
+def reply_with_quick_bar(reply_token: str, text: str, is_group: bool, bot_name: str):
+    items = make_quick_reply_items(is_group, bot_name)
+    msg = TextSendMessage(text=text, quick_reply=QuickReply(items=items))
+    line_bot_api.reply_message(reply_token, msg)
+
+def build_flex_menu(title: str, subtitle: str, actions: List[MessageAction]) -> FlexSendMessage:
+    buttons = [ButtonComponent(style="primary", height="sm", action=a, margin="md", color="#00B900") for a in actions]
+    bubble = BubbleContainer(header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="xl", align="center"), TextComponent(text=subtitle, size="sm", color="#666666", wrap=True, align="center", margin="md")]), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm", paddingAll="12px"))
+    return FlexSendMessage(alt_text=title, contents=bubble)
+
+def flex_menu_finance(bot_name: str, is_group: bool) -> FlexSendMessage:
+    prefix = f"@{bot_name} " if is_group else ""
+    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [("🇹🇼 台股大盤", "台股大盤"), ("🇺🇸 美股大盤", "美股大盤"), ("💰 金價", "金價"), ("💴 日元", "JPY"), ("📊 個股(例:2330)", "2330")]]
+    return build_flex_menu("💰 金融服務", "快速查行情", acts)
+
+def flex_menu_lottery(bot_name: str, is_group: bool) -> FlexSendMessage:
+    prefix = f"@{bot_name} " if is_group else ""
+    acts = [MessageAction(label=l, text=f"{prefix}{t}") for l, t in [("🎰 大樂透", "大樂透"), ("🎯 威力彩", "威力彩"), ("🔢 539", "539")]]
+    return build_flex_menu("🎰 彩票服務", "開獎/趨勢", acts)
+
+def flex_menu_translate() -> FlexSendMessage:
+    acts = [MessageAction(label=l, text=t) for l, t in [("🇺🇸 英文", "翻譯->英文"), ("🇯🇵 日文", "翻譯->日文"), ("🇰🇷 韓文", "翻譯->韓文"), ("🇻🇳 越南文", "翻譯->越南文"), ("🇹🇼 繁中", "翻譯->繁體中文"), ("❌ 結束翻譯", "翻譯->結束")]]
+    return build_flex_menu("🌐 翻譯選擇", "選擇目標語言", acts)
+
+def flex_menu_persona() -> FlexSendMessage:
+    acts = [MessageAction(label=l, text=t) for l, t in [("🌸 甜美女友", "甜"), ("😏 傲嬌女友", "鹹"), ("🎀 萌系女友", "萌"), ("🧊 酷系御姐", "酷"), ("🎲 隨機人設", "random")]]
+    return build_flex_menu("💖 人設選擇", "切換 AI 女友風格", acts)
 
 # ========== 5) LINE Handlers ==========
 @handler.add(MessageEvent, message=TextMessage)
@@ -217,16 +352,27 @@ async def handle_message_async(event: MessageEvent):
     if not msg: return
 
     low = msg.lower()
-    
-    # --- 命令 & 功能觸發區 ---
-    if low in ("金融選單", "彩票選單", "翻譯選單", "我的人設", "人設選單"):
-        # (此處省略 Flex Menu 建立邏輯，與上一版相同)
-        pass
 
+    # --- 命令 & 功能觸發區 (按優先級排列) ---
+    
+    # 選單優先
+    if low in ("金融選單", "彩票選單", "翻譯選單", "我的人設", "人設選單"):
+        flex_map = {
+            "金融選單": flex_menu_finance(bot_name, is_group), 
+            "彩票選單": flex_menu_lottery(bot_name, is_group), 
+            "翻譯選單": flex_menu_translate(), 
+            "我的人設": flex_menu_persona(), 
+            "人設選單": flex_menu_persona()
+        }
+        flex = flex_map[low]
+        tip = TextSendMessage(text="👇 選一個功能開始吧", quick_reply=QuickReply(items=make_quick_reply_items(is_group, bot_name)))
+        return line_bot_api.reply_message(reply_token, [flex, tip])
+
+    # 特定分析命令
     LOTTERY_KEYWORDS = ["大樂透", "威力彩", "539", "運彩"]
     if msg in LOTTERY_KEYWORDS:
         if not LOTTERY_ENABLED:
-            return line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，彩票分析功能目前設定不完整。"))
+            return line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，彩票分析功能目前設定不完整，暫時無法使用。"))
         try:
             analysis_report = await run_in_threadpool(get_lottery_analysis, msg)
             return line_bot_api.reply_message(reply_token, TextSendMessage(text=analysis_report))
@@ -250,7 +396,53 @@ async def handle_message_async(event: MessageEvent):
             logger.error(f"日圓分析流程失敗: {e}", exc_info=True)
             return line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，日圓匯率分析服務暫時無法使用。"))
 
-    # (設定類命令、模式處理、一般對話等邏輯，與上一版相同，此處省略)
+    # 設定類命令
+    if low in ("開啟自動回答", "關閉自動回答"):
+        is_on = low == "開啟自動回答"
+        auto_reply_status[chat_id] = is_on
+        text = "✅ 已開啟自動回答" if is_on else "❌ 已關閉自動回答（群組需 @我 才回）"
+        return reply_with_quick_bar(reply_token, text, is_group, bot_name)
+
+    if low.startswith("翻譯->"):
+        lang = msg.split("->", 1)[1].strip()
+        if lang == "結束":
+            translation_states.pop(chat_id, None)
+            return reply_with_quick_bar(reply_token, "✅ 已結束翻譯模式", is_group, bot_name)
+        translation_states[chat_id] = lang
+        return reply_with_quick_bar(reply_token, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。", is_group, bot_name)
+
+    persona_keys = {"甜":"sweet", "鹹":"salty", "萌":"moe", "酷":"cool", "random":"random", "隨機":"random"}
+    if low in persona_keys:
+        key = set_user_persona(chat_id, persona_keys[low])
+        p = PERSONAS[key]
+        txt = f"💖 已切換人設：{p['title']}\n\n【特質】{p['style']}\n{p['greetings']}"
+        return reply_with_quick_bar(reply_token, txt, is_group, bot_name)
+
+    # --- 模式處理 & 一般對話 (最後的預設行為) ---
+    if chat_id in translation_states:
+        try:
+            out = await translate_text(msg, translation_states[chat_id])
+            return reply_with_quick_bar(reply_token, f"🌐 ({translation_states[chat_id]})\n{out}", is_group, bot_name)
+        except Exception as e:
+            logger.error(f"翻譯失敗: {e}", exc_info=True)
+            return reply_with_quick_bar(reply_token, "翻譯暫時失效，等我回神再來一次 🙏", is_group, bot_name)
+
+    try:
+        history = conversation_history.get(chat_id, [])
+        sentiment = await analyze_sentiment(msg)
+        sys_prompt = build_persona_prompt(chat_id, sentiment)
+        messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
+        final_reply = await groq_chat_async(messages)
+        history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}])
+        conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
+        return reply_with_quick_bar(reply_token, final_reply, is_group, bot_name)
+    except Exception as e:
+        logger.error(f"AI 回覆失敗: {e}", exc_info=True)
+        return reply_with_quick_bar(reply_token, "抱歉我剛剛走神了 😅 再說一次讓我補上！", is_group, bot_name)
+
+@handler.add(PostbackEvent)
+def handle_postback(event):
+    pass
 
 # ========== 6) FastAPI Routes ==========
 @router.post("/callback")
