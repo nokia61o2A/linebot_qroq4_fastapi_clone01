@@ -19,3 +19,5 @@ html5lib
 # --- (可選) 彩票功能 ---
 # 如果您有使用 TaiwanLottery 功能，請保留此行
 taiwanlottery
+#股票
+yfinance
