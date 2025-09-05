@@ -93,7 +93,7 @@ if LOTTERY_ENABLED:
 
 # --- 狀態字典與常數 ---
 conversation_history: Dict[str, List[dict]] = {}
-MAX_HISTORY_LEN = 10
+MAX_HISTORY_LEN = 10  # 【 crucial fix 】補回此常數定義
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
 auto_reply_status: Dict[str, bool] = {}
@@ -158,6 +158,7 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
         resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
         return resp.choices[0].message.content.strip()
 
+# --- 金融 & 彩票分析 ---
 def get_gold_analysis():
     logger.info("開始執行黃金價格分析...")
     try:
@@ -167,7 +168,9 @@ def get_gold_analysis():
         response.raise_for_status()
         df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
         df = df_list[0]
-        gold_price = df[df['商品'] == '黃金牌價']['本行賣出'].values[0]
+        # 【 crucial fix 】處理網站表格欄位結構變更
+        df.columns = ['Time', 'Product', 'Unit', 'Buy', 'Sell']
+        gold_price = df[df['Product'] == '黃金牌價']['Sell'].values[0]
         content_msg = (f"你是一位金融快報記者，請根據最新的台灣銀行黃金牌價提供一則簡短報導。\n"
                        f"最新數據：黃金（1公克）對台幣（TWD）的賣出價為 {gold_price} 元。\n"
                        f"報導要求：\n1. 開頭直接點出最新價格。\n2. 簡要分析此價格在近期市場中的位置（例如：處於高點、低點、或盤整）。\n3. 提及可能影響金價的因素（例如：通膨預期、美元走勢、避險情緒）。\n4. 語氣中立客觀，使用繁體中文。")
@@ -257,17 +260,21 @@ def get_stock_analysis(stock_id_input: str):
     logger.info(f"開始執行 {stock_id_input} 股票分析...")
     stock_id = stock_id_input
     stock_name = stock_id_input
-
-    if stock_id_input in ["台股大盤", "大盤"]:
+    
+    user_input_upper = stock_id_input.upper()
+    if user_input_upper in ["台股大盤", "大盤"]:
         stock_id = "^TWII"
         stock_name = "台灣加權指數"
-    elif stock_id_input in ["美股大盤", "美盤", "美股"]:
+    elif user_input_upper in ["美股大盤", "美盤", "美股"]:
         stock_id = "^GSPC"
         stock_name = "S&P 500 指數"
+    elif re.match(r'^\d{4,6}[A-Z]?$', user_input_upper):
+        stock_id = f"{user_input_upper}.TW"
+        found_name = get_stock_name(stock_id_input)
+        stock_name = found_name if found_name else stock_id_input
     else:
-        found_name = get_stock_name(stock_id)
-        if found_name:
-            stock_name = found_name
+        stock_id = user_input_upper
+        stock_name = user_input_upper
     
     try:
         newprice_stock = YahooStock(stock_id) 
@@ -421,11 +428,20 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
 @handler.add(MessageEvent, message=TextMessage)
 def on_message_text(event: MessageEvent):
     try:
-        # 使用 run_in_threadpool 執行 async 函式，避免阻塞 handler
         asyncio.run(handle_message_async(event))
     except Exception as e:
         logger.error(f"Handle message failed: {e}", exc_info=True)
 
+@handler.add(PostbackEvent)
+def on_postback(event: PostbackEvent):
+    data = (event.postback.data or "").strip()
+    if data.startswith("menu:"):
+        kind = data.split(":", 1)[-1]
+        line_bot_api.reply_message(
+            event.reply_token, 
+            [build_submenu_flex(kind), TextSendMessage(text="請選擇一項服務", quick_reply=build_quick_reply())]
+        )
+        return
 
 async def handle_message_async(event: MessageEvent):
     chat_id, msg_raw = get_chat_id(event), event.message.text.strip()
@@ -446,8 +462,18 @@ async def handle_message_async(event: MessageEvent):
     if not msg: return
 
     low = msg.lower()
+    
+    def is_stock_query(text: str) -> bool:
+        text_upper = text.upper()
+        if text_upper in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"]:
+            return True
+        if re.match(r'^\d{4,6}[A-Z]?$', text_upper):
+            return True
+        if re.match(r'^[A-Z]{1,5}$', text_upper) and text_upper not in ["JPY"]:
+             return True
+        return False
 
-    # --- 命令 & 功能觸發區 ---
+    # --- 命令 & 功能觸發區 (按優先級排列) ---
     
     if low in ("menu", "選單", "主選單"):
         return line_bot_api.reply_message(reply_token, build_main_menu_flex())
@@ -463,9 +489,7 @@ async def handle_message_async(event: MessageEvent):
             logger.error(f"彩票分析流程失敗: {e}", exc_info=True)
             return reply_with_quick_bar(reply_token, f"抱歉，分析 {msg} 時發生錯誤。")
 
-    is_tw_stock_code = re.match(r'^\d{4,6}[A-Za-z]?$', msg)
-    is_us_stock_code = re.match(r'^[A-Za-z]{1,5}$', msg)
-    if msg in ["台股大盤", "美股大盤"] or is_tw_stock_code or (is_us_stock_code and low != "jpy"):
+    if is_stock_query(msg):
         if not STOCK_ENABLED:
             return reply_with_quick_bar(reply_token, "抱歉，股票分析模組目前設定不完整或載入失敗。")
         try:
@@ -533,17 +557,6 @@ async def handle_message_async(event: MessageEvent):
     except Exception as e:
         logger.error(f"AI 回覆失敗: {e}", exc_info=True)
         return reply_with_quick_bar(reply_token, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
-
-@handler.add(PostbackEvent)
-def on_postback(event: PostbackEvent):
-    data = (event.postback.data or "").strip()
-    if data.startswith("menu:"):
-        kind = data.split(":", 1)[-1]
-        line_bot_api.reply_message(
-            event.reply_token, 
-            [build_submenu_flex(kind), TextSendMessage(text="請選擇一項服務", quick_reply=build_quick_reply())]
-        )
-        return
 
 # ========== 6) FastAPI Routes ==========
 @router.post("/callback")
