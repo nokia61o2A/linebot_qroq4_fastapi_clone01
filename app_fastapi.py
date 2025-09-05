@@ -1,33 +1,44 @@
-# app_fastapi.py  — 完整主程式（可直接部署）
+# app_fastapi.py — 完整主程式（FastAPI + LINE Bot）
 # -*- coding: utf-8 -*-
 
 # ========== 1) Imports ==========
 import os
 import re
 import logging
+import asyncio
 from typing import Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
 
-# --- 網路與資料處理 ---
-import httpx           # 非同步 HTTP：用於 LINE、匯率 API
-import requests        # 偶發同步備援（很少用）
-import pandas as pd    # 指標與表格
-import yfinance as yf  # 行情與新聞（Yahoo Finance 包裝）
-# FastAPI 與 LINE SDK
+# --- HTTP / Data ---
+import httpx
+import requests
+import pandas as pd
+import yfinance as yf
+
+# --- FastAPI & LINE Bot SDK ---
 from fastapi import FastAPI, APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
-    SourceUser, SourceGroup, SourceRoom
-)
-# LLM（OpenAI / Groq）
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceUser, SourceGroup, SourceRoom
+
+# --- LLM（OpenAI → Groq 備援） ---
 from groq import AsyncGroq, Groq
 import openai
 
-# 參考：FastAPI 與 LINE SDK、yfinance、httpx 的官方文件
+# --- 【靈活載入】你的自家股票模組（存在就用，不在就回退 yfinance） ---
+try:
+    from my_commands.stock.stock_price import stock_price
+    from my_commands.stock.stock_news import stock_news
+    from my_commands.stock.stock_value import stock_fundamental
+    from my_commands.stock.stock_rate import stock_dividend
+    from my_commands.stock.YahooStock import YahooStock
+    STOCK_LIB_OK = True
+except Exception as e:
+    STOCK_LIB_OK = False
+
+# 參考：FastAPI / LINE SDK / yfinance / httpx
 # FastAPI: https://fastapi.tiangolo.com/
 # LINE SDK: https://github.com/line/line-bot-sdk-python
 # yfinance: https://pypi.org/project/yfinance/
@@ -59,9 +70,9 @@ GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# 上述初始化與模型名稱的用法，請見 OpenAI/Groq 官方文件
-# OpenAI Chat: https://platform.openai.com/docs/api-reference/chat
-# Groq Chat:   https://console.groq.com/docs/models
+# OpenAI / Groq 參數與模型說明：
+# OpenAI: https://platform.openai.com/docs/api-reference/chat
+# Groq:   https://console.groq.com/docs/models
 
 # ========== 3) FastAPI ==========
 @asynccontextmanager
@@ -71,10 +82,8 @@ async def lifespan(app: FastAPI):
         async with httpx.AsyncClient() as c:
             headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
             payload = {"endpoint": f"{BASE_URL}/callback"}
-            r = await c.put(
-                "https://api.line.me/v2/bot/channel/webhook/endpoint",
-                headers=headers, json=payload, timeout=12.0
-            )
+            r = await c.put("https://api.line.me/v2/bot/channel/webhook/endpoint",
+                            headers=headers, json=payload, timeout=12.0)
             r.raise_for_status()
             logger.info(f"✅ Webhook 更新成功: {r.status_code}")
     except Exception as e:
@@ -84,9 +93,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.0.0")
 router = APIRouter()
 
-# 上述 FastAPI 壽命週期與 LINE Webhook 設置說明，見官方文件
-# FastAPI lifespan: https://fastapi.tiangolo.com/advanced/events/
-# LINE Webhook:     https://developers.line.biz/en/docs/messaging-api/building-bot/
+# 健康檢查與首頁（Render 不再 404）
+@router.get("/healthz")
+async def healthz():
+    return PlainTextResponse("ok", status_code=200)
+
+@router.get("/")
+async def root():
+    return PlainTextResponse("LINE Bot is running.", status_code=200)
 
 # ========== 4) 共用工具 ==========
 def get_chat_id(event: MessageEvent) -> str:
@@ -94,11 +108,10 @@ def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceRoom):  return event.source.room_id
     return event.source.user_id
 
-# --------- LLM：OpenAI→Groq 備援 ----------
+# --------- LLM：OpenAI → Groq 備援 ----------
 def get_analysis_reply(messages: List[dict]) -> str:
     """
-    messages 例：
-    [{"role":"system","content":"..."},{"role":"user","content":"..."}]
+    messages: [{"role":"system"/"user"/"assistant","content":"..."}]
     """
     # 1) OpenAI（若有設定）
     if openai_client:
@@ -107,19 +120,19 @@ def get_analysis_reply(messages: List[dict]) -> str:
                 model=OPENAI_MODEL,
                 messages=messages,
                 temperature=0.3,
-                max_tokens=800,
+                max_tokens=1000,
             )
             return resp.choices[0].message.content
         except Exception as e:
-            logger.warning(f"OpenAI 失敗（將改用 Groq）：{e}")
+            logger.warning(f"OpenAI 失敗（改用 Groq）：{e}")
 
-    # 2) Groq 主模型
+    # 2) Groq 主模型 → 備援
     try:
         resp = sync_groq_client.chat.completions.create(
             model=GROQ_MODEL_PRIMARY,
             messages=messages,
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=1000,
         )
         return resp.choices[0].message.content
     except Exception as e:
@@ -128,32 +141,31 @@ def get_analysis_reply(messages: List[dict]) -> str:
             model=GROQ_MODEL_FALLBACK,
             messages=messages,
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=1000,
         )
         return resp.choices[0].message.content
 
-# 上述呼叫方式與參數，請參考 OpenAI/Groq 官方 API 文件
-# OpenAI chat params: https://platform.openai.com/docs/api-reference/chat/create
-# Groq chat params:  https://console.groq.com/docs/models
+# 參考：OpenAI Chat API、Groq Chat Completions（官方）
+# https://platform.openai.com/docs/api-reference/chat
+# https://console.groq.com/docs/models
 
 # ========== 5) 匯率：JPY 近 7 日（免註冊） ==========
-JPY_7D_SYMBOLS = ["TWD", "USD"]  # 可自行增減目標幣別
+# >>> NEW: 近 7 日 JPY→TWD, USD；exchangerate.host（timeseries）→ fawazahmed0/currency-api 後備
+JPY_7D_SYMBOLS = ["TWD", "USD"]
 
 def _today_utc() -> date:
     return datetime.utcnow().date()
 
 def _last_7d_range() -> Tuple[str, str]:
     end = _today_utc()
-    start = end - timedelta(days=6)  # 含今天共 7 天
+    start = end - timedelta(days=6)  # 含今天，共 7 天
     return start.isoformat(), end.isoformat()
 
 async def fetch_jpy_7d_exchangerate_host(client: httpx.AsyncClient, symbols=JPY_7D_SYMBOLS) -> pd.DataFrame:
     base = "JPY"
     start_date, end_date = _last_7d_range()
-    url = (
-        "https://api.exchangerate.host/timeseries"
-        f"?base={base}&symbols={','.join(symbols)}&start_date={start_date}&end_date={end_date}"
-    )
+    url = ( "https://api.exchangerate.host/timeseries"
+            f"?base={base}&symbols={','.join(symbols)}&start_date={start_date}&end_date={end_date}" )
     r = await client.get(url, timeout=20)
     r.raise_for_status()
     data = r.json()
@@ -166,8 +178,7 @@ async def fetch_jpy_7d_exchangerate_host(client: httpx.AsyncClient, symbols=JPY_
         for s in symbols:
             row[f"JPY->{s}"] = float(rates[d].get(s))
         rows.append(row)
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 async def fetch_jpy_7d_currency_api(client: httpx.AsyncClient, symbols=JPY_7D_SYMBOLS) -> pd.DataFrame:
     end = _today_utc()
@@ -175,7 +186,7 @@ async def fetch_jpy_7d_currency_api(client: httpx.AsyncClient, symbols=JPY_7D_SY
     rows = []
     for d in dates:
         dstr = d.isoformat()
-        primary = f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{dstr}/v1/currencies/jpy.json"
+        primary  = f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{dstr}/v1/currencies/jpy.json"
         fallback = f"https://{dstr}.currency-api.pages.dev/v1/currencies/jpy.json"
         r = await client.get(primary, timeout=20)
         if r.status_code == 404 or not r.ok:
@@ -186,8 +197,7 @@ async def fetch_jpy_7d_currency_api(client: httpx.AsyncClient, symbols=JPY_7D_SY
         row = {"date": obj.get("date", dstr)}
         for s in symbols:
             val = jpy_map.get(s.lower())
-            if val is None:
-                raise RuntimeError(f"{dstr} 缺少 {s} 匯率")
+            if val is None: raise RuntimeError(f"{dstr} 缺少 {s} 匯率")
             row[f"JPY->{s}"] = float(val)
         rows.append(row)
     return pd.DataFrame(rows)
@@ -199,23 +209,23 @@ async def get_jpy_7d_dataframe(symbols=JPY_7D_SYMBOLS) -> pd.DataFrame:
             df["source"] = "exchangerate.host"
             return df
         except Exception as e:
-            logger.warning(f"exchangerate.host 失敗，改用 fawazahmed0：{e}")
+            logger.warning(f"exchangerate.host 失敗，改用 fawazahmed0/currency-api：{e}")
             df = await fetch_jpy_7d_currency_api(client, symbols)
             df["source"] = "fawazahmed0/currency-api"
             return df
 
 def format_jpy_7d_text(df: pd.DataFrame) -> str:
     syms = [c.replace("JPY->", "") for c in df.columns if c.startswith("JPY->")]
-    lines = [f"近 7 日 1 JPY 對 { '、'.join(syms) } 匯率："]
+    lines = [f"近 7 日 1 JPY 對 {'、'.join(syms)} 匯率："]
     for _, row in df.sort_values("date").iterrows():
         parts = [f"JPY→{s} = {row[f'JPY->{s}']:.6f}" for s in syms]
         lines.append(f"{row['date']}  " + " ,  ".join(parts))
     lines.append(f"資料來源：{df['source'].iloc[0]}")
     return "\n".join(lines)
 
-# 以上匯率端點與格式，請見官方文件
-# exchangerate.host timeseries: https://exchangerate.host/documentation
-# fawazahmed0/currency-api:    https://github.com/fawazahmed0/exchange-api#readme
+# 參考：exchangerate.host timeseries、fawazahmed0/currency-api（官方）
+# https://exchangerate.host/documentation
+# https://github.com/fawazahmed0/exchange-api#readme
 
 # ========== 6) 股票查詢與分析 ==========
 US_TICKER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9\.\-]{0,9}$")
@@ -260,13 +270,12 @@ def fetch_with_yf(ticker_try_list: List[str]) -> Tuple[str, yf.Ticker]:
             last_err = e
     raise RuntimeError(f"yfinance 取得失敗：{last_err}")
 
-def analyze_stock_text(user_raw: str) -> str:
+def analyze_with_yfinance(user_raw: str) -> str:
     disp, tries = normalize_ticker(user_raw)
     tk, y = fetch_with_yf(tries)
 
     hist = y.history(period="1y", interval="1d", auto_adjust=True)
-    if hist.empty:
-        raise RuntimeError(f"{tk} 沒有歷史資料")
+    if hist.empty: raise RuntimeError(f"{tk} 沒有歷史資料")
 
     close = hist["Close"].dropna()
     last_dt = close.index.max().date()
@@ -328,19 +337,64 @@ def analyze_stock_text(user_raw: str) -> str:
     lines.append("\n資料來源：Yahoo Finance / yfinance")
     return "\n".join(lines)
 
+def analyze_stock_full(user_raw: str) -> str:
+    """
+    優先用你的自家模組做「基本面/消息面」；任一段失敗就 fallback 到 yfinance。
+    """
+    if STOCK_LIB_OK:
+        try:
+            # 即時基本資訊
+            ys = YahooStock(user_raw)
+            name = getattr(ys, "name", user_raw)
+            now_price = getattr(ys, "now_price", None)
+            change = getattr(ys, "change", None)
+            close_time = getattr(ys, "close_time", None)
+
+            # 價格（近 N 日）
+            price_data = stock_price(user_raw)
+            # 基本面（每季/營收等，依你模組輸出）
+            value_data = stock_fundamental(user_raw)
+            # 配息
+            dividend_data = stock_dividend(user_raw)
+            # 新聞（取前 3~5 則字串）
+            news_data = stock_news(name)
+
+            # 組裝報告（原樣輸出，不省略）
+            parts = []
+            parts.append(f"【{name}（{user_raw}）】")
+            parts.append("── 即時")
+            parts.append(str({
+                "name": name,
+                "now_price": now_price,
+                "change": change,
+                "close_time": close_time
+            }))
+            parts.append("── 近期價格資料")
+            parts.append(str(price_data))
+            parts.append("── 基本面（自家模組）")
+            parts.append(str(value_data))
+            parts.append("── 配息資料")
+            parts.append(str(dividend_data))
+            parts.append("── 最近新聞")
+            parts.append(str(news_data))
+            parts.append("\n（以上段落來源：你的自家模組）")
+            return "\n".join(parts)
+        except Exception as e:
+            logger.warning(f"自家模組分析失敗，改用 yfinance：{e}")
+
+    # 回退：yfinance 完整文字摘要
+    return analyze_with_yfinance(user_raw)
+
 def is_stock_query(text: str) -> bool:
     t = text.strip()
-    if t.upper().startswith(("US:", "US.", "TW:", "TW.", "OTC:", "OTC.")):
-        return True
-    if TW_NUM_RE.match(t):   # 2330
-        return True
-    if US_TICKER_RE.match(t):  # AAPL / NVDA
-        return True
+    if t.upper().startswith(("US:", "US.", "TW:", "TW.", "OTC:", "OTC.")): return True
+    if TW_NUM_RE.match(t): return True
+    if US_TICKER_RE.match(t): return True
     return False
 
-# 上述 .TW/.TWO 後綴與 yfinance 使用說明，見社群討論與文件
-# yfinance: https://pypi.org/project/yfinance/
-# .TW/.TWO 背景: https://github.com/ranaroussi/yfinance/discussions/1729
+# 參考：yfinance 與 .TW/.TWO 後綴
+# https://pypi.org/project/yfinance/
+# https://github.com/ranaroussi/yfinance/discussions/1729
 
 # ========== 7) LINE Webhook ==========
 @router.post("/callback")
@@ -365,22 +419,23 @@ def on_message_text(event: MessageEvent):
     uid = get_chat_id(event)
     text = (event.message.text or "").strip()
 
-    # (A) 股票查詢：自動辨識
+    # (A) 股票查詢：自動辨識 → 完整分析
     if is_stock_query(text):
         try:
-            reply = analyze_stock_text(text)
+            reply = analyze_stock_full(text)
         except Exception as e:
             reply = f"抱歉，查詢失敗：{e}\n請確認代號是否正確，或稍後再試。"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    # (B) 匯率快捷：輸入「JPY7」可拿近 7 日 JPY 對 TWD、USD
-    if text.upper() in ("JPY7", "JPY 7", "JPY近7日", "JPY七日"):
+    # (B) 匯率快捷：輸入「JPY7」→ 近 7 日 JPY 對 TWD / USD
+    if text.upper() in ("JPY7", "JPY 7", "JPY近7日", "JPY七日", "JPY"):
         try:
+            # 注意：此處在同步處理器中呼叫 async，直接用 asyncio.run() 即可
             df = asyncio.run(get_jpy_7d_dataframe())
             reply = format_jpy_7d_text(df)
         except Exception as e:
-            reply = f"JPY 匯率取得失敗：{e}"
+            reply = f"JPY 匯率取得失敗：{e}\n（可能為 CDN 暫時失效，可稍後再試）"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
@@ -391,7 +446,7 @@ def on_message_text(event: MessageEvent):
 
     sys = (
         "你是專業投資/工程助理，回答使用繁體中文（台灣用語）。"
-        "若使用者輸入股票代碼，提醒可直接輸入代碼取得分析；若輸入 JPY7 可取近 7 日匯率。"
+        "若使用者輸入股票代碼，直接產出完整分析；若輸入 JPY7 回覆近 7 日匯率。"
     )
     messages = [{"role":"system","content":sys}] + history
     try:
