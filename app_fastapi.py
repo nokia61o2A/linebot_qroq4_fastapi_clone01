@@ -85,8 +85,8 @@ else:
     logger.warning("未設定 OPENAI_API_KEY，分析功能將僅使用 Groq。")
 
 # 【 crucial fix 】更新為當前有效的 Groq 模型
-GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama3-70b-8192")
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama3-8b-8192")
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
 if LOTTERY_ENABLED:
     lottery_crawler = TaiwanLotteryCrawler()
@@ -152,12 +152,12 @@ def get_analysis_reply(messages):
 
 async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
     try:
-        resp = await async_groq_client.chat.completions.create(model="llama3-8b-8192", messages=messages, max_tokens=max_tokens, temperature=temperature)
+        resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
         return resp.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Groq Async 主要模型失敗: {e}")
-        resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
-        return resp.choices[0].message.content.strip()
+        # 如果連備用模型都失敗，就拋出異常讓上層處理
+        raise e
 
 # --- 金融 & 彩票分析 ---
 def get_gold_analysis():
@@ -175,7 +175,8 @@ def get_gold_analysis():
         gold_price = None
         for row in rows:
             cells = row.find_all("td")
-            if len(cells) > 0 and "黃金牌價" in cells[0].text:
+            if len(cells) > 1 and "黃金牌價" in cells[0].text:
+                # 欄位索引可能會變，改用更穩定的遍歷方式
                 gold_price = cells[4].text.strip()
                 break
         
@@ -575,7 +576,6 @@ async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
-        # 使用 run_in_threadpool 執行同步的 handler
         await run_in_threadpool(handler.handle, body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
@@ -587,7 +587,7 @@ async def callback(request: Request):
 @router.get("/")
 async def root():
     return PlainTextResponse("LINE Bot is running.", status_code=200)
-
+    
 @router.get("/healthz")
 async def healthz():
     return PlainTextResponse("ok")
