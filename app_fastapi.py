@@ -84,8 +84,9 @@ else:
     openai_client = None
     logger.warning("未設定 OPENAI_API_KEY，分析功能將僅使用 Groq。")
 
-GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
+# 【 crucial fix 】更新為當前有效的 Groq 模型
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama3-70b-8192")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama3-8b-8192")
 
 if LOTTERY_ENABLED:
     lottery_crawler = TaiwanLotteryCrawler()
@@ -93,7 +94,7 @@ if LOTTERY_ENABLED:
 
 # --- 狀態字典與常數 ---
 conversation_history: Dict[str, List[dict]] = {}
-MAX_HISTORY_LEN = 10  # 【 crucial fix 】補回此常數定義
+MAX_HISTORY_LEN = 10
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
 auto_reply_status: Dict[str, bool] = {}
@@ -151,7 +152,7 @@ def get_analysis_reply(messages):
 
 async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
     try:
-        resp = await async_groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=messages, max_tokens=max_tokens, temperature=temperature)
+        resp = await async_groq_client.chat.completions.create(model="llama3-8b-8192", messages=messages, max_tokens=max_tokens, temperature=temperature)
         return resp.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Groq Async 主要模型失敗: {e}")
@@ -166,11 +167,21 @@ def get_gold_analysis():
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'}
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        df_list = pd.read_html(StringIO(response.text), flavor='html5lib')
-        df = df_list[0]
-        # 【 crucial fix 】處理網站表格欄位結構變更
-        df.columns = ['Time', 'Product', 'Unit', 'Buy', 'Sell']
-        gold_price = df[df['Product'] == '黃金牌價']['Sell'].values[0]
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find("table", {"class": "table-striped"})
+        rows = table.find("tbody").find_all("tr")
+        
+        gold_price = None
+        for row in rows:
+            cells = row.find_all("td")
+            if len(cells) > 0 and "黃金牌價" in cells[0].text:
+                gold_price = cells[4].text.strip()
+                break
+        
+        if gold_price is None:
+            raise ValueError("在網頁上找不到 '黃金牌價' 的欄位。")
+
         content_msg = (f"你是一位金融快報記者，請根據最新的台灣銀行黃金牌價提供一則簡短報導。\n"
                        f"最新數據：黃金（1公克）對台幣（TWD）的賣出價為 {gold_price} 元。\n"
                        f"報導要求：\n1. 開頭直接點出最新價格。\n2. 簡要分析此價格在近期市場中的位置（例如：處於高點、低點、或盤整）。\n3. 提及可能影響金價的因素（例如：通膨預期、美元走勢、避險情緒）。\n4. 語氣中立客觀，使用繁體中文。")
@@ -178,7 +189,7 @@ def get_gold_analysis():
         return get_analysis_reply(msg)
     except Exception as e:
         logger.error(f"黃金價格爬取或分析失敗: {e}", exc_info=True)
-        return "抱歉，目前無法獲取黃金價格，請稍後再試。"
+        return "抱歉，目前無法獲取黃金價格，可能是網站結構已變更，請稍後再試。"
 
 def get_currency_analysis(target_currency: str):
     logger.info(f"開始執行 {target_currency} 匯率分析...")
@@ -564,6 +575,7 @@ async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
+        # 使用 run_in_threadpool 執行同步的 handler
         await run_in_threadpool(handler.handle, body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
@@ -575,6 +587,10 @@ async def callback(request: Request):
 @router.get("/")
 async def root():
     return PlainTextResponse("LINE Bot is running.", status_code=200)
+
+@router.get("/healthz")
+async def healthz():
+    return PlainTextResponse("ok")
 
 app.include_router(router)
 
