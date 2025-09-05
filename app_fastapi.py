@@ -20,7 +20,7 @@ import yfinance as yf
 
 # --- FastAPI 與 LINE Bot SDK ---
 from fastapi import FastAPI, APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 from linebot import LineBotApi, WebhookHandler
@@ -158,7 +158,6 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
         resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
         return resp.choices[0].message.content.strip()
 
-# --- 金融 & 彩票分析 ---
 def get_gold_analysis():
     logger.info("開始執行黃金價格分析...")
     try:
@@ -207,37 +206,30 @@ def get_lottery_analysis(lottery_type_input: str):
     if "威力" in lottery_type: last_lotto = lottery_crawler.super_lotto()
     elif "大樂" in lottery_type: last_lotto = lottery_crawler.lotto649()
     elif "539" in lottery_type: last_lotto = lottery_crawler.daily_cash()
-    elif "運彩" in lottery_type: last_lotto = lotto_exercise()
     else: return f"抱歉，暫不支援 {lottery_type_input} 類型的分析。"
 
-    if "運彩" not in lottery_type:
-        try:
-            caiyunfangwei_info = caiyunfangwei_crawler.get_caiyunfangwei()
-            content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-                           f'近幾期號碼資訊:\n{last_lotto}\n'
-                           f'顯示今天國歷/農歷日期：{caiyunfangwei_info.get("今天日期", "未知")}\n'
-                           f'今日歲次：{caiyunfangwei_info.get("今日歲次", "未知")}\n'
-                           f'財神方位：{caiyunfangwei_info.get("財神方位", "未知")}\n'
-                           '最冷號碼，最熱號碼\n請給出完整的趨勢分析報告，最近所有每次開號碼,'
-                           '並給3組與彩類同數位數字隨機號和不含特別號(如果有的彩種,)\n'
-                           '第1組最冷組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                           '第2組最熱組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                           '第3組隨機組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                           '請寫詳細的數字，1不要省略\n{發財的吉祥句20字內要有勵志感}\n'
-                           'example:   ***財神方位提示***\n國歷：2024/06/19（星期三）\n農曆甲辰年五月十四號\n根據財神方位 :東北\n'
-                           '使用台灣繁體中文。')
-        except Exception as e:
-            logger.error(f"獲取財神方位失敗: {e}")
-            content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-                           f'近幾期號碼資訊:\n{last_lotto}\n'
-                           '財神方位資訊暫時無法獲取\n'
-                           '請給出完整的趨勢分析報告，並給3組隨機號碼組合\n'
-                           '使用台灣繁體中文。')
-    else:
-        content_msg = (f'你現在是一位專業的運彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-                       f'近幾運彩資料資訊:\n{last_lotto}\n'
-                       '{發財的吉祥句20字內要有勵志感}\n'
-                       '使用台灣用詞的繁體中文。')
+    try:
+        caiyunfangwei_info = caiyunfangwei_crawler.get_caiyunfangwei()
+        content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                       f'近幾期號碼資訊:\n{last_lotto}\n'
+                       f'顯示今天國歷/農歷日期：{caiyunfangwei_info.get("今天日期", "未知")}\n'
+                       f'今日歲次：{caiyunfangwei_info.get("今日歲次", "未知")}\n'
+                       f'財神方位：{caiyunfangwei_info.get("財神方位", "未知")}\n'
+                       '最冷號碼，最熱號碼\n請給出完整的趨勢分析報告，最近所有每次開號碼,'
+                       '並給3組與彩類同數位數字隨機號和不含特別號(如果有的彩種,)\n'
+                       '第1組最冷組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                       '第2組最熱組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                       '第3組隨機組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
+                       '請寫詳細的數字，1不要省略\n{發財的吉祥句20字內要有勵志感}\n'
+                       'example:   ***財神方位提示***\n國歷：2024/06/19（星期三）\n農曆甲辰年五月十四號\n根據財神方位 :東北\n'
+                       '使用台灣繁體中文。')
+    except Exception as e:
+        logger.error(f"獲取財神方位失敗: {e}")
+        content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
+                       f'近幾期號碼資訊:\n{last_lotto}\n'
+                       '財神方位資訊暫時無法獲取\n'
+                       '請給出完整的趨勢分析報告，並給3組隨機號碼組合\n'
+                       '使用台灣繁體中文。')
     
     msg = [{"role": "system", "content": f"你現在是一位專業的彩券分析師, 使用{lottery_type_input}近期的號碼進行分析，生成一份專業的趨勢分析報告。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
@@ -345,8 +337,8 @@ def build_quick_reply() -> QuickReply:
         QuickReplyButton(action=MessageAction(label="查台積電", text="2330")),
         QuickReplyButton(action=MessageAction(label="查輝達", text="NVDA")),
         QuickReplyButton(action=MessageAction(label="查日圓", text="JPY")),
-        QuickReplyButton(action=MessageAction(label="💖 AI 人設", text="人設選單")),
-        QuickReplyButton(action=MessageAction(label="🎰 彩票選單", text="彩票選單")),
+        QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
+        QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
     ])
 
 def reply_with_quick_bar(reply_token: str, text: str):
@@ -425,17 +417,14 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
 
-
 # ========== 5) LINE Handlers ==========
 @handler.add(MessageEvent, message=TextMessage)
 def on_message_text(event: MessageEvent):
-    # 使用 try-except 包裹整個處理流程，避免單一錯誤導致服務中斷
     try:
+        # 使用 run_in_threadpool 執行 async 函式，避免阻塞 handler
         asyncio.run(handle_message_async(event))
     except Exception as e:
         logger.error(f"Handle message failed: {e}", exc_info=True)
-        # 可以選擇是否回傳錯誤訊息給使用者
-        # line_bot_api.reply_message(event.reply_token, TextSendMessage(text="發生內部錯誤，請稍後再試"))
 
 
 async def handle_message_async(event: MessageEvent):
@@ -458,15 +447,15 @@ async def handle_message_async(event: MessageEvent):
 
     low = msg.lower()
 
-    # --- 命令 & 功能觸發區 (按優先級排列) ---
+    # --- 命令 & 功能觸發區 ---
     
     if low in ("menu", "選單", "主選單"):
         return line_bot_api.reply_message(reply_token, build_main_menu_flex())
 
-    LOTTERY_KEYWORDS = ["大樂透", "威力彩", "539", "運彩"]
+    LOTTERY_KEYWORDS = ["大樂透", "威力彩", "539"]
     if msg in LOTTERY_KEYWORDS:
         if not LOTTERY_ENABLED:
-            return reply_with_quick_bar(reply_token, "抱歉，彩票分析功能目前設定不完整，暫時無法使用。")
+            return reply_with_quick_bar(reply_token, "抱歉，彩票分析功能目前設定不完整。")
         try:
             analysis_report = await run_in_threadpool(get_lottery_analysis, msg)
             return reply_with_quick_bar(reply_token, analysis_report)
@@ -562,7 +551,6 @@ async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
-        # 使用 run_in_threadpool 執行同步的 handler
         await run_in_threadpool(handler.handle, body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
