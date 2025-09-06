@@ -4,9 +4,8 @@ import re
 import random
 import logging
 import asyncio
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
-from datetime import datetime
 
 # --- 數據處理與爬蟲 ---
 import requests
@@ -21,7 +20,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import LineBotApiError, InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
     SourceUser, SourceGroup, SourceRoom,
@@ -35,26 +34,26 @@ from linebot.models import (
 from groq import AsyncGroq, Groq
 import openai
 
-# --- 【靈活載入】自訂模組（可無則關閉） ---
-LOTTERY_ENABLED = True
-STOCK_ENABLED = True
+# --- 【靈活載入】自訂模組（可缺省） ---
 try:
     from TaiwanLottery import TaiwanLotteryCrawler
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
+    LOTTERY_ENABLED = True
 except Exception as e:
-    logging.warning(f"無法載入彩票模組：{e}")
+    logging.warning(f"無法載入彩票模組，彩票功能將停用。原因: {e}")
     LOTTERY_ENABLED = False
 
-# 股票相關（價格、新聞、基本面、配息、Yahoo 爬蟲）
 try:
     from my_commands.stock.stock_price import stock_price
     from my_commands.stock.stock_news import stock_news
     from my_commands.stock.stock_value import stock_fundamental
     from my_commands.stock.stock_rate import stock_dividend
     from my_commands.stock.YahooStock import YahooStock
+    STOCK_ENABLED = True
 except Exception as e:
-    logging.warning(f"無法載入股票模組：{e}")
+    logging.warning(f"無法載入股票模組，股票功能將停用。錯誤: {e}")
     STOCK_ENABLED = False
+
 
 # ========== 2) Setup ==========
 logger = logging.getLogger("uvicorn.error")
@@ -65,10 +64,10 @@ BASE_URL = os.getenv("BASE_URL")
 CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # 可不設，會自動改用 Groq
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not all([BASE_URL, CHANNEL_TOKEN, CHANNEL_SECRET, GROQ_API_KEY]):
-    raise RuntimeError("缺少必要環境變數：BASE_URL / CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET / GROQ_API_KEY")
+    raise RuntimeError("缺少必要環境變數：請設定 BASE_URL / CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET / GROQ_API_KEY")
 
 # --- API 用戶端初始化 ---
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
@@ -77,18 +76,20 @@ handler = WebhookHandler(CHANNEL_SECRET)
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 sync_groq_client = Groq(api_key=GROQ_API_KEY)
 
-openai_client = None
+openai_client: Optional[openai.OpenAI] = None
 if OPENAI_API_KEY:
     try:
         openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
     except Exception as e:
-        logger.warning(f"初始化 OpenAI 失敗：{e}")
+        logger.warning(f"初始化 OpenAI 失敗，將僅使用 Groq。原因：{e}")
+else:
+    logger.warning("未設定 OPENAI_API_KEY，分析功能將僅使用 Groq。")
 
-# Groq 模型（有效且常用）
-GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
+# Groq 模型名稱可由環境覆寫，避免使用已退役型號
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-8b-instant")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
-# --- 可選功能初始化 ---
+# 彩票
 if LOTTERY_ENABLED:
     lottery_crawler = TaiwanLotteryCrawler()
     caiyunfangwei_crawler = CaiyunfangweiCrawler()
@@ -97,7 +98,7 @@ if LOTTERY_ENABLED:
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 user_persona: Dict[str, str] = {}
-translation_states: Dict[str, str] = {}
+translation_states: Dict[str, str] = {}   # chat_id -> 目標語言（顯示名稱）
 auto_reply_status: Dict[str, bool] = {}
 
 PERSONAS = {
@@ -108,6 +109,7 @@ PERSONAS = {
 }
 LANGUAGE_MAP = {"英文": "English", "日文": "Japanese", "韓文": "Korean", "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"}
 
+
 # ========== 3) FastAPI ==========
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -116,10 +118,7 @@ async def lifespan(app: FastAPI):
         async with httpx.AsyncClient() as c:
             headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
             payload = {"endpoint": f"{BASE_URL}/callback"}
-            r = await c.put(
-                "https://api.line.me/v2/bot/channel/webhook/endpoint",
-                headers=headers, json=payload, timeout=10.0
-            )
+            r = await c.put("https://api.line.me/v2/bot/channel/webhook/endpoint", headers=headers, json=payload, timeout=10.0)
             r.raise_for_status()
             logger.info(f"✅ Webhook 更新成功: {r.status_code}")
     except Exception as e:
@@ -129,11 +128,255 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.0.0")
 router = APIRouter()
 
+
 # ========== 4) Helpers ==========
 def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceGroup): return event.source.group_id
     if isinstance(event.source, SourceRoom):  return event.source.room_id
     return event.source.user_id
+
+# --- AI & 分析 ---
+def get_analysis_reply(messages: List[dict]) -> str:
+    """優先使用 OpenAI；失敗改用 Groq；再失敗回覆友善訊息。"""
+    try:
+        if not openai_client:
+            raise Exception("OpenAI client not initialized.")
+        resp = openai_client.chat.completions.create(model="gpt-3.5-turbo", messages=messages)
+        return resp.choices[0].message.content
+    except Exception as openai_err:
+        logger.warning(f"OpenAI API 失敗: {openai_err}")
+        try:
+            resp = sync_groq_client.chat.completions.create(
+                model=GROQ_MODEL_PRIMARY, messages=messages, max_tokens=2000, temperature=0.8
+            )
+            return resp.choices[0].message.content
+        except Exception as groq_err:
+            logger.warning(f"Groq 主要模型失敗: {groq_err}")
+            try:
+                resp = sync_groq_client.chat.completions.create(
+                    model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=1500, temperature=1.0
+                )
+                return resp.choices[0].message.content
+            except Exception as fallback_err:
+                logger.error(f"所有 AI API 都失敗: {fallback_err}")
+                return "抱歉，AI 分析師目前連線不穩定，請稍後再試。"
+
+async def groq_chat_async(messages: List[dict], max_tokens=600, temperature=0.7) -> str:
+    resp = await async_groq_client.chat.completions.create(
+        model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature
+    )
+    return resp.choices[0].message.content.strip()
+
+# --- 金融 & 彩票 ---
+def get_gold_analysis():
+    logger.info("開始執行黃金價格分析...")
+    try:
+        url = "https://rate.bot.com.tw/gold?Lang=zh-TW"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
+        table = soup.find("table", {"class": "table-striped"})
+        rows = table.find("tbody").find_all("tr")
+        gold_price = None
+        for row in rows:
+            tds = row.find_all("td")
+            if len(tds) > 1 and "黃金牌價" in tds[0].get_text():
+                gold_price = tds[4].get_text(strip=True)
+                break
+        if not gold_price:
+            raise ValueError("找不到黃金牌價欄位")
+
+        msg = [
+            {"role": "system", "content": "你是一位專業的金融記者。"},
+            {"role": "user", "content": (
+                f"請根據台銀黃金牌價撰寫快訊：黃金（1公克）賣出價 {gold_price} 元。"
+                "開頭直接點出價格；簡述此價位在近期所處區間；提及影響因子（通膨、美元、避險）；用繁中。"
+            )}
+        ]
+        return get_analysis_reply(msg)
+    except Exception as e:
+        logger.error(f"黃金價格分析失敗: {e}", exc_info=True)
+        return "抱歉，目前無法獲取黃金價格，可能是網站結構已變更，請稍後再試。"
+
+def get_currency_analysis(target_currency: str):
+    logger.info(f"開始執行 {target_currency} 匯率分析...")
+    try:
+        base_currency = 'TWD'
+        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("result") != "success":
+            return f"抱歉，匯率 API 回應失敗：{data.get('error-type', '未知錯誤')}"
+        rate = data["rates"].get(base_currency)
+        if rate is None:
+            return f"抱歉，API 中找不到 {base_currency} 匯率。"
+
+        msg = [
+            {"role": "system", "content": "你是一位專業的外匯分析師。"},
+            {"role": "user", "content": (
+                f"撰寫 JPY 快訊：1 JPY = {rate:.5f} TWD。\n"
+                "請：1) 直述當前匯率；2) 說明對旅遊/換匯的相對划算度；3) 給一則換匯族實用建議；"
+                "4) 用繁體中文、口吻輕鬆。")}
+        ]
+        return get_analysis_reply(msg)
+    except Exception as e:
+        logger.error(f"外匯分析失敗: {e}", exc_info=True)
+        return "抱歉，日圓匯率分析服務暫時無法使用。"
+
+# ---------- 股票輔助 ----------
+stock_data_df: Optional[pd.DataFrame] = None
+
+def load_stock_data() -> pd.DataFrame:
+    global stock_data_df
+    if stock_data_df is None:
+        try:
+            stock_data_df = pd.read_csv('name_df.csv')
+        except FileNotFoundError:
+            logger.error("找不到 name_df.csv，台股代碼→名稱對照將停用。")
+            stock_data_df = pd.DataFrame(columns=['股號', '股名'])
+    return stock_data_df
+
+def get_stock_name(stock_id: str) -> Optional[str]:
+    df = load_stock_data()
+    row = df[df['股號'] == stock_id]
+    return None if row.empty else row.iloc[0]['股名']
+
+def remove_full_width_spaces(s: str) -> str:
+    return s.replace('\u3000', ' ') if isinstance(s, str) else s
+
+def normalize_stock_input(user_input: str) -> (str, str):
+    """
+    回傳 (yfinance/查價用代碼, 顯示名稱建議)。
+    規則：
+    - 台股大盤/美股大盤 特例 -> ^TWII / ^GSPC
+    - 純數字或「數字+一個大寫字母」（ETF/權證等） -> 補 .TW（大小寫不敏感）
+      例：2330 -> 2330.TW, 00937b -> 00937B.TW
+    - 純字母 1~5 碼 -> 視為美股代碼（NVDA、QQQ...）
+    - 其餘維持原樣（例如已含 .TW 或指數符號）
+    """
+    s = user_input.strip()
+    s_upper = s.upper()
+
+    # 指數簡稱
+    if s_upper in ["台股大盤", "大盤"]:
+        return "^TWII", "台灣加權指數"
+    if s_upper in ["美股大盤", "美盤", "美股"]:
+        return "^GSPC", "S&P 500 指數"
+
+    # 已含 .TW 直接回傳
+    if s_upper.endswith(".TW") or s_upper.startswith("^"):
+        return s_upper, s_upper
+
+    # 台股格式：4~6位數字 + 可選 1 位英文字母（不分大小寫）
+    if re.fullmatch(r'\d{4,6}[A-Z]?', s_upper):
+        symbol = f"{s_upper}.TW"
+        # 顯示名稱：若有本地對照名稱就用
+        base_code = re.match(r'(\d{4,6}[A-Z]?)', s_upper).group(1)
+        name = get_stock_name(base_code) or base_code
+        return symbol, name
+
+    # 美股：1~5位字母
+    if re.fullmatch(r'[A-Z]{1,5}', s_upper) and s_upper not in ["JPY"]:
+        return s_upper, s_upper
+
+    # 其他：原樣
+    return s_upper, s
+
+
+def get_stock_analysis(stock_id_input: str) -> str:
+    """整合：YahooStock 即時、stock_price 歷史、news、基本面/配息，交給 LLM 生成報告。"""
+    logger.info(f"開始執行 {stock_id_input} 股票分析...")
+    norm_code, display_name = normalize_stock_input(stock_id_input)
+
+    try:
+        # 即時報價（使用你給的 YahooStock，避免直接打 Yahoo API 被 401）
+        newprice_stock = YahooStock(norm_code)
+
+        # 歷史價格
+        price_data = stock_price(norm_code)
+
+        # 新聞（使用顯示名稱關鍵字）
+        news_raw = str(stock_news(display_name))
+        news_data = remove_full_width_spaces(news_raw)[:1024]
+
+        content = [
+            "你現在是一位專業的證券分析師，依據下列資料撰寫一份完整的分析報告：",
+            f"**股票代碼:** {norm_code} ；**股票名稱:** {newprice_stock.name or display_name}",
+            f"**即時報價物件:** {vars(newprice_stock)}",
+            f"**近期價格資訊:**\n{price_data}"
+        ]
+
+        # 基本面/配息：指數不需要
+        if norm_code not in ["^TWII", "^GSPC"]:
+            try:
+                val = stock_fundamental(norm_code)
+            except Exception as e:
+                logger.warning(f"基本面抓取失敗: {e}")
+                val = None
+            try:
+                div = stock_dividend(norm_code)
+            except Exception as e:
+                logger.warning(f"配息抓取失敗: {e}")
+                div = None
+            content.append(f"**每季營收資訊：**\n{val if val is not None else '無法取得'}")
+            content.append(f"**配息資料：**\n{div if div is not None else '無法取得'}")
+
+        content.append(f"**近期新聞資訊：**\n{news_data}")
+
+        content_msg = "\n".join(content)
+
+        stock_link = f"https://finance.yahoo.com/quote/{norm_code}"
+        system_prompt = (
+            "你現在是一位專業的證券分析師。請綜合最近股價、基本面、技術面、消息面與籌碼面，"
+            "以繁體中文、Markdown 輸出：\n"
+            "- **股名(股號)、現價、漲跌、報價時間**\n"
+            "- 股價走勢\n- 基本面分析\n- 技術面分析\n- 消息面\n- 籌碼面\n"
+            "- 推薦買進區間\n- 預計停利點(%)\n- 建議買入張數\n- 市場趨勢（偏多/偏空）\n- 配息分析\n- 綜合結論\n\n"
+            f"最後附上正確連結：[股票資訊連結]({stock_link})"
+        )
+
+        msg = [{"role": "system", "content": system_prompt},
+               {"role": "user", "content": content_msg}]
+        return get_analysis_reply(msg)
+
+    except Exception as e:
+        logger.error(f"股票分析流程失敗: {e}", exc_info=True)
+        return f"抱歉，分析「{stock_id_input}」時發生錯誤，請確認代碼是否正確。"
+
+
+# --- UI & 對話 Helpers ---
+async def analyze_sentiment(text: str) -> str:
+    msgs = [
+        {"role": "system", "content": "Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."},
+        {"role": "user", "content": text}
+    ]
+    try:
+        out = await groq_chat_async(msgs, max_tokens=10, temperature=0)
+        return (out or "neutral").strip().lower()
+    except Exception as e:
+        logger.warning(f"情緒判定失敗，預設 neutral。原因: {e}")
+        return "neutral"
+
+async def translate_text(text: str, target_lang_display: str) -> str:
+    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
+    sys = "You are a precise translation engine. Output ONLY the translated text."
+    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
+    return await groq_chat_async([{"role":"system","content":sys},{"role":"user","content":usr}], 800, 0.2)
+
+def set_user_persona(chat_id: str, key: str):
+    if key == "random": key = random.choice(list(PERSONAS.keys()))
+    if key not in PERSONAS: key = "sweet"
+    user_persona[chat_id] = key
+    return key
+
+def build_persona_prompt(chat_id: str, sentiment: str) -> str:
+    key = user_persona.get(chat_id, "sweet")
+    p = PERSONAS[key]
+    return (f"你是一位「{p['title']}」。風格：{p['style']}\n"
+            f"使用者情緒：{sentiment}；請調整語氣（開心→一起開心；難過/生氣→先共情再建議；中性→自然聊天）。\n"
+            f"回覆使用繁體中文，精煉自然，帶少量表情 {p['emoji']}。")
 
 def build_quick_reply() -> QuickReply:
     return QuickReply(items=[
@@ -215,6 +458,7 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
             ButtonComponent(action=MessageAction(label="開啟自動回答 (群組)", text="開啟自動回答")),
             ButtonComponent(action=MessageAction(label="關閉自動回答 (群組)", text="關閉自動回答")),
         ]
+
     bubble = BubbleContainer(
         direction="ltr",
         header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="lg")]),
@@ -222,319 +466,8 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
 
-# ========== 5) AI & 分析 ==========
-def get_analysis_reply(messages: List[dict]) -> str:
-    """先試 OpenAI（若有），失敗改用 Groq。"""
-    # 先走 OpenAI（可選）
-    if openai_client:
-        try:
-            resp = openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=messages,
-                temperature=0.9,
-                max_tokens=1500,
-            )
-            return resp.choices[0].message.content
-        except Exception as e:
-            logger.warning(f"OpenAI 失敗：{e}")
 
-    # 再走 Groq 主力
-    try:
-        resp = sync_groq_client.chat.completions.create(
-            model=GROQ_MODEL_PRIMARY,
-            messages=messages,
-            temperature=0.8,
-            max_tokens=2000,
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        logger.warning(f"Groq 主模型失敗：{e}")
-        # 備援
-        try:
-            resp = sync_groq_client.chat.completions.create(
-                model=GROQ_MODEL_FALLBACK,
-                messages=messages,
-                temperature=1.0,
-                max_tokens=1500,
-            )
-            return resp.choices[0].message.content
-        except Exception as ee:
-            logger.error(f"所有 AI API 都失敗：{ee}")
-            return "抱歉，AI 分析師目前連線不穩定，請稍後再試。"
-
-async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
-    resp = await async_groq_client.chat.completions.create(
-        model=GROQ_MODEL_FALLBACK,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content.strip()
-
-# ========== 6) 金融工具 ==========
-def get_gold_analysis():
-    logger.info("開始執行黃金價格分析…")
-    try:
-        url = "https://rate.bot.com.tw/gold?Lang=zh-TW"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=10)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-        table = soup.find("table", {"class": "table-striped"})
-        rows = table.find("tbody").find_all("tr")
-        gold_price = None
-        for row in rows:
-            tds = row.find_all("td")
-            if len(tds) > 1 and "黃金牌價" in tds[0].get_text(strip=True):
-                gold_price = tds[4].get_text(strip=True)
-                break
-        if not gold_price:
-            raise ValueError("找不到黃金牌價欄位")
-        content = (
-            f"你是一位金融快報記者，請根據最新的台灣銀行黃金牌價提供一則簡短報導。\n"
-            f"最新數據：黃金（1公克）賣出價 {gold_price} 元（TWD）。\n"
-            f"請以中立客觀、繁體中文撰寫，列出簡短影響因素（美元、通膨、避險）。"
-        )
-        msgs = [{"role":"system","content":"你是一位專業的金融記者。"}, {"role":"user","content":content}]
-        return get_analysis_reply(msgs)
-    except Exception as e:
-        logger.error(f"黃金價格爬取或分析失敗: {e}", exc_info=True)
-        return "抱歉，目前無法獲取黃金價格，可能是網站結構已變更，請稍後再試。"
-
-def get_currency_analysis(target_currency: str):
-    logger.info(f"開始執行 {target_currency} 匯率分析…")
-    try:
-        base_currency = 'TWD'
-        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("result") != "success":
-            return f"抱歉，獲取匯率資料失敗：{data.get('error-type','未知錯誤')}"
-        rate = data["rates"].get(base_currency)
-        if rate is None:
-            return f"抱歉，API 無 {base_currency} 匯率。"
-        content = (
-            f"你是一位外匯分析師，根據即時匯率撰寫一則日圓(JPY)快訊。\n"
-            f"1 JPY ≈ {rate:.5f} TWD。\n"
-            f"請評論旅遊換匯是否划算，給換匯族一句建議，繁體中文。"
-        )
-        msgs = [{"role":"system","content":"你是一位專業的外匯分析師。"}, {"role":"user","content":content}]
-        return get_analysis_reply(msgs)
-    except Exception as e:
-        logger.error(f"匯率分析錯誤: {e}", exc_info=True)
-        return "抱歉，外匯資料暫時無法取得。"
-
-# ====== 6.1 股票：代碼正規化 & 即時價 ======
-_TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')     # 2330 / 006208 / 00937B / 1101B
-_US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')        # NVDA / AAPL / QQQ
-
-def normalize_ticker(user_text: str) -> Tuple[str, str, str, bool]:
-    """
-    將使用者輸入正規化：
-    - 回傳: (yfinance_symbol, yahoo_tw_slug, display_code, is_index)
-    - 台股數字代碼（含尾碼字母）加上 .TW 供 yfinance 使用
-    - Yahoo 台股頁面 slug 使用「原始大寫代碼」（不加 .TW）
-    - 指數：台股大盤/^TWII、美股大盤/^GSPC 直接回傳
-    """
-    t = user_text.strip().upper()
-    if t in ["台股大盤", "大盤"]:
-        return "^TWII", "^TWII", "^TWII", True
-    if t in ["美股大盤", "美盤", "美股"]:
-        return "^GSPC", "^GSPC", "^GSPC", True
-
-    if _TW_CODE_RE.match(t):
-        # 台股：給 yfinance 用 *.TW；Yahoo 台股頁面用原碼
-        return f"{t}.TW", t, t, False
-    if _US_CODE_RE.match(t) and t != "JPY":
-        # 美股
-        return t, t, t, False
-    # 其他直接返回（盡力）
-    return t, t, t, False
-
-def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
-    """
-    先試 yfinance 快速取價；若取不到（常見於 00937B 等），改抓 Yahoo 台股頁面（YahooStock）。
-    回傳 dict: {name, now_price, change, currency, close_time}
-    """
-    # 1) 先試 yfinance
-    snap: dict = {"name": None, "now_price": None, "change": None, "currency": None, "close_time": None}
-    try:
-        tk = yf.Ticker(yf_symbol)
-        info = getattr(tk, "fast_info", None)
-        hist = tk.history(period="2d", interval="1d")
-        # 名稱
-        try:
-            # yfinance 的 .info 常常慢或被限流，優先用 .fast_info / .get_info() 可能較穩
-            nm = None
-            try:
-                nm = tk.get_info().get("shortName")
-            except Exception:
-                pass
-            snap["name"] = nm or yf_symbol
-        except Exception:
-            snap["name"] = yf_symbol
-
-        # 價格 & 幣別
-        price = None
-        ccy = None
-        if info and getattr(info, "last_price", None):
-            price = info.last_price
-            ccy = getattr(info, "currency", None)
-        elif not hist.empty:
-            price = float(hist["Close"].iloc[-1])
-            ccy = getattr(info, "currency", None)
-        if price:
-            snap["now_price"] = f"{price:.2f}"
-            snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
-
-        # 變動
-        if not hist.empty and len(hist) >= 2:
-            chg = float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2])
-            pct = chg / float(hist["Close"].iloc[-2]) * 100 if hist["Close"].iloc[-2] else 0.0
-            sign = "+" if chg >= 0 else "-"
-            snap["change"] = f"{sign}{abs(chg):.2f} ({sign}{abs(pct):.2f}%)"
-
-        # 關閉時間（以最後一根收盤時間表示）
-        if not hist.empty:
-            ts = hist.index[-1]
-            snap["close_time"] = ts.strftime("%Y-%m-%d %H:%M")
-    except Exception as e:
-        logger.warning(f"yfinance 取得 {yf_symbol} 失敗：{e}")
-
-    # 2) 若 yfinance 失敗或缺資料，改用 YahooStock（tw.stock.yahoo.com）
-    need_fallback = not snap["now_price"] or not snap["name"]
-    if need_fallback:
-        try:
-            ys = YahooStock(yahoo_slug)
-            snap["name"] = ys.name or snap["name"] or yahoo_slug
-            snap["now_price"] = ys.now_price or snap["now_price"]
-            snap["change"] = ys.change or snap["change"]
-            snap["currency"] = ys.currency or ( "TWD" if yf_symbol.endswith(".TW") else snap["currency"])
-            snap["close_time"] = ys.close_time or snap["close_time"]
-        except Exception as e:
-            logger.error(f"YahooStock 取得 {yahoo_slug} 失敗：{e}")
-
-    return snap
-
-# ====== 6.2 股票分析主流程 ======
-stock_data_df: Optional[pd.DataFrame] = None
-def load_stock_data() -> pd.DataFrame:
-    global stock_data_df
-    if stock_data_df is None:
-        try:
-            stock_data_df = pd.read_csv('name_df.csv')
-        except FileNotFoundError:
-            logger.error("`name_df.csv` not found. Stock name lookup disabled.")
-            stock_data_df = pd.DataFrame(columns=['股號', '股名'])
-    return stock_data_df
-
-def get_stock_name(stock_id_without_suffix: str) -> Optional[str]:
-    df = load_stock_data()
-    res = df[df['股號'].astype(str).str.upper() == stock_id_without_suffix.upper()]
-    return res.iloc[0]['股名'] if not res.empty else None
-
-def get_stock_analysis(user_input: str) -> str:
-    logger.info(f"開始執行 {user_input} 股票分析…")
-
-    yf_symbol, yahoo_slug, display_code, is_index = normalize_ticker(user_input)
-    stock_name_lookup = get_stock_name(yahoo_slug) if _TW_CODE_RE.match(yahoo_slug) else None
-
-    # 即時價快照（支援 00937B 等）
-    snapshot = fetch_realtime_snapshot(yf_symbol, yahoo_slug)
-
-    # 歷史價格（用你原本的 stock_price）
-    try:
-        price_data = stock_price(yahoo_slug if _TW_CODE_RE.match(yahoo_slug) else yf_symbol)
-    except Exception as e:
-        logger.warning(f"price_data 失敗：{e}")
-        price_data = "（價格資料暫時無法取得）"
-
-    # 新聞
-    try:
-        news_data = str(stock_news(stock_name_lookup or snapshot.get("name") or yahoo_slug))
-        news_data = news_data.replace("\u3000", " ")[:1024]
-    except Exception as e:
-        logger.warning(f"news_data 失敗：{e}")
-        news_data = "（新聞暫時無法取得）"
-
-    # 基本面 / 配息（指數不查）
-    value_part = "每季營收資訊無法取得。\n"
-    dividend_part = "配息資料資訊無法取得。\n"
-    if not is_index:
-        try:
-            val = stock_fundamental(yf_symbol if not _TW_CODE_RE.match(yahoo_slug) else yahoo_slug)
-            value_part = f"{val}\n" if val is not None else value_part
-        except Exception as e:
-            logger.warning(f"fundamental 失敗：{e}")
-        try:
-            dvd = stock_dividend(yf_symbol if not _TW_CODE_RE.match(yahoo_slug) else yahoo_slug)
-            dividend_part = f"{dvd}\n" if dvd is not None else dividend_part
-        except Exception as e:
-            logger.warning(f"dividend 失敗：{e}")
-
-    # 報告內容
-    stock_link = (
-        f"https://finance.yahoo.com/quote/{yf_symbol}"
-        if yf_symbol.startswith("^") or yf_symbol.endswith(".TW") or _US_CODE_RE.match(yf_symbol)
-        else f"https://tw.stock.yahoo.com/quote/{yahoo_slug}"
-    )
-
-    content_msg = (
-        f"你現在是一位專業的證券分析師, 你會依據以下資料來進行分析並給出一份完整的分析報告:\n"
-        f"**股票代碼:** {display_code}, **股票名稱:** {snapshot.get('name')}\n"
-        f"**即時報價:** {snapshot}\n"
-        f"**近期價格資訊:**\n{price_data}\n"
-    )
-    if not is_index:
-        content_msg += f"**每季營收資訊：**\n{value_part}"
-        content_msg += f"**配息資料：**\n{dividend_part}"
-    content_msg += f"**近期新聞資訊：**\n{news_data}\n"
-    content_msg += f"請給我 {snapshot.get('name') or display_code} 近期的趨勢報告。請以詳細、嚴謹及專業的角度撰寫此報告，並提及重要的數字，請使用台灣地區的繁體中文回答。"
-
-    system_prompt = (
-        "你現在是一位專業的證券分析師。請基於近期的股價走勢、基本面分析、新聞資訊等進行綜合分析。\n"
-        "- 請在開頭列出：股名(股號)、現價與漲跌幅、資料時間\n"
-        "- 股價走勢\n- 基本面分析\n- 技術面分析\n- 消息面\n- 籌碼面\n"
-        "- 推薦買進區間（範例：100–110 元）\n- 預計停利點（%）\n- 建議買入張數\n- 市場趨勢（多/空）\n- 配息分析\n- 綜合評語\n"
-        f"最後附上連結：[股票資訊連結]({stock_link})。\n"
-        "回應使用繁體中文並以 Markdown 格式化。"
-    )
-    msgs = [{"role":"system","content":system_prompt}, {"role":"user","content":content_msg}]
-    return get_analysis_reply(msgs)
-
-# ========== 7) UI / 其他對話 ==========
-async def analyze_sentiment(text: str) -> str:
-    msgs = [
-        {"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."},
-        {"role":"user","content":text}
-    ]
-    try:
-        out = await groq_chat_async(msgs, max_tokens=10, temperature=0)
-        return (out or "neutral").strip().lower()
-    except Exception:
-        return "neutral"
-
-async def translate_text(text: str, target_lang_display: str) -> str:
-    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
-    sys = "You are a precise translation engine. Output ONLY the translated text."
-    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
-    return await groq_chat_async([{"role":"system","content":sys},{"role":"user","content":usr}], 800, 0.2)
-
-def set_user_persona(chat_id: str, key: str):
-    if key == "random": key = random.choice(list(PERSONAS.keys()))
-    if key not in PERSONAS: key = "sweet"
-    user_persona[chat_id] = key
-    return key
-
-def build_persona_prompt(chat_id: str, sentiment: str) -> str:
-    key = user_persona.get(chat_id, "sweet")
-    p = PERSONAS[key]
-    return (f"你是一位「{p['title']}」。風格：{p['style']}\n"
-            f"使用者情緒：{sentiment}；請調整語氣（開心→一起開心；難過/生氣→先共情、安撫再給建議；中性→自然聊天）。\n"
-            f"回覆使用繁體中文，精煉自然，帶少量表情 {p['emoji']}。")
-
-# ========== 8) LINE Handlers ==========
+# ========== 5) LINE Handlers ==========
 @handler.add(MessageEvent, message=TextMessage)
 def on_message_text(event: MessageEvent):
     try:
@@ -551,23 +484,17 @@ def on_postback(event: PostbackEvent):
             event.reply_token,
             [build_submenu_flex(kind), TextSendMessage(text="請選擇一項服務", quick_reply=build_quick_reply())]
         )
+        return
 
-def is_stock_query(text: str) -> bool:
-    t = text.strip().upper()
-    if t in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"]:
-        return True
-    if _TW_CODE_RE.match(t):  # 2330 / 00937B / 1101B ...
-        return True
-    if _US_CODE_RE.match(t) and t not in ["JPY"]:
-        return True
-    return False
 
+# ---------- 主訊息流程 ----------
 async def handle_message_async(event: MessageEvent):
     chat_id = get_chat_id(event)
     msg_raw = event.message.text.strip()
     reply_token = event.reply_token
     is_group = not isinstance(event.source, SourceUser)
 
+    # 取得 Bot 顯示名稱（群組 @判斷）
     try:
         bot_info = await run_in_threadpool(line_bot_api.get_bot_info)
         bot_name = bot_info.display_name
@@ -576,10 +503,10 @@ async def handle_message_async(event: MessageEvent):
 
     if not msg_raw:
         return
-
     if chat_id not in auto_reply_status:
         auto_reply_status[chat_id] = True
 
+    # 群組中關閉自動回答且未 @Bot 時，不回覆
     if is_group and not auto_reply_status.get(chat_id, True) and not msg_raw.startswith(f"@{bot_name}"):
         return
 
@@ -589,23 +516,39 @@ async def handle_message_async(event: MessageEvent):
 
     low = msg.lower()
 
-    # --- 功能路由 ---
+    def is_stock_query(text: str) -> bool:
+        t = text.upper()
+        if t in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"]:
+            return True
+        # 台股：4~6位數＋可選一位英文字母（大小寫都行）
+        if re.fullmatch(r'\d{4,6}[A-Za-z]?', t):
+            return True
+        # 美股：1~5 位字母（排除 JPY）
+        if re.fullmatch(r'[A-Z]{1,5}', t) and t not in ["JPY"]:
+            return True
+        return False
+
+    # --- 菜單 ---
     if low in ("menu", "選單", "主選單"):
         return line_bot_api.reply_message(reply_token, build_main_menu_flex())
 
+    # --- 子選單（postback 已處理） ---
+
+    # --- 彩票 ---
     if msg in ["大樂透", "威力彩", "539"]:
         if not LOTTERY_ENABLED:
             return reply_with_quick_bar(reply_token, "抱歉，彩票分析功能目前設定不完整。")
         try:
-            # 原版 get_lottery_analysis（略）——你若需要可移植；這裡直接簡單回覆
-            return reply_with_quick_bar(reply_token, "🎰 彩票分析功能已啟用，但此環節程式略去。（如需我也可補上）")
+            report = await run_in_threadpool(get_lottery_analysis, msg)
+            return reply_with_quick_bar(reply_token, report)
         except Exception as e:
             logger.error(f"彩票分析流程失敗: {e}", exc_info=True)
             return reply_with_quick_bar(reply_token, f"抱歉，分析 {msg} 時發生錯誤。")
 
+    # --- 股票 ---
     if is_stock_query(msg):
         if not STOCK_ENABLED:
-            return reply_with_quick_bar(reply_token, "抱歉，股票分析模組載入失敗或未設定。")
+            return reply_with_quick_bar(reply_token, "抱歉，股票分析模組目前設定不完整或載入失敗。")
         try:
             report = await run_in_threadpool(get_stock_analysis, msg)
             return reply_with_quick_bar(reply_token, report)
@@ -613,28 +556,31 @@ async def handle_message_async(event: MessageEvent):
             logger.error(f"股票分析流程失敗: {e}", exc_info=True)
             return reply_with_quick_bar(reply_token, f"抱歉，分析 {msg} 時發生錯誤。")
 
+    # --- 金價 / 匯率 ---
     if low in ("金價", "黃金"):
         try:
-            out = await run_in_threadpool(get_gold_analysis)
-            return reply_with_quick_bar(reply_token, out)
+            report = await run_in_threadpool(get_gold_analysis)
+            return reply_with_quick_bar(reply_token, report)
         except Exception as e:
             logger.error(f"黃金分析流程失敗: {e}", exc_info=True)
             return reply_with_quick_bar(reply_token, "抱歉，金價分析服務暫時無法使用。")
 
     if low == "jpy":
         try:
-            out = await run_in_threadpool(get_currency_analysis, "JPY")
-            return reply_with_quick_bar(reply_token, out)
+            report = await run_in_threadpool(get_currency_analysis, "JPY")
+            return reply_with_quick_bar(reply_token, report)
         except Exception as e:
             logger.error(f"日圓分析流程失敗: {e}", exc_info=True)
             return reply_with_quick_bar(reply_token, "抱歉，日圓匯率分析服務暫時無法使用。")
 
+    # --- 系統設定 ---
     if low in ("開啟自動回答", "關閉自動回答"):
-        is_on = low == "開啟自動回答"
+        is_on = (low == "開啟自動回答")
         auto_reply_status[chat_id] = is_on
         text = "✅ 已開啟自動回答" if is_on else "❌ 已關閉自動回答（群組需 @我 才回）"
         return reply_with_quick_bar(reply_token, text)
 
+    # --- 翻譯模式開關 ---
     if low.startswith("翻譯->"):
         lang = msg.split("->", 1)[1].strip()
         if lang == "結束":
@@ -643,21 +589,30 @@ async def handle_message_async(event: MessageEvent):
         translation_states[chat_id] = lang
         return reply_with_quick_bar(reply_token, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
 
+    # ⭐ 翻譯模式直通（修復點）：只要模式開著，就攔截並翻譯，不讓它走到一般聊天
+    if chat_id in translation_states:
+        try:
+            out = await translate_text(msg, translation_states[chat_id])
+            return reply_with_quick_bar(reply_token, f"🌐 ({translation_states[chat_id]})\n{out}")
+        except Exception as e:
+            logger.error(f"翻譯失敗: {e}", exc_info=True)
+            return reply_with_quick_bar(reply_token, "翻譯暫時失效，等我回神再來一次 🙏")
+
+    # --- 人設切換 ---
     persona_keys = {"甜":"sweet", "鹹":"salty", "萌":"moe", "酷":"cool", "random":"random"}
     if low in persona_keys:
-        key = persona_keys[low]
-        set_user_persona(chat_id, key)
-        p = PERSONAS[user_persona[chat_id]]
-        txt = f"💖 已切換人設：{p['title']}\n\n{p['greetings']}"
-        return reply_with_quick_bar(reply_token, txt)
+        key = set_user_persona(chat_id, persona_keys[low])
+        p = PERSONAS[key]
+        return reply_with_quick_bar(reply_token, f"💖 已切換人設：{p['title']}\n\n{p['greetings']}")
 
-    # --- 一般聊天 ---
+    # --- 一般對話 ---
     try:
         history = conversation_history.get(chat_id, [])
         sentiment = await analyze_sentiment(msg)
         sys_prompt = build_persona_prompt(chat_id, sentiment)
         messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
         final_reply = await groq_chat_async(messages)
+        # 紀錄歷史
         history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}])
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
         return reply_with_quick_bar(reply_token, final_reply)
@@ -665,7 +620,52 @@ async def handle_message_async(event: MessageEvent):
         logger.error(f"AI 回覆失敗: {e}", exc_info=True)
         return reply_with_quick_bar(reply_token, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
 
-# ========== 9) FastAPI Routes ==========
+
+# ---------- 彩票分析（封裝；供上面呼叫） ----------
+def get_lottery_analysis(lottery_type_input: str) -> str:
+    if not LOTTERY_ENABLED:
+        return "抱歉，彩票分析功能尚未啟用。"
+    logger.info(f"開始執行 {lottery_type_input} 彩票分析...")
+
+    t = lottery_type_input
+    if "威力" in t: last_lotto = lottery_crawler.super_lotto()
+    elif "大樂" in t: last_lotto = lottery_crawler.lotto649()
+    elif "539" in t: last_lotto = lottery_crawler.daily_cash()
+    else: return f"抱歉，暫不支援 {lottery_type_input} 類型的分析。"
+
+    try:
+        info = caiyunfangwei_crawler.get_caiyunfangwei()
+        content_msg = (
+            f'你現在是一位專業的樂透彩分析師, 使用{t}的資料來撰寫分析報告:\n'
+            f'近幾期號碼資訊:\n{last_lotto}\n'
+            f'顯示今天國歷/農歷日期：{info.get("今天日期", "未知")}\n'
+            f'今日歲次：{info.get("今日歲次", "未知")}\n'
+            f'財神方位：{info.get("財神方位", "未知")}\n'
+            '最冷號碼，最熱號碼\n請給出完整的趨勢分析報告，最近所有每次開號碼,'
+            '並給3組與彩類同數位數字隨機號和不含特別號(如有)\n'
+            '第1組最冷組合：同彩種位數，數字小到大；威力彩需分二區，其他不分\n'
+            '第2組最熱組合：同彩種位數，數字小到大；威力彩需分二區，其他不分\n'
+            '第3組隨機組合：同彩種位數，數字小到大；威力彩需分二區，其他不分\n'
+            '給 20 字內勵志吉祥句。\n'
+            '使用台灣繁體中文。'
+        )
+    except Exception as e:
+        logger.error(f"財神方位取得失敗: {e}")
+        content_msg = (
+            f'你現在是一位專業的樂透彩分析師, 使用{t}的資料來撰寫分析報告:\n'
+            f'近幾期號碼資訊:\n{last_lotto}\n'
+            '（財神方位資訊暫時無法獲取）\n'
+            '請給出完整的趨勢分析報告，並提供 3 組隨機號碼組合；使用繁體中文。'
+        )
+
+    msg = [
+        {"role": "system", "content": f"你是{t}的專業彩券分析師，輸出精簡且有條理的趨勢報告。"},
+        {"role": "user", "content": content_msg}
+    ]
+    return get_analysis_reply(msg)
+
+
+# ========== 6) FastAPI Routes ==========
 @router.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
@@ -689,7 +689,8 @@ async def healthz():
 
 app.include_router(router)
 
-# ========== 10) Local run ==========
+
+# ========== 7) Local run ==========
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
