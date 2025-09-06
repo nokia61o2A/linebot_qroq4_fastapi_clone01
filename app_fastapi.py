@@ -4,7 +4,7 @@ import re
 import random
 import logging
 import asyncio
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from contextlib import asynccontextmanager
 import time
 from io import StringIO
@@ -17,6 +17,7 @@ import httpx
 import pandas as pd
 import html5lib
 import yfinance as yf
+import sqlite3  # === Memory: 使用標準庫 SQLite，無需安裝 peewee
 
 # --- FastAPI 與 LINE Bot SDK ---
 from fastapi import FastAPI, APIRouter, Request, HTTPException
@@ -84,7 +85,7 @@ else:
     openai_client = None
     logger.warning("未設定 OPENAI_API_KEY，分析功能將僅使用 Groq。")
 
-# 【 crucial fix 】更新為當前有效的 Groq 模型
+# 【 Groq 模型 】
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
@@ -110,6 +111,8 @@ LANGUAGE_MAP = { "英文": "English", "日文": "Japanese", "韓文": "Korean", 
 # ========== 3) FastAPI ==========
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # === Memory: 初始化 SQLite
+    init_memory_db()
     try:
         async with httpx.AsyncClient() as c:
             headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
@@ -156,7 +159,6 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
         return resp.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Groq Async 主要模型失敗: {e}")
-        # 如果連備用模型都失敗，就拋出異常讓上層處理
         raise e
 
 # --- 金融 & 彩票分析 ---
@@ -165,27 +167,22 @@ def get_gold_analysis():
     try:
         url = "https://rate.bot.com.tw/gold?Lang=zh-TW"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, 'html.parser')
         table = soup.find("table", {"class": "table-striped"})
         rows = table.find("tbody").find_all("tr")
-        
         gold_price = None
         for row in rows:
             cells = row.find_all("td")
             if len(cells) > 1 and "黃金牌價" in cells[0].text:
-                # 欄位索引可能會變，改用更穩定的遍歷方式
                 gold_price = cells[4].text.strip()
                 break
-        
         if gold_price is None:
             raise ValueError("在網頁上找不到 '黃金牌價' 的欄位。")
-
         content_msg = (f"你是一位金融快報記者，請根據最新的台灣銀行黃金牌價提供一則簡短報導。\n"
                        f"最新數據：黃金（1公克）對台幣（TWD）的賣出價為 {gold_price} 元。\n"
-                       f"報導要求：\n1. 開頭直接點出最新價格。\n2. 簡要分析此價格在近期市場中的位置（例如：處於高點、低點、或盤整）。\n3. 提及可能影響金價的因素（例如：通膨預期、美元走勢、避險情緒）。\n4. 語氣中立客觀，使用繁體中文。")
+                       f"報導要求：\n1. 開頭直接點出最新價格。\n2. 簡要分析近期位置（高/低/盤整）。\n3. 影響因素（通膨、美元、避險）。\n4. 繁體中文、中立口吻。")
         msg = [{"role": "system", "content": "你是一位專業的金融記者。"}, {"role": "user", "content": content_msg}]
         return get_analysis_reply(msg)
     except Exception as e:
@@ -203,10 +200,10 @@ def get_currency_analysis(target_currency: str):
         if data.get("result") == "success":
             rate = data["rates"].get(base_currency)
             if rate is None: return f"抱歉，API中找不到 {base_currency} 的匯率資訊。"
-            twd_per_jpy = rate 
-            content_msg = (f"你是一位外匯分析師，請根據最新即時匯率撰寫一則簡短的日圓(JPY)匯率快訊。\n"
-                           f"最新數據：1 日圓 (JPY) 可以兌換 {twd_per_jpy:.5f} 新台幣 (TWD)。\n"
-                           f"分析要求：\n1. 直接報告目前的匯率。\n2. 根據此匯率水平，簡要說明現在去日本旅遊或換匯是相對划算還是昂貴。\n3. 提供一句給換匯族的實用建議。\n4. 語氣輕鬆易懂，使用繁體中文。")
+            twd_per_jpy = rate
+            content_msg = (f"你是一位外匯分析師，請撰寫一則日圓快訊。\n"
+                           f"最新：1 JPY = {twd_per_jpy:.5f} TWD。\n"
+                           f"請說明旅遊/換匯相對划算與否＋一句實用建議，繁體中文。")
             msg = [{"role": "system", "content": "你是一位專業的外匯分析師。"}, {"role": "user", "content": content_msg}]
             return get_analysis_reply(msg)
         else:
@@ -218,6 +215,8 @@ def get_currency_analysis(target_currency: str):
 def get_lottery_analysis(lottery_type_input: str):
     logger.info(f"開始執行 {lottery_type_input} 彩票分析...")
     lottery_type = lottery_type_input.lower()
+    if not LOTTERY_ENABLED:
+        return "抱歉，彩票分析功能目前停用。"
     if "威力" in lottery_type: last_lotto = lottery_crawler.super_lotto()
     elif "大樂" in lottery_type: last_lotto = lottery_crawler.lotto649()
     elif "539" in lottery_type: last_lotto = lottery_crawler.daily_cash()
@@ -225,28 +224,16 @@ def get_lottery_analysis(lottery_type_input: str):
 
     try:
         caiyunfangwei_info = caiyunfangwei_crawler.get_caiyunfangwei()
-        content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-                       f'近幾期號碼資訊:\n{last_lotto}\n'
-                       f'顯示今天國歷/農歷日期：{caiyunfangwei_info.get("今天日期", "未知")}\n'
-                       f'今日歲次：{caiyunfangwei_info.get("今日歲次", "未知")}\n'
-                       f'財神方位：{caiyunfangwei_info.get("財神方位", "未知")}\n'
-                       '最冷號碼，最熱號碼\n請給出完整的趨勢分析報告，最近所有每次開號碼,'
-                       '並給3組與彩類同數位數字隨機號和不含特別號(如果有的彩種,)\n'
-                       '第1組最冷組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                       '第2組最熱組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                       '第3組隨機組合:給與該彩種開獎同數位數字隨機號和(數字小到大)，威力彩多顯示二區才顯示，其他彩種不含二區\n'
-                       '請寫詳細的數字，1不要省略\n{發財的吉祥句20字內要有勵志感}\n'
-                       'example:   ***財神方位提示***\n國歷：2024/06/19（星期三）\n農曆甲辰年五月十四號\n根據財神方位 :東北\n'
-                       '使用台灣繁體中文。')
+        content_msg = (f'你是樂透彩分析師, 使用{lottery_type_input}資料撰寫分析:\n'
+                       f'近幾期號碼:\n{last_lotto}\n'
+                       f'今天：{caiyunfangwei_info.get("今天日期", "未知")} / 歲次：{caiyunfangwei_info.get("今日歲次", "未知")} / 財神方位：{caiyunfangwei_info.get("財神方位", "未知")}\n'
+                       '請列出最冷/最熱號、給 3 組同位數組合（威力彩含二區，其它彩種單區），數字小到大；最後來一句 20 字內勵志吉祥話。繁中。')
     except Exception as e:
         logger.error(f"獲取財神方位失敗: {e}")
-        content_msg = (f'你現在是一位專業的樂透彩分析師, 使用{lottery_type_input}的資料來撰寫分析報告:\n'
-                       f'近幾期號碼資訊:\n{last_lotto}\n'
-                       '財神方位資訊暫時無法獲取\n'
-                       '請給出完整的趨勢分析報告，並給3組隨機號碼組合\n'
-                       '使用台灣繁體中文。')
-    
-    msg = [{"role": "system", "content": f"你現在是一位專業的彩券分析師, 使用{lottery_type_input}近期的號碼進行分析，生成一份專業的趨勢分析報告。"}, {"role": "user", "content": content_msg}]
+        content_msg = (f'你是樂透彩分析師, 使用{lottery_type_input}資料撰寫分析:\n'
+                       f'近幾期號碼:\n{last_lotto}\n'
+                       '財神方位暫缺；請仍完成冷熱號與 3 組組合建議（規則同上），繁中。')
+    msg = [{"role": "system", "content": f"你是專業彩券分析師。"}, {"role": "user", "content": content_msg}]
     return get_analysis_reply(msg)
 
 stock_data_df = None
@@ -272,7 +259,6 @@ def get_stock_analysis(stock_id_input: str):
     logger.info(f"開始執行 {stock_id_input} 股票分析...")
     stock_id = stock_id_input
     stock_name = stock_id_input
-    
     user_input_upper = stock_id_input.upper()
     if user_input_upper in ["台股大盤", "大盤"]:
         stock_id = "^TWII"
@@ -294,7 +280,7 @@ def get_stock_analysis(stock_id_input: str):
         news_data = str(stock_news(stock_name))
         news_data = remove_full_width_spaces(news_data)[:1024]
 
-        content_msg = (f'你現在是一位專業的證券分析師, 你會依據以下資料來進行分析並給出一份完整的分析報告:\n'
+        content_msg = (f'你是證券分析師，依據下列資訊生成報告：\n'
                        f'**股票代碼:** {stock_id}, **股票名稱:** {newprice_stock.name}\n'
                        f'**即時報價:** {vars(newprice_stock)}\n'
                        f'**近期價格資訊:**\n {price_data}\n')
@@ -302,20 +288,14 @@ def get_stock_analysis(stock_id_input: str):
         if stock_id not in ["^TWII", "^GSPC"]:
             stock_value_data = stock_fundamental(stock_id)
             stock_vividend_data = stock_dividend(stock_id)
-            content_msg += f'**每季營收資訊：**\n {stock_value_data if stock_value_data is not None else "無法取得"}\n'
+            content_msg += f'**每季營收：**\n {stock_value_data if stock_value_data is not None else "無法取得"}\n'
             content_msg += f'**配息資料：**\n {stock_vividend_data if stock_vividend_data is not None else "無法取得"}\n'
 
-        content_msg += f'**近期新聞資訊:** \n {news_data}\n'
-        content_msg += f'請給我 {stock_name} 近期的趨勢報告。請以詳細、嚴謹及專業的角度撰寫此報告，並提及重要的數字，請使用台灣地區的繁體中文回答。'
+        content_msg += f'**近期新聞：** \n {news_data}\n'
+        content_msg += f'請以台灣繁中、Markdown，給出趨勢報告：走勢/基本面/技術面/消息面/籌碼面/建議區間/停利點/買入張數/市場趨勢/配息/綜合結論。\n'
         
         stock_link = f"https://finance.yahoo.com/quote/{stock_id}"
-        
-        system_prompt = (f"你現在是一位專業的證券分析師。請基於近期的股價走勢、基本面分析、新聞資訊等進行綜合分析。\n"
-                         f"請提供以下內容：\n- **股名(股號)** ,現價(現漲跌幅),現價的資料的取得時間\n- 股價走勢\n- 基本面分析\n- 技術面分析\n- 消息面\n- 籌碼面\n- 推薦購買區間\n- 預計停利點\n- 建議買入張數\n- 市場趨勢\n- 配息分析\n- 綜合分析\n"
-                         f"然後生成一份專業的趨勢分析報告。\n"
-                         f"最後，請提供一個正確的股票連結：[股票資訊連結]({stock_link})。\n"
-                         f"回應請使用繁體中文並格式化為 Markdown。")
-
+        system_prompt = (f"你是專業分析師。最後務必附上正確連結：[股票資訊連結]({stock_link})。")
         msg = [{"role": "system", "content": system_prompt}, {"role": "user", "content": content_msg}]
         return get_analysis_reply(msg)
 
@@ -358,6 +338,7 @@ def build_quick_reply() -> QuickReply:
         QuickReplyButton(action=MessageAction(label="查日圓", text="JPY")),
         QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
+        QuickReplyButton(action=PostbackAction(label="🧠 記憶說明", data="menu:memory"))  # === Memory: 快速入口
     ])
 
 def reply_with_quick_bar(reply_token: str, text: str):
@@ -379,6 +360,7 @@ def build_main_menu_flex() -> FlexSendMessage:
                 ButtonComponent(action=PostbackAction(label="🎰 彩票分析", data="menu:lottery"), style="primary", color="#5EC186"),
                 ButtonComponent(action=PostbackAction(label="💖 AI 角色扮演", data="menu:persona"), style="secondary"),
                 ButtonComponent(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate"), style="secondary"),
+                ButtonComponent(action=PostbackAction(label="🧠 記憶系統", data="menu:memory"), style="secondary"),  # === Memory
                 ButtonComponent(action=PostbackAction(label="⚙️ 系統設定", data="menu:settings"), style="secondary"),
             ]
         )
@@ -428,6 +410,15 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
             ButtonComponent(action=MessageAction(label="開啟自動回答 (群組)", text="開啟自動回答")),
             ButtonComponent(action=MessageAction(label="關閉自動回答 (群組)", text="關閉自動回答")),
         ]
+    elif kind == "memory":  # === Memory: 子選單
+        title = "🧠 記憶系統"
+        buttons = [
+            ButtonComponent(action=MessageAction(label="怎麼記？", text="記憶教學")),
+            ButtonComponent(action=MessageAction(label="我的記憶", text="我的記憶")),
+            ButtonComponent(action=MessageAction(label="查記憶: 考試", text="查記憶 考試")),
+            ButtonComponent(action=MessageAction(label="忘記: 考試", text="忘記 考試")),
+            ButtonComponent(action=MessageAction(label="清空記憶(本聊)", text="清空記憶")),
+        ]
 
     bubble = BubbleContainer(
         direction="ltr",
@@ -435,6 +426,134 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
         body=BoxComponent(layout="vertical", contents=buttons, spacing="sm")
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
+
+# ========== 4.5) Memory：SQLite 輕量記憶系統 ==========
+MEMORY_DB_PATH = os.getenv("MEMORY_DB_PATH", "memory.db")
+
+def init_memory_db():
+    conn = sqlite3.connect(MEMORY_DB_PATH)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                keyword TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_chat_kw ON memories(chat_id, keyword)")
+        conn.commit()
+        logger.info("✅ 記憶資料庫初始化完成")
+    finally:
+        conn.close()
+
+def parse_memory_intent(msg: str) -> Tuple[str, str]:
+    """
+    解析記憶指令：
+    - 記住:xxx[#標籤] / 紀錄:xxx[#標籤]
+    - 查記憶 關鍵詞
+    - 忘記 關鍵詞
+    - 清空記憶
+    回傳 (intent, arg)
+    """
+    m = re.match(r'^(記住|紀錄)[:：]\s*(.+)$', msg)
+    if m:
+        return ("remember", m.group(2).strip())
+    m = re.match(r'^查記憶\s+(.+)$', msg)
+    if m:
+        return ("recall", m.group(1).strip())
+    m = re.match(r'^忘記\s+(.+)$', msg)
+    if m:
+        return ("forget", m.group(1).strip())
+    if msg.strip() == "清空記憶":
+        return ("clear", "")
+    if msg.strip() == "我的記憶":
+        return ("list", "")
+    if msg.strip() == "記憶教學":
+        return ("help", "")
+    return ("", "")
+
+def extract_keywords(payload: str) -> List[str]:
+    """
+    從文字中抓 #標籤 作為 keyword；若沒有，取 2~6 字的常見片語（簡化規則）。
+    """
+    tags = re.findall(r'#([A-Za-z0-9\u4e00-\u9fff]+)', payload)
+    if tags:
+        return list(set(tags))
+    # 簡易：擷取 2~4 字中文片段（避免太吵）
+    candidates = set(re.findall(r'([\u4e00-\u9fff]{2,4})', payload))
+    # 過濾常見虛詞
+    stop = {"我們", "你們", "今天", "明天", "後天", "一下", "一下子", "這個", "那個", "真的", "有點", "有點兒"}
+    return [c for c in candidates if c not in stop][:3] or ["一般"]
+
+def memory_save(chat_id: str, payload: str) -> Tuple[int, List[str]]:
+    kw_list = extract_keywords(payload)
+    now = datetime.utcnow().isoformat()
+    conn = sqlite3.connect(MEMORY_DB_PATH)
+    try:
+        for kw in kw_list:
+            conn.execute("INSERT INTO memories(chat_id, keyword, content, created_at) VALUES(?,?,?,?)",
+                         (chat_id, kw, payload, now))
+        conn.commit()
+        return (len(kw_list), kw_list)
+    finally:
+        conn.close()
+
+def memory_query(chat_id: str, keyword: str, limit: int = 5) -> List[Tuple[str, str]]:
+    conn = sqlite3.connect(MEMORY_DB_PATH)
+    try:
+        cur = conn.execute(
+            "SELECT content, created_at FROM memories WHERE chat_id=? AND keyword=? ORDER BY id DESC LIMIT ?",
+            (chat_id, keyword, limit)
+        )
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+def memory_forget(chat_id: str, keyword: str) -> int:
+    conn = sqlite3.connect(MEMORY_DB_PATH)
+    try:
+        cur = conn.execute("DELETE FROM memories WHERE chat_id=? AND keyword=?", (chat_id, keyword))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+def memory_clear(chat_id: str) -> int:
+    conn = sqlite3.connect(MEMORY_DB_PATH)
+    try:
+        cur = conn.execute("DELETE FROM memories WHERE chat_id=?", (chat_id,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+def memory_list_keywords(chat_id: str, limit: int = 30) -> List[Tuple[str, int]]:
+    conn = sqlite3.connect(MEMORY_DB_PATH)
+    try:
+        cur = conn.execute(
+            "SELECT keyword, COUNT(*) FROM memories WHERE chat_id=? GROUP BY keyword ORDER BY COUNT(*) DESC LIMIT ?",
+            (chat_id, limit)
+        )
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+def memory_awaken(chat_id: str, message: str, max_kw: int = 2, max_each: int = 2) -> List[str]:
+    """
+    記憶喚醒：偵測訊息中的關鍵詞（#標籤優先；否則用 extract_keywords），帶出過往片段。
+    """
+    kws = re.findall(r'#([A-Za-z0-9\u4e00-\u9fff]+)', message)
+    if not kws:
+        kws = extract_keywords(message)
+    snippets = []
+    for kw in kws[:max_kw]:
+        rows = memory_query(chat_id, kw, limit=max_each)
+        if rows:
+            joined = " / ".join([r[0] for r in rows])
+            snippets.append(f"• {kw}：{joined}")
+    return snippets
 
 # ========== 5) LINE Handlers ==========
 @handler.add(MessageEvent, message=TextMessage)
@@ -485,8 +604,43 @@ async def handle_message_async(event: MessageEvent):
              return True
         return False
 
+    # --- Memory：指令處理，優先於其它功能 ---
+    intent, arg = parse_memory_intent(msg)
+    if intent == "help":
+        help_text = (
+            "🧠 記憶系統用法：\n"
+            "• 記住: 明天#考試 要早睡\n"
+            "• 查記憶 考試\n"
+            "• 忘記 考試\n"
+            "• 我的記憶（列出熱門關鍵詞）\n"
+            "• 清空記憶（僅此聊天室）"
+        )
+        return reply_with_quick_bar(reply_token, help_text)
+    if intent == "remember":
+        n, kws = memory_save(chat_id, arg)
+        return reply_with_quick_bar(reply_token, f"✅ 已記住（{n}）項：{', '.join('#'+k for k in kws)}")
+    if intent == "recall":
+        rows = memory_query(chat_id, arg, limit=6)
+        if not rows:
+            return reply_with_quick_bar(reply_token, f"找不到「{arg}」的記憶。可用：記住: 內容#關鍵詞")
+        lines = [f"🗒️ 與「{arg}」相關："] + [f"• {c}" for c, _ in rows]
+        return reply_with_quick_bar(reply_token, "\n".join(lines))
+    if intent == "forget":
+        cnt = memory_forget(chat_id, arg)
+        if cnt == 0:
+            return reply_with_quick_bar(reply_token, f"沒有找到「{arg}」可刪除的記憶。")
+        return reply_with_quick_bar(reply_token, f"🧹 已刪除 {cnt} 筆「{arg}」記憶")
+    if intent == "clear":
+        cnt = memory_clear(chat_id)
+        return reply_with_quick_bar(reply_token, f"🧨 已清空本聊天室記憶，共 {cnt} 筆")
+    if intent == "list":
+        rows = memory_list_keywords(chat_id)
+        if not rows:
+            return reply_with_quick_bar(reply_token, "目前沒有記憶。\n可用：記住: 內容#關鍵詞")
+        lines = ["🧠 熱門關鍵詞："] + [f"• {kw}（{c}）" for kw, c in rows[:20]]
+        return reply_with_quick_bar(reply_token, "\n".join(lines))
+
     # --- 命令 & 功能觸發區 (按優先級排列) ---
-    
     if low in ("menu", "選單", "主選單"):
         return line_bot_api.reply_message(reply_token, build_main_menu_flex())
 
@@ -549,14 +703,7 @@ async def handle_message_async(event: MessageEvent):
         return reply_with_quick_bar(reply_token, txt)
 
     # --- 模式處理 & 一般對話 (最後的預設行為) ---
-    if chat_id in translation_states:
-        try:
-            out = await translate_text(msg, translation_states[chat_id])
-            return reply_with_quick_bar(reply_token, f"🌐 ({translation_states[chat_id]})\n{out}")
-        except Exception as e:
-            logger.error(f"翻譯失敗: {e}", exc_info=True)
-            return reply_with_quick_bar(reply_token, "翻譯暫時失效，等我回神再來一次 🙏")
-
+    memory_hint_lines = memory_awaken(chat_id, msg)  # === Memory: 自動喚醒
     try:
         history = conversation_history.get(chat_id, [])
         sentiment = await analyze_sentiment(msg)
@@ -565,6 +712,8 @@ async def handle_message_async(event: MessageEvent):
         final_reply = await groq_chat_async(messages)
         history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}])
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
+        if memory_hint_lines:
+            final_reply = "🧠 我記得你之前提過：\n" + "\n".join(memory_hint_lines) + "\n\n" + final_reply
         return reply_with_quick_bar(reply_token, final_reply)
     except Exception as e:
         logger.error(f"AI 回覆失敗: {e}", exc_info=True)
@@ -599,4 +748,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
-
