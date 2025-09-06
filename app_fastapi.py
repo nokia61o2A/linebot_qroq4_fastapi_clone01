@@ -2,6 +2,7 @@
 # ========== 1) Imports ==========
 import os
 import re
+import json
 import random
 import logging
 import asyncio
@@ -9,8 +10,6 @@ from typing import Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
-import json
-import time
 import requests
 import httpx
 import pandas as pd
@@ -36,9 +35,9 @@ from groq import AsyncGroq, Groq
 try:
     from openai import OpenAI
 except Exception:
-    OpenAI = None  # 沒安裝也能跑
+    OpenAI = None
 
-# （可選）彩票模組；沒有就自動關閉此功能
+# （可選）彩票模組
 try:
     from TaiwanLottery import TaiwanLotteryCrawler
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
@@ -62,9 +61,9 @@ if not all([BASE_URL, CHANNEL_TOKEN, CHANNEL_SECRET, GROQ_API_KEY]):
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# Groq 最新可用模型（Primary → Backup1 → Backup2）
+# ✅ 目前穩定可用的 Groq 模型（主→備）
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
-GROQ_MODEL_BACKUP1 = os.getenv("GROQ_MODEL_BACKUP1", "llama-3.3-8b-instant")
+GROQ_MODEL_BACKUP1 = os.getenv("GROQ_MODEL_BACKUP1", "llama-3.1-8b-instant")
 GROQ_MODEL_BACKUP2 = os.getenv("GROQ_MODEL_BACKUP2", "deepseek-r1-distill-llama-70b")
 
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY)
@@ -216,18 +215,23 @@ def ai_complete(messages: List[Dict[str, str]], max_tokens: int = 1800, temperat
 
     for model in (GROQ_MODEL_PRIMARY, GROQ_MODEL_BACKUP1, GROQ_MODEL_BACKUP2):
         try:
+            r = sync_groq_client.chat_completions.create(  # 新 SDK 別名也相容 old 屬性
+                model=model, messages=messages,
+                max_tokens=max_tokens, temperature=temperature
+            )
+        except AttributeError:
             r = sync_groq_client.chat.completions.create(
                 model=model, messages=messages,
                 max_tokens=max_tokens, temperature=temperature
             )
+        try:
             return r.choices[0].message.content
-        except Exception as e:
-            logger.warning(f"Groq 模型失敗（{model}）：{e}")
+        except Exception:
+            continue
     return "抱歉，AI 產生內容暫時不可用。"
 
 async def groq_small_async(messages: List[Dict[str, str]], max_tokens=300, temperature=0.2) -> str:
-    # 輕量任務（情緒、翻譯等）
-    for model in (GROQ_MODEL_BACKUP1, GROQ_MODEL_PRIMARY):
+    for model in (GROQ_MODEL_BACKUP1, GROQ_MODEL_PRIMARY, GROQ_MODEL_BACKUP2):
         try:
             r = await async_groq_client.chat.completions.create(
                 model=model, messages=messages,
@@ -243,8 +247,8 @@ def get_gold_ai_analysis_report() -> str:
     logger.info("開始：黃金報告")
     current_price_url = "https://rate.bot.com.tw/gold?Lang=zh-TW"
     history_chart_url = "https://rate.bot.com.tw/gold/chart/year/TWD"
-
     headers = {"User-Agent": "Mozilla/5.0"}
+
     current_gold = {}
     try:
         resp = requests.get(current_price_url, headers=headers, timeout=10)
@@ -316,10 +320,7 @@ def get_currency_analysis(cur: str) -> str:
         logger.error(f"匯率分析錯誤：{e}", exc_info=True)
         return "抱歉，匯率服務暫時無法使用。"
 
-# ========== 7) 股票：Quote API + yfinance ==========
-YF_QUOTE_API = "https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols}"
-REQ_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-
+# ========== 7) 股票：純 yfinance（不打 Yahoo Quote API） ==========
 def _normalize_symbol(s: str) -> str:
     t = s.strip().upper()
     if t in ["台股大盤", "大盤"]: return "^TWII"
@@ -327,37 +328,91 @@ def _normalize_symbol(s: str) -> str:
     if re.fullmatch(r"\d{4,6}[A-Z]?", t): return f"{t}.TW"  # 台股自動補 .TW
     return t
 
-def yf_quote(symbol: str) -> Optional[dict]:
-    url = YF_QUOTE_API.format(symbols=symbol)
-    r = requests.get(url, headers=REQ_HEADERS, timeout=8)
-    r.raise_for_status()
-    res = r.json()
-    arr = (res or {}).get("quoteResponse", {}).get("result", [])
-    return arr[0] if arr else None
+def _safe_fast_info(tk: yf.Ticker) -> dict:
+    try:
+        return dict(getattr(tk, "fast_info", {}) or {})
+    except Exception:
+        return {}
 
-def get_stock_snapshot(user_input: str) -> Tuple[str, str, Optional[float], Optional[str], Optional[str]]:
+def _calc_price_change_from_history(tk: yf.Ticker) -> Tuple[Optional[float], Optional[str]]:
     """
-    回傳： (norm_symbol, name, price, change_str, currency)
+    從近幾天日 K 計算：現價、漲跌（含％）字串
+    """
+    try:
+        hist = tk.history(period="5d", interval="1d")
+        if hist is None or hist.empty:
+            return None, None
+        close = hist["Close"].dropna()
+        if close.empty:
+            return None, None
+        last = float(close.iloc[-1])
+        prev = float(close.iloc[-2]) if len(close) >= 2 else None
+        if prev:
+            delta = last - prev
+            pct = (delta / prev * 100) if prev else 0
+            change_str = f"{delta:+.2f} ({pct:+.2f}%)"
+        else:
+            change_str = None
+        return last, change_str
+    except Exception:
+        return None, None
+
+def get_stock_snapshot(user_input: str) -> Tuple[str, str, Optional[float], Optional[str], Optional[str], Optional[str]]:
+    """
+    回傳：(norm_symbol, name, price, change_str, currency, price_time_str)
     """
     norm = _normalize_symbol(user_input)
-    q = yf_quote(norm)
-    if not q:
-        return (norm, user_input, None, None, None)
-    name = q.get("longName") or q.get("shortName") or norm
-    price = q.get("regularMarketPrice")
-    chg = q.get("regularMarketChange"); chgp = q.get("regularMarketChangePercent")
-    change_str = f"{chg:+.2f} ({chgp:+.2f}%)" if (chg is not None and chgp is not None) else None
-    currency = q.get("currency")
-    return (norm, name, price, change_str, currency)
+    tk = yf.Ticker(norm)
+
+    # 名稱 & 幣別
+    name = None; currency = None
+    fi = _safe_fast_info(tk)
+    name = fi.get("longName") or fi.get("shortName") or name
+    currency = fi.get("currency") or currency
+
+    # 若 fast_info 沒有，再用 info（可能較慢）
+    if not name or not currency:
+        try:
+            info = tk.info or {}
+            name = name or info.get("longName") or info.get("shortName") or norm
+            currency = currency or info.get("currency")
+        except Exception:
+            name = name or norm
+
+    # 價格/漲跌
+    price = fi.get("last_price")
+    change_str = None
+    if price is None:
+        price, change_str = _calc_price_change_from_history(tk)
+    else:
+        # 若有前一收盤，算漲跌
+        try:
+            prev_close = fi.get("previous_close")
+            if prev_close:
+                delta = float(price) - float(prev_close)
+                pct = (delta / float(prev_close) * 100) if prev_close else 0
+                change_str = f"{delta:+.2f} ({pct:+.2f}%)"
+        except Exception:
+            pass
+
+    # 價格時間（yfinance 不一定提供 exact quote time；用最近一筆歷史 K 的日期）
+    price_time_str = None
+    try:
+        h1 = tk.history(period="2d", interval="1d")
+        if h1 is not None and not h1.empty:
+            ts = h1.index[-1].to_pydatetime()
+            price_time_str = ts.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    return norm, (name or norm), price, change_str, (currency or ""), price_time_str
 
 def get_stock_history_text(norm_symbol: str) -> str:
     try:
-        # 指數/股票皆可，抓近 1 個月日 K
         hist = yf.Ticker(norm_symbol).history(period="1mo", interval="1d")
         if hist is None or hist.empty:
             return "（近1個月歷史價格不可用）"
-        # 簡要摘要
-        close = hist["Close"]
+        close = hist["Close"].dropna()
         last = float(close.iloc[-1])
         first = float(close.iloc[0])
         delta = last - first
@@ -369,8 +424,7 @@ def get_stock_history_text(norm_symbol: str) -> str:
 
 def get_stock_news_text(norm_symbol: str, fallback_name: str) -> str:
     try:
-        tk = yf.Ticker(norm_symbol)
-        items = tk.news or []
+        items = yf.Ticker(norm_symbol).news or []
         if not items:
             return "（最近沒有可用新聞）"
         out = []
@@ -388,7 +442,9 @@ def get_stock_news_text(norm_symbol: str, fallback_name: str) -> str:
 
 def build_stock_report(user_input: str) -> str:
     logger.info(f"開始執行 {user_input} 股票分析…")
-    norm, name, price, change_str, ccy = get_stock_snapshot(user_input)
+    norm, name, price, change_str, ccy, price_time = get_stock_snapshot(user_input)
+
+    # 若一般股票抓不到價，才回覆錯誤；指數允許沒有價（極少見）
     if price is None and norm not in ["^TWII", "^GSPC"]:
         return f"抱歉，無法獲取 {user_input} 的即時資料，請確認代碼是否正確。"
 
@@ -396,7 +452,13 @@ def build_stock_report(user_input: str) -> str:
     news_txt = get_stock_news_text(norm, name)
 
     stock_link = f"https://finance.yahoo.com/quote/{norm.replace('^', '%5E')}"
-    snapshot_line = f"{name}（{norm}） 現價 {price:.2f} {ccy or ''}，變動 {change_str}" if price is not None else f"{name}（{norm}）"
+    snapshot_line = (
+        f"{name}（{norm}） 現價 {price:.2f} {ccy}，變動 {change_str or '—'}"
+        if price is not None else f"{name}（{norm}）"
+    )
+    if price_time:
+        snapshot_line += f"（資料日期 {price_time}）"
+
     user_content = (
         f"{snapshot_line}\n"
         f"{hist_txt}\n\n"
@@ -460,7 +522,6 @@ def on_postback(event: PostbackEvent):
 
 @handler.add(MessageEvent, message=TextMessage)
 def on_message_text(event: MessageEvent):
-    # 這裡在 Webhook 的 worker thread，沒有 running loop；用 asyncio.run 執行 async 邏輯
     try:
         asyncio.run(handle_message_async(event))
     except Exception as e:
@@ -480,11 +541,9 @@ async def handle_message_async(event: MessageEvent):
     if not msg_raw:
         return
 
-    # 預設群組自動回覆 ON
     if chat_id not in auto_reply_status:
         auto_reply_status[chat_id] = True
 
-    # 若關閉自動回覆，群組需 @我
     if is_group and not auto_reply_status.get(chat_id, True) and not msg_raw.startswith(f"@{bot_name}"):
         return
     msg = msg_raw[len(f"@{bot_name}"):].strip() if msg_raw.startswith(f"@{bot_name}") else msg_raw
@@ -577,7 +636,6 @@ async def handle_message_async(event: MessageEvent):
         senti = await analyze_sentiment(msg)
         sys = build_persona_prompt(chat_id, senti)
         messages = [{"role":"system","content":sys}] + history + [{"role":"user","content":msg}]
-        # 用 Groq 輕量回即可
         reply = await groq_small_async(messages, max_tokens=600, temperature=0.7)
         history.extend([{"role":"user","content":msg},{"role":"assistant","content":reply}])
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
@@ -592,7 +650,6 @@ async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
-        # handler 是同步的，放到 threadpool 跑
         await run_in_threadpool(handler.handle, body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
