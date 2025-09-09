@@ -287,7 +287,8 @@ def load_stock_data():
     global stock_data_df
     if stock_data_df is None:
         try:
-            stock_data_df = pd.read_csv('name_df.csv')
+            # BUG修正：指定 '股號' 欄位為字串，避免 '00929' 被讀成 929
+            stock_data_df = pd.read_csv('name_df.csv', dtype={'股號': str})
         except FileNotFoundError:
             logger.error("`name_df.csv` not found. Stock name lookup will be disabled.")
             stock_data_df = pd.DataFrame(columns=['股號', '股名'])
