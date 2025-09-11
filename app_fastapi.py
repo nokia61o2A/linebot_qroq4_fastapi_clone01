@@ -7,6 +7,7 @@ import asyncio
 from typing import Dict, List
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+import tempfile
 
 # --- 數據處理與爬蟲 ---
 import requests
@@ -23,7 +24,8 @@ from fastapi.concurrency import run_in_threadpool
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
+    MessageEvent, TextMessage, AudioMessage,  # <== 新增 AudioMessage
+    TextSendMessage,
     SourceUser, SourceGroup, SourceRoom,
     QuickReply, QuickReplyButton, MessageAction,
     PostbackAction, PostbackEvent,
@@ -152,6 +154,65 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
     resp = await async_groq_client.chat.completions.create(model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=max_tokens, temperature=temperature)
     return resp.choices[0].message.content.strip()
 
+# ---------- 語音轉寫（Groq Whisper 為主，OpenAI 備援） ----------
+def transcribe_audio_groq(file_path: str, language_hint: str = "zh") -> str:
+    """
+    使用 Groq Whisper 轉寫音檔（m4a/mp3/wav）。
+    回傳文字；失敗拋例外。
+    """
+    try:
+        with open(file_path, "rb") as f:
+            res = sync_groq_client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=(os.path.basename(file_path), f.read()),
+                response_format="json",
+                temperature=0.0,
+                language=language_hint
+            )
+        text = getattr(res, "text", None) or (res.get("text") if isinstance(res, dict) else None)
+        if not text:
+            raise RuntimeError("ASR 沒有回傳文字")
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Groq Whisper 轉寫失敗: {e}", exc_info=True)
+        raise
+
+def transcribe_audio(file_path: str) -> str:
+    """先用 Groq；若有設定 OpenAI 且可用，再當備援。"""
+    try:
+        return transcribe_audio_groq(file_path)
+    except Exception as e:
+        logger.warning(f"Groq Whisper 失敗，嘗試 OpenAI 備援：{e}")
+    try:
+        if not openai_client:
+            raise RuntimeError("OpenAI client not configured.")
+        with open(file_path, "rb") as f:
+            trx = openai_client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",  # 或 "whisper-1"
+                file=f
+            )
+        text = getattr(trx, "text", None)
+        if not text:
+            raise RuntimeError("OpenAI ASR 無回傳文字")
+        return text.strip()
+    except Exception as e:
+        logger.error(f"OpenAI 轉寫也失敗：{e}", exc_info=True)
+        raise
+
+def save_line_audio_to_temp(message_id: str, prefer_ext: str = ".m4a") -> str:
+    """
+    從 LINE 抓取語音二進位，寫到暫存檔，回傳檔路徑。
+    """
+    content = line_bot_api.get_message_content(message_id)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=prefer_ext)
+    try:
+        for chunk in content.iter_content():
+            if chunk:
+                tmp.write(chunk)
+    finally:
+        tmp.close()
+    return tmp.name
+
 # ---------- 金價抓取（新版，對應台銀頁面文字） ----------
 BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
 DEFAULT_HEADERS = {
@@ -170,29 +231,24 @@ def parse_bot_gold_text(html: str) -> dict:
     - 本行買進（TWD/克）
     不依賴表格結構，僅以關鍵字 regex 擷取。
     """
-    # 取整頁純文字，避免被 HTML 結構變更影響
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
 
-    # 掛牌時間
     m_time = re.search(r"掛牌時間[:：]\s*([0-9]{4}/[0-9]{2}/[0-9]{2}\s+[0-9]{2}:[0-9]{2})", text)
     listed_at = m_time.group(1) if m_time else None
 
-    # 本行賣出 / 本行買進（允許有逗號或小數）
     m_sell = re.search(r"本行賣出\s*([0-9,]+(?:\.[0-9]+)?)", text)
     m_buy  = re.search(r"本行買進\s*([0-9,]+(?:\.[0-9]+)?)", text)
-
     if not (m_sell and m_buy):
         raise RuntimeError("找不到『本行賣出/本行買進』欄位")
 
-    # 清逗號
     sell = float(m_sell.group(1).replace(",", ""))
     buy  = float(m_buy.group(1).replace(",", ""))
 
     return {
-        "listed_at": listed_at,          # 例：2025/09/05 19:30
-        "sell_twd_per_g": sell,          # 本行賣出（TWD/克）
-        "buy_twd_per_g": buy,            # 本行買進（TWD/克）
+        "listed_at": listed_at,
+        "sell_twd_per_g": sell,
+        "buy_twd_per_g": buy,
         "source": BOT_GOLD_URL
     }
 
@@ -202,14 +258,9 @@ def get_bot_gold_quote() -> dict:
     return parse_bot_gold_text(r.text)
 
 def format_gold_report(data: dict) -> str:
-    """
-    產生不依賴 LLM 的穩定回覆（Markdown）。
-    """
     ts = data.get("listed_at") or "（頁面未標示）"
     sell = data["sell_twd_per_g"]
     buy = data["buy_twd_per_g"]
-
-    # 粗略價差與點評（純規則邏輯，避免 LLM 失敗）
     spread = sell - buy
     bias = "盤整" if spread <= 30 else ("偏寬" if spread <= 60 else "價差偏大")
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -221,7 +272,7 @@ def format_gold_report(data: dict) -> str:
         f"- 本行買進（1克）：**{buy:,.0f} 元**\n"
         f"- 買賣價差：{spread:,.0f} 元（{bias}）\n"
         f"\n"
-        f"小提醒：台銀頁面在盤後可能會顯示『盤後交易』標示；報價仍以官網即時頁為準。\n"
+        f"小提醒：實際成交以台銀官網即時頁為準。\n"
         f"資料來源：{BOT_GOLD_URL}\n"
         f"（更新於 {now}）"
     )
@@ -230,7 +281,6 @@ def get_gold_analysis():
     logger.info("開始執行黃金價格分析...")
     try:
         data = get_bot_gold_quote()
-        # 直接回固定格式的報告（不依賴 OpenAI / Groq）
         return format_gold_report(data)
     except Exception as e:
         logger.error(f"金價流程失敗：{e}", exc_info=True)
@@ -249,7 +299,6 @@ def get_currency_analysis(target_currency: str):
             rate = data["rates"].get(base_currency)
             if rate is None:
                 return f"抱歉，API中找不到 {base_currency} 的匯率資訊。"
-            # 不依賴 LLM：直接給簡訊
             return f"最新：1 {target_currency.upper()} ≈ {rate:.5f} 新台幣"
         else:
             return f"抱歉，獲取匯率資料失敗：{data.get('error-type', '未知錯誤')}"
@@ -287,7 +336,7 @@ def load_stock_data():
     global stock_data_df
     if stock_data_df is None:
         try:
-            # BUG修正：指定 '股號' 欄位為字串，避免 '00929' 被讀成 929
+            # 指定 '股號' 為字串，避免 '00929' 被讀成 929
             stock_data_df = pd.read_csv('name_df.csv', dtype={'股號': str})
         except FileNotFoundError:
             logger.error("`name_df.csv` not found. Stock name lookup will be disabled.")
@@ -304,8 +353,10 @@ def remove_full_width_spaces(data):
 
 def get_stock_analysis(stock_id_input: str):
     """
-    這裡沿用你原本流程：YahooStock + yfinance + 新聞 + 基本面/配息，最後交給 LLM 組報告。
-    若你要把 00937B 類 ETF 也靠 YahooStock（quote API）取快照，請保留 my_commands/stock/YahooStock.py 的新版本。
+    支援：
+    - 台股純數字或數字+英文字尾（例 2330, 2881A, 00937B）→ *.TW
+    - 美股英文字（NVDA、AAPL）
+    - 指數：台股大盤/美股大盤
     """
     logger.info(f"開始執行 {stock_id_input} 股票分析...")
     stock_id = stock_id_input
@@ -327,19 +378,37 @@ def get_stock_analysis(stock_id_input: str):
         stock_name = user_input_upper
 
     try:
-        newprice_stock = YahooStock(stock_id)  # 以 quote API 取快照（含 00937B.TW）
+        # 以 Yahoo quote API 取即時快照（含 00937B.TW 這類）
+        newprice_stock = YahooStock(stock_id)
+
+        # 價格序列（yfinance）
         price_data = stock_price(stock_id)
-        news_data = str(stock_news(stock_name))
+
+        # 新聞，JSON 失敗不擋流程
+        try:
+            news_data = str(stock_news(stock_name))
+        except Exception as ne:
+            logger.warning(f"stock_news 取得失敗：{ne}")
+            news_data = "（暫無法取得新聞）"
+
         news_data = remove_full_width_spaces(news_data)[:1024]
 
         content_msg = (f'你現在是一位專業的證券分析師, 你會依據以下資料來進行分析並給出一份完整的分析報告:\n'
-                       f'**股票代碼:** {stock_id}, **股票名稱:** {newprice_stock.name}\n'
+                       f'**股票代碼:** {stock_id}, **股票名稱:** {getattr(newprice_stock, "name", stock_name)}\n'
                        f'**即時報價:** {vars(newprice_stock)}\n'
                        f'**近期價格資訊:**\n {price_data}\n')
 
         if stock_id not in ["^TWII", "^GSPC"]:
-            stock_value_data = stock_fundamental(stock_id)
-            stock_vividend_data = stock_dividend(stock_id)
+            try:
+                stock_value_data = stock_fundamental(stock_id)
+            except Exception as e:
+                logger.warning(f"stock_fundamental 失敗：{e}")
+                stock_value_data = None
+            try:
+                stock_vividend_data = stock_dividend(stock_id)
+            except Exception as e:
+                logger.warning(f"stock_dividend 失敗：{e}")
+                stock_vividend_data = None
             content_msg += f'**每季營收資訊：**\n {stock_value_data if stock_value_data is not None else "無法取得"}\n'
             content_msg += f'**配息資料：**\n {stock_vividend_data if stock_vividend_data is not None else "無法取得"}\n'
 
@@ -481,6 +550,13 @@ def on_message_text(event: MessageEvent):
     except Exception as e:
         logger.error(f"Handle message failed: {e}", exc_info=True)
 
+@handler.add(MessageEvent, message=AudioMessage)
+def on_message_audio(event: MessageEvent):
+    try:
+        asyncio.run(handle_audio_async(event))
+    except Exception as e:
+        logger.error(f"Handle audio failed: {e}", exc_info=True)
+
 @handler.add(PostbackEvent)
 def on_postback(event: PostbackEvent):
     data = (event.postback.data or "").strip()
@@ -491,6 +567,53 @@ def on_postback(event: PostbackEvent):
             [build_submenu_flex(kind), TextSendMessage(text="請選擇一項服務", quick_reply=build_quick_reply())]
         )
         return
+
+async def handle_audio_async(event: MessageEvent):
+    chat_id = get_chat_id(event)
+    reply_token = event.reply_token
+    duration_ms = getattr(event.message, "duration", None)
+
+    if duration_ms and duration_ms > 5 * 60 * 1000:
+        return reply_with_quick_bar(reply_token, "語音有點長（>5 分鐘）🙏 請剪短後再試～")
+
+    audio_path = None
+    try:
+        audio_path = await run_in_threadpool(save_line_audio_to_temp, event.message.id, ".m4a")
+    except Exception as e:
+        logger.error(f"下載語音失敗：{e}", exc_info=True)
+        return reply_with_quick_bar(reply_token, "抱歉，收檔失敗了…再傳一次可以嗎？")
+
+    try:
+        transcript = await run_in_threadpool(transcribe_audio, audio_path)
+    except Exception as e:
+        logger.error(f"語音轉寫失敗：{e}", exc_info=True)
+        try:
+            if audio_path and os.path.exists(audio_path): os.remove(audio_path)
+        except Exception:
+            pass
+        return reply_with_quick_bar(reply_token, "抱歉，我聽不太清楚這段音訊（或格式不支援）。試試再錄一次、靠近麥克風一點～")
+
+    try:
+        sentiment = await analyze_sentiment(transcript)
+        sys_prompt = build_persona_prompt(chat_id, sentiment)
+        history = conversation_history.get(chat_id, [])
+        msgs = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":transcript}]
+        ai_reply = await groq_chat_async(msgs)
+
+        history.extend([{"role":"user","content":transcript}, {"role":"assistant","content":ai_reply}])
+        conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
+
+        text = f"🗣️ 你說：{transcript}\n\n🤖 {ai_reply}"
+        return reply_with_quick_bar(reply_token, text)
+    except Exception as e:
+        logger.error(f"語音→AI 回覆流程失敗：{e}", exc_info=True)
+        return reply_with_quick_bar(reply_token, "我這邊剛剛卡住了 😅 再跟我說一次吧～")
+    finally:
+        try:
+            if audio_path and os.path.exists(audio_path):
+                os.remove(audio_path)
+        except Exception:
+            pass
 
 async def handle_message_async(event: MessageEvent):
     chat_id, msg_raw = get_chat_id(event), event.message.text.strip()
@@ -516,7 +639,7 @@ async def handle_message_async(event: MessageEvent):
         text_upper = text.upper()
         if text_upper in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"]:
             return True
-        if re.match(r'^\d{4,6}[A-Z]?$', text_upper):
+        if re.match(r'^\d{4,6}[A-Z]?$', text_upper):  # 2330 / 2881A / 00937B
             return True
         if re.match(r'^[A-Z]{1,5}$', text_upper) and text_upper not in ["JPY"]:
              return True
