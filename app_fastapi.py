@@ -22,8 +22,9 @@ from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# [BUG修正] 1. 改為載入非同步版本的 SDK
-from linebot import AsyncLineBotApi, AsyncWebhookHandler
+# [最終修正] 1. 修正 AsyncWebhookHandler 的導入路徑
+from linebot import AsyncLineBotApi
+from linebot.webhook import AsyncWebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, AudioMessage,
@@ -74,7 +75,6 @@ if not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("缺少必要環境變數：CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET")
 
 # --- API 用戶端初始化 ---
-# [BUG修正] 2. 初始化非同步版本的 API 用戶端
 line_bot_api = AsyncLineBotApi(CHANNEL_TOKEN)
 handler = AsyncWebhookHandler(CHANNEL_SECRET)
 
@@ -137,7 +137,6 @@ def get_chat_id(event: MessageEvent) -> str:
     return event.source.user_id
 
 # --- AI & 分析相關函式 ---
-# (此區塊為同步函式，由 run_in_threadpool 呼叫，無需修改)
 def get_analysis_reply(messages):
     try:
         if openai_client:
@@ -179,7 +178,6 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
     )
     return resp.choices[0].message.content.strip()
 
-# (以下 get_*_analysis 函式都是同步的，保持不變)
 # ---------- 金價抓取（對應台銀新頁面文字） ----------
 BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
 DEFAULT_HEADERS = {
@@ -217,9 +215,9 @@ def format_gold_report(data: dict) -> str:
     return (
         f"**金價快報（台灣銀行）**\n"
         f"- 資料時間：{ts}\n"
-        f"- 本行賣出（1克）：**{sell:,.0f} 元**\n"
-        f"- 本行買進（1克）：**{buy:,.0f} 元**\n"
-        f"- 買賣價差：{spread:,.0f} 元（{bias}）\n"
+        f"- 本行賣出（1克）：**${sell:,.0f}** 元\n"
+        f"- 本行買進（1克）：**${buy:,.0f}** 元\n"
+        f"- 買賣價差：${spread:,.0f} 元（{bias}）\n"
         f"\n資料來源：{BOT_GOLD_URL}\n（更新於 {now}）"
     )
 
@@ -242,7 +240,7 @@ def get_currency_analysis(target_currency: str):
         if data.get("result") == "success":
             rate = data["rates"].get('TWD')
             if rate is None: return f"抱歉，API中找不到 TWD 的匯率資訊。"
-            return f"最新：1 {target_currency.upper()} ≈ {rate:.5f} 新台幣"
+            return f"最新：1 {target_currency.upper()} ≈ ${rate:.5f} 新台幣"
         else:
             return f"抱歉，獲取匯率資料失敗：{data.get('error-type', '未知錯誤')}"
     except Exception as e:
@@ -373,14 +371,12 @@ def build_quick_reply() -> QuickReply:
         QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
     ])
 
-# [BUG修正] 7. Helper function 改為 async，因為它呼叫了 async API
 async def reply_with_quick_bar(reply_token: str, text: str):
     await line_bot_api.reply_message(
         reply_token,
         TextSendMessage(text=text, quick_reply=build_quick_reply())
     )
 
-# (UI building helpers remain sync, no change needed)
 def build_main_menu_flex() -> FlexSendMessage:
     bubble = BubbleContainer(
         direction="ltr",
@@ -437,13 +433,11 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
     return FlexSendMessage(alt_text=title, contents=bubble)
 
 # ========== 5) 語音（錄音）→ 轉文字 → 回覆 ==========
-# [BUG修正] 8. 建立一個非同步版本的 helper 來下載音檔
 async def _save_line_content_to_bytes_async(message_id: str) -> bytes:
     """非同步下載 LINE 音訊內容為 bytes。"""
     message_content = await line_bot_api.get_message_content(message_id)
     return await message_content.read()
 
-# (以下兩個 transcribe 函式是同步的，保持不變，由 run_in_threadpool 呼叫)
 def _transcribe_with_openai(audio_bytes: bytes, filename: str = "audio.m4a") -> str | None:
     if not openai_client: return None
     try:
@@ -467,11 +461,9 @@ def _transcribe_with_groq(audio_bytes: bytes, filename: str = "audio.m4a") -> st
         return None
 
 # ========== 6) LINE Handlers ==========
-# [BUG修正] 3. 將所有 handler 改為 async def
 @handler.add(MessageEvent, message=TextMessage)
 async def on_message_text(event: MessageEvent):
     try:
-        # [BUG修正] 4. 直接 await 非同步函式，移除 asyncio.run
         await handle_message_async(event)
     except Exception as e:
         logger.error(f"Handle message failed: {e}", exc_info=True)
@@ -488,20 +480,16 @@ async def on_postback(event: PostbackEvent):
     data = (event.postback.data or "").strip()
     if data.startswith("menu:"):
         kind = data.split(":", 1)[-1]
-        # [BUG修正] 5. 所有 line_bot_api 的呼叫都要 await
         await line_bot_api.reply_message(
             event.reply_token,
             [build_submenu_flex(kind), TextSendMessage(text="請選擇一項服務", quick_reply=build_quick_reply())]
         )
 
-# [BUG修正] 9. 重構語音處理流程
 async def handle_audio_async(event: MessageEvent):
     chat_id = get_chat_id(event)
     reply_token = event.reply_token
     try:
-        # 1) 非同步下載音檔
         audio_bytes = await _save_line_content_to_bytes_async(event.message.id)
-        # 2) 在執行緒池中執行同步的轉錄函式，避免阻塞事件循環
         text = await run_in_threadpool(_transcribe_with_openai, audio_bytes)
         if not text:
             text = await run_in_threadpool(_transcribe_with_groq, audio_bytes)
@@ -528,7 +516,6 @@ async def handle_message_async(event: MessageEvent):
     reply_token, is_group = event.reply_token, not isinstance(event.source, SourceUser)
 
     try:
-        # [BUG修正] 10. get_bot_info 也需要 await
         bot_info = await line_bot_api.get_bot_info()
         bot_name = bot_info.display_name
     except Exception:
@@ -551,8 +538,6 @@ async def handle_message_async(event: MessageEvent):
         if re.match(r'^[A-Z]{1,5}$', text_upper) and text_upper not in ["JPY"]: return True
         return False
 
-    # --- 命令 & 功能觸發區 ---
-    # [BUG修正] 11. 所有回覆函式呼叫都需要 await
     if low in ("menu", "選單", "主選單"):
         await line_bot_api.reply_message(reply_token, build_main_menu_flex())
         return
@@ -625,7 +610,6 @@ async def handle_message_async(event: MessageEvent):
         await reply_with_quick_bar(reply_token, txt)
         return
 
-    # --- 模式處理 & 一般對話 ---
     if chat_id in translation_states:
         try:
             out = await translate_text(msg, translation_states[chat_id])
@@ -654,7 +638,6 @@ async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
-        # [BUG修正] 6. 直接 await 非同步 handler，不再需要 run_in_threadpool
         await handler.handle(body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
