@@ -35,6 +35,12 @@ from linebot.v3.webhooks import (
     AudioMessageContent,
     PostbackEvent,
 )
+# [最終導入修正] Source... 類別的正確位置
+from linebot.v3.webhooks.models import (
+    SourceUser,
+    SourceGroup,
+    SourceRoom,
+)
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -52,10 +58,7 @@ from linebot.v3.messaging import (
     QuickReplyItem,
     MessageAction,
     PostbackAction,
-    BotInfoResponse,  # 正確的 Bot Info 回應類別
-    SourceUser,
-    SourceGroup,
-    SourceRoom,
+    BotInfoResponse,
 )
 
 # --- AI 相關 ---
