@@ -48,8 +48,7 @@ from linebot.v3.messaging import (
     QuickReplyItem,
     MessageAction,
     PostbackAction,
-    BotInfo,
-    # SourceUser 等類別應從 messaging 導入
+    GetBotInfoResponse, # 將 BotInfo 改為 GetBotInfoResponse
     SourceUser,
     SourceGroup,
     SourceRoom,
@@ -242,11 +241,12 @@ async def translate_text(text: str, lang: str):
     target = LANGUAGE_MAP.get(lang, lang)
     return await groq_chat_async([{"role":"system","content":"You are a precise translation engine. Output ONLY the translated text."}, {"role":"user","content":f'{{"text":"{text}","target_language":"{target}"}}'}], 800, 0.2)
 def set_user_persona(chat_id, key):
-    chosen_key = random.choice(list(PERSONAS.keys())) if key == "random" else PERSONAS.get(key, "sweet")
-    user_persona[chat_id] = chosen_key; return chosen_key
+    chosen_key = random.choice(list(PERSONAS.keys())) if key == "random" else key
+    user_persona[chat_id] = chosen_key
+    return chosen_key
 def build_persona_prompt(chat_id, sentiment):
     key = user_persona.get(chat_id, "sweet")
-    p = PERSONAS[key]
+    p = PERSONAS.get(key, PERSONAS["sweet"])
     return f"你是一位「{p['title']}」。風格：{p['style']}。使用者情緒：{sentiment}。回覆請簡短、自然，並帶少量表情符號 {p['emoji']}。"
 
 # --- UI Builders ---
@@ -279,7 +279,8 @@ def build_submenu(kind):
 async def handle_text_message(event: MessageEvent):
     chat_id, msg, reply_token = get_chat_id(event), event.message.text.strip(), event.reply_token
     try:
-        bot_info = await line_bot_api.get_bot_info()
+        # [最終修正] 將 BotInfo 型別註記改為 GetBotInfoResponse
+        bot_info: GetBotInfoResponse = await line_bot_api.get_bot_info()
         bot_name = bot_info.display_name
     except Exception:
         bot_name = "AI 助手"
