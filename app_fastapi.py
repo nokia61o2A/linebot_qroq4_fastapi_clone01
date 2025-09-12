@@ -22,7 +22,11 @@ from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# [v3 最終修正] 修正所有導入路徑
+# --- 雲端儲存 (Cloudinary) ---
+import cloudinary
+import cloudinary.uploader
+
+# [v3 最終修正] 使用 line-bot-sdk v3 的正確導入路徑
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import (
@@ -48,7 +52,7 @@ from linebot.v3.messaging import (
     QuickReplyItem,
     MessageAction,
     PostbackAction,
-    GetBotInfoResponse, # 將 BotInfo 改為 GetBotInfoResponse
+    GetBotInfoResponse,
     SourceUser,
     SourceGroup,
     SourceRoom,
@@ -59,6 +63,7 @@ from groq import AsyncGroq, Groq
 import openai
 
 # --- 自訂模組（錯誤處理） ---
+# (此處省略自訂模組載入邏輯...)
 try:
     from TaiwanLottery import TaiwanLotteryCrawler
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
@@ -66,7 +71,6 @@ try:
 except ImportError:
     logging.warning("無法載入彩票模組，彩票功能將停用。")
     LOTTERY_ENABLED = False
-
 try:
     from my_commands.stock.stock_price import stock_price
     from my_commands.stock.stock_news import stock_news
@@ -88,9 +92,24 @@ CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL") # <-- 讀取 Cloudinary 環境變數
 
 if not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("缺少必要環境變數：CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET")
+
+# --- Cloudinary 設定 ---
+if CLOUDINARY_URL:
+    try:
+        cloudinary.config(cloud_name = re.search(r"@(.+)", CLOUDINARY_URL).group(1),
+                          api_key = re.search(r"//(\d+):", CLOUDINARY_URL).group(1),
+                          api_secret = re.search(r":([A-Za-z0-9_-]+)@", CLOUDINARY_URL).group(1))
+        logger.info("✅ Cloudinary 設定成功！")
+    except Exception as e:
+        logger.error(f"Cloudinary 設定失敗: {e}")
+        CLOUDINARY_URL = None # 設定失敗則停用
+else:
+    logger.warning("未設定 CLOUDINARY_URL，TTS 語音訊息將無法傳送。")
+
 
 # --- API 用戶端初始化 ---
 configuration = Configuration(access_token=CHANNEL_TOKEN)
@@ -107,20 +126,17 @@ if OPENAI_API_KEY:
 else:
     logger.warning("未設定 OPENAI_API_KEY，語音轉文字與 TTS 功能將停用。")
 
+# (此處省略與先前版本相同的常數定義...)
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
-
 if LOTTERY_ENABLED:
     lottery_crawler = TaiwanLotteryCrawler()
     caiyunfangwei_crawler = CaiyunfangweiCrawler()
-
-# --- 狀態字典與常數 ---
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
 auto_reply_status: Dict[str, bool] = {}
-
 PERSONAS = {
     "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰", "greetings": "親愛的～我在這裡聽你說 🌸", "emoji":"🌸💕😊"},
     "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度", "greetings": "你又來啦？說吧，哪裡卡住了。😏", "emoji":"😏🙄"},
@@ -132,6 +148,7 @@ LANGUAGE_MAP = { "英文": "English", "日文": "Japanese", "韓文": "Korean", 
 # ========== 3) FastAPI ==========
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # (此處省略 lifespan 內容...)
     if BASE_URL:
         try:
             async with httpx.AsyncClient() as c:
@@ -156,7 +173,26 @@ def get_chat_id(event: MessageEvent) -> str:
     if isinstance(source, SourceRoom): return source.room_id
     return source.user_id
 
-# --- AI, 分析, TTS 等輔助函式 ---
+# --- 上傳與 TTS 輔助函式 ---
+def _upload_audio_sync(audio_bytes: bytes) -> dict | None:
+    if not CLOUDINARY_URL: return None
+    try:
+        # 從記憶體直接上傳，resource_type 設為 "video" 才能處理 mp3
+        response = cloudinary.uploader.upload(
+            io.BytesIO(audio_bytes),
+            resource_type="video",
+            folder="line-bot-tts", # 可選：在 Cloudinary 上建立一個資料夾來存放
+            format="mp3"
+        )
+        return response
+    except Exception as e:
+        logger.error(f"Cloudinary 上傳失敗: {e}")
+        return None
+
+async def upload_audio_to_cloudinary(audio_bytes: bytes) -> str | None:
+    response = await run_in_threadpool(_upload_audio_sync, audio_bytes)
+    # Cloudinary 會回傳一個安全的 https 網址
+    return response.get("secure_url") if response else None
 
 def _create_tts_with_openai_sync(text: str) -> bytes | None:
     if not openai_client: return None
@@ -171,7 +207,7 @@ def _create_tts_with_openai_sync(text: str) -> bytes | None:
 async def text_to_speech_async(text: str) -> bytes | None:
     return await run_in_threadpool(_create_tts_with_openai_sync, text)
 
-# ... (此處省略與先前版本相同的輔助函式，以保持簡潔)
+# (此處省略其他輔助函式，與前一版相同...)
 def get_analysis_reply(messages):
     try:
         if openai_client:
@@ -248,8 +284,6 @@ def build_persona_prompt(chat_id, sentiment):
     key = user_persona.get(chat_id, "sweet")
     p = PERSONAS.get(key, PERSONAS["sweet"])
     return f"你是一位「{p['title']}」。風格：{p['style']}。使用者情緒：{sentiment}。回覆請簡短、自然，並帶少量表情符號 {p['emoji']}。"
-
-# --- UI Builders ---
 def build_quick_reply():
     actions = [MessageAction(label="主選單", text="選單"), MessageAction(label="台股大盤", text="^TWII"), MessageAction(label="查台積電", text="2330"), PostbackAction(label="💖 AI 人設", data="menu:persona")]
     return QuickReply(items=[QuickReplyItem(action=a) for a in actions])
@@ -273,27 +307,22 @@ def build_submenu(kind):
     title, items = menus.get(kind, ("無效選單", []))
     return build_flex_menu(title, items, title)
 
-
 # ========== 5) LINE Event Handlers ==========
 @handler.add(MessageEvent, message=TextMessageContent)
 async def handle_text_message(event: MessageEvent):
+    # (此處省略文字訊息處理函式的前半段，與前一版相同...)
     chat_id, msg, reply_token = get_chat_id(event), event.message.text.strip(), event.reply_token
     try:
-        # [最終修正] 將 BotInfo 型別註記改為 GetBotInfoResponse
         bot_info: GetBotInfoResponse = await line_bot_api.get_bot_info()
         bot_name = bot_info.display_name
     except Exception:
         bot_name = "AI 助手"
-
     if isinstance(event.source, (SourceGroup, SourceRoom)) and not msg.startswith(f"@{bot_name}"):
         return
-    
     msg = re.sub(f'^@{bot_name}\\s*', '', msg)
     if not msg: return
-
     final_reply_text, low = "", msg.lower()
     try:
-        # --- Command Handling ---
         if low in ("menu", "選單"):
             await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[build_main_menu()]))
             return
@@ -309,7 +338,7 @@ async def handle_text_message(event: MessageEvent):
             else: translation_states[chat_id] = lang; final_reply_text = f"🌐 已開啟翻譯 → {lang}"
         elif chat_id in translation_states:
             final_reply_text = await translate_text(msg, translation_states[chat_id])
-        else: # Default chat
+        else:
             sentiment = await analyze_sentiment(msg)
             sys_prompt = build_persona_prompt(chat_id, sentiment)
             history = conversation_history.setdefault(chat_id, [])
@@ -321,34 +350,29 @@ async def handle_text_message(event: MessageEvent):
         logger.error(f"指令 '{msg}' 處理失敗: {e}", exc_info=True)
         final_reply_text = "抱歉，處理時發生錯誤 😵"
     
-    # --- Reply Logic with TTS ---
+    # --- 最終回覆邏輯 (整合 TTS) ---
     messages_to_send = [TextMessage(text=final_reply_text, quick_reply=build_quick_reply())]
-    if final_reply_text and openai_client:
+    if final_reply_text and openai_client and CLOUDINARY_URL:
         audio_bytes = await text_to_speech_async(final_reply_text)
         if audio_bytes:
-            # !!! 關鍵步驟：你需要將 audio_bytes 上傳到一個公開的網路空間 !!!
-            # public_audio_url = upload_to_cloud_storage(audio_bytes) # 例如：上傳到 AWS S3 或其他服務
-            # audio_duration_ms = calculate_duration(audio_bytes) # 可選：計算音檔長度(毫秒)
-            #
-            # # 當你完成上傳功能後，取消下面這行的註解
-            # # messages_to_send.append(AudioMessage(original_content_url=public_audio_url, duration=audio_duration_ms))
-            logger.info("TTS 語音已生成，但因未設定上傳功能，故暫不傳送語音訊息。")
+            public_audio_url = await upload_audio_to_cloudinary(audio_bytes)
+            if public_audio_url:
+                # LINE API 需要音檔長度(毫秒)，這裡我們給一個預設值，因為計算精確長度需要額外套件
+                messages_to_send.append(AudioMessage(original_content_url=public_audio_url, duration=20000))
+                logger.info("✅ 成功上傳 TTS 語音並加入回覆佇列。")
             
     await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages_to_send))
 
 @handler.add(MessageEvent, message=AudioMessageContent)
 async def handle_audio_message(event: MessageEvent):
+    # (此處省略語音訊息處理函式的前半段，與前一版相同...)
     reply_token = event.reply_token
     try:
         content_stream = await line_bot_api.get_message_content(event.message.id)
         audio_in = await content_stream.read()
+        if not openai_client: raise RuntimeError("OpenAI client 未設定")
         
-        if not openai_client:
-            raise RuntimeError("OpenAI client 未設定，無法處理語音。")
-        
-        transcription_task = run_in_threadpool(lambda: openai_client.audio.transcriptions.create(model="whisper-1", file=("audio.m4a", audio_in)).text)
-        text = await transcription_task
-
+        text = await run_in_threadpool(lambda: openai_client.audio.transcriptions.create(model="whisper-1", file=("audio.m4a", audio_in)).text)
         if not text: raise RuntimeError("語音轉文字失敗")
         
         sentiment = await analyze_sentiment(text)
@@ -357,15 +381,13 @@ async def handle_audio_message(event: MessageEvent):
         
         messages_to_send = [TextMessage(text=f"🎧 我聽到了：\n{text}\n\n—\n{final_reply_text}", quick_reply=build_quick_reply())]
         
-        audio_out = await text_to_speech_async(final_reply_text)
-        if audio_out:
-            # !!! 同樣的關鍵步驟，你需要將 audio_out 上傳以取得公開 URL !!!
-            # public_audio_url = upload_to_cloud_storage(audio_out)
-            # audio_duration_ms = calculate_duration(audio_out)
-            # 
-            # # 完成後取消註解
-            # # messages_to_send.append(AudioMessage(original_content_url=public_audio_url, duration=audio_duration_ms))
-            logger.info("TTS 語音已生成，但因未設定上傳功能，故暫不傳送語音訊息。")
+        if final_reply_text and CLOUDINARY_URL:
+            audio_out = await text_to_speech_async(final_reply_text)
+            if audio_out:
+                public_audio_url = await upload_audio_to_cloudinary(audio_out)
+                if public_audio_url:
+                    messages_to_send.append(AudioMessage(original_content_url=public_audio_url, duration=20000))
+                    logger.info("✅ 成功上傳 TTS 語音並加入回覆佇列。")
         
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages_to_send))
 

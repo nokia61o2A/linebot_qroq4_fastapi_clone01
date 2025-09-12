@@ -21,3 +21,4 @@ html5lib
 taiwanlottery
 #股票
 yfinance
+cloudinary  # <-- 新增這一行
