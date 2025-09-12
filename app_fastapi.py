@@ -22,7 +22,7 @@ from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# [最終修正] 使用 line-bot-sdk v3 的正確導入路徑
+# [v3 最終修正] 修正所有導入路徑
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import (
@@ -30,9 +30,6 @@ from linebot.v3.webhooks import (
     TextMessageContent,
     AudioMessageContent,
     PostbackEvent,
-    SourceUser,
-    SourceGroup,
-    SourceRoom,
 )
 from linebot.v3.messaging import (
     Configuration,
@@ -52,6 +49,10 @@ from linebot.v3.messaging import (
     MessageAction,
     PostbackAction,
     BotInfo,
+    # SourceUser 等類別應從 messaging 導入
+    SourceUser,
+    SourceGroup,
+    SourceRoom,
 )
 
 # --- AI 相關 ---
@@ -226,7 +227,6 @@ def get_lottery_analysis(lotto_type: str):
 def get_stock_analysis(stock_id: str):
     logger.info(f"執行 {stock_id} 股票分析...")
     if not STOCK_ENABLED: return "股票模組未啟用。"
-    # ... (簡化版，你的原邏輯可貼回) ...
     try:
         stock = yf.Ticker(f"{stock_id}.TW" if stock_id.isdigit() else stock_id)
         info = stock.info
@@ -242,18 +242,22 @@ async def translate_text(text: str, lang: str):
     target = LANGUAGE_MAP.get(lang, lang)
     return await groq_chat_async([{"role":"system","content":"You are a precise translation engine. Output ONLY the translated text."}, {"role":"user","content":f'{{"text":"{text}","target_language":"{target}"}}'}], 800, 0.2)
 def set_user_persona(chat_id, key):
-    key = random.choice(list(PERSONAS.keys())) if key == "random" else PERSONAS.get(key, "sweet")
-    user_persona[chat_id] = key; return key
+    chosen_key = random.choice(list(PERSONAS.keys())) if key == "random" else PERSONAS.get(key, "sweet")
+    user_persona[chat_id] = chosen_key; return chosen_key
 def build_persona_prompt(chat_id, sentiment):
-    p = PERSONAS[user_persona.get(chat_id, "sweet")]
+    key = user_persona.get(chat_id, "sweet")
+    p = PERSONAS[key]
     return f"你是一位「{p['title']}」。風格：{p['style']}。使用者情緒：{sentiment}。回覆請簡短、自然，並帶少量表情符號 {p['emoji']}。"
 
 # --- UI Builders ---
 def build_quick_reply():
     actions = [MessageAction(label="主選單", text="選單"), MessageAction(label="台股大盤", text="^TWII"), MessageAction(label="查台積電", text="2330"), PostbackAction(label="💖 AI 人設", data="menu:persona")]
     return QuickReply(items=[QuickReplyItem(action=a) for a in actions])
-def build_flex_menu(title, items, alt_text):
-    buttons = [FlexButton(action=action, style="primary" if "finance" in data else "secondary") for label, action, data in items]
+def build_flex_menu(title, items_data, alt_text):
+    buttons = []
+    for label, action_obj, data_str in items_data:
+        style = "primary" if "finance" in data_str or "lottery" in data_str else "secondary"
+        buttons.append(FlexButton(action=action_obj, style=style))
     bubble = FlexBubble(header=FlexBox(layout="vertical", contents=[FlexText(text=title, weight="bold", size="lg")]), body=FlexBox(layout="vertical", spacing="md", contents=buttons))
     return FlexMessage(alt_text=alt_text, contents=bubble)
 def build_main_menu():
@@ -274,8 +278,15 @@ def build_submenu(kind):
 @handler.add(MessageEvent, message=TextMessageContent)
 async def handle_text_message(event: MessageEvent):
     chat_id, msg, reply_token = get_chat_id(event), event.message.text.strip(), event.reply_token
-    bot_name = getattr(await line_bot_api.get_bot_info(), 'display_name', 'AI')
-    if isinstance(event.source, (SourceGroup, SourceRoom)) and not msg.startswith(f"@{bot_name}"): return
+    try:
+        bot_info = await line_bot_api.get_bot_info()
+        bot_name = bot_info.display_name
+    except Exception:
+        bot_name = "AI 助手"
+
+    if isinstance(event.source, (SourceGroup, SourceRoom)) and not msg.startswith(f"@{bot_name}"):
+        return
+    
     msg = re.sub(f'^@{bot_name}\\s*', '', msg)
     if not msg: return
 
@@ -314,10 +325,13 @@ async def handle_text_message(event: MessageEvent):
     if final_reply_text and openai_client:
         audio_bytes = await text_to_speech_async(final_reply_text)
         if audio_bytes:
-            # TODO: 將 audio_bytes 上傳到公開儲存空間，取得 URL
-            # public_audio_url = upload_to_cloud(audio_bytes) 
-            # messages_to_send.append(AudioMessage(original_content_url=public_audio_url, duration=...))
-            logger.info("TTS 語音已生成，但因未設定上傳功能，故不傳送語音。")
+            # !!! 關鍵步驟：你需要將 audio_bytes 上傳到一個公開的網路空間 !!!
+            # public_audio_url = upload_to_cloud_storage(audio_bytes) # 例如：上傳到 AWS S3 或其他服務
+            # audio_duration_ms = calculate_duration(audio_bytes) # 可選：計算音檔長度(毫秒)
+            #
+            # # 當你完成上傳功能後，取消下面這行的註解
+            # # messages_to_send.append(AudioMessage(original_content_url=public_audio_url, duration=audio_duration_ms))
+            logger.info("TTS 語音已生成，但因未設定上傳功能，故暫不傳送語音訊息。")
             
     await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages_to_send))
 
@@ -325,8 +339,15 @@ async def handle_text_message(event: MessageEvent):
 async def handle_audio_message(event: MessageEvent):
     reply_token = event.reply_token
     try:
-        audio_in = await (await line_bot_api.get_message_content(event.message.id)).read()
-        text = await run_in_threadpool(lambda: openai_client.audio.transcriptions.create(model="whisper-1", file=("audio.m4a", audio_in)).text)
+        content_stream = await line_bot_api.get_message_content(event.message.id)
+        audio_in = await content_stream.read()
+        
+        if not openai_client:
+            raise RuntimeError("OpenAI client 未設定，無法處理語音。")
+        
+        transcription_task = run_in_threadpool(lambda: openai_client.audio.transcriptions.create(model="whisper-1", file=("audio.m4a", audio_in)).text)
+        text = await transcription_task
+
         if not text: raise RuntimeError("語音轉文字失敗")
         
         sentiment = await analyze_sentiment(text)
@@ -334,13 +355,19 @@ async def handle_audio_message(event: MessageEvent):
         final_reply_text = await groq_chat_async([{"role":"system","content":sys_prompt}, {"role":"user","content":text}])
         
         messages_to_send = [TextMessage(text=f"🎧 我聽到了：\n{text}\n\n—\n{final_reply_text}", quick_reply=build_quick_reply())]
-        # TTS for audio reply
-        if final_reply_text and openai_client:
-            audio_out = await text_to_speech_async(final_reply_text)
-            if audio_out:
-                logger.info("TTS 語音已生成，但因未設定上傳功能，故不傳送語音。")
+        
+        audio_out = await text_to_speech_async(final_reply_text)
+        if audio_out:
+            # !!! 同樣的關鍵步驟，你需要將 audio_out 上傳以取得公開 URL !!!
+            # public_audio_url = upload_to_cloud_storage(audio_out)
+            # audio_duration_ms = calculate_duration(audio_out)
+            # 
+            # # 完成後取消註解
+            # # messages_to_send.append(AudioMessage(original_content_url=public_audio_url, duration=audio_duration_ms))
+            logger.info("TTS 語音已生成，但因未設定上傳功能，故暫不傳送語音訊息。")
         
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages_to_send))
+
     except Exception as e:
         logger.error(f"處理語音訊息失敗: {e}", exc_info=True)
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[TextMessage(text="抱歉，我沒聽清楚，可以再說一次嗎？")]))
