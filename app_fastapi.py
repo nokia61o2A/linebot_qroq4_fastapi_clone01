@@ -35,12 +35,6 @@ from linebot.v3.webhooks import (
     AudioMessageContent,
     PostbackEvent,
 )
-# [最終導入修正] Source... 類別的正確位置
-from linebot.v3.webhooks.models import (
-    SourceUser,
-    SourceGroup,
-    SourceRoom,
-)
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -172,10 +166,17 @@ app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.1.0")
 router = APIRouter()
 
 # ========== 4) Helpers ==========
+# [最終導入修正] 改寫 get_chat_id，不再需要導入 SourceUser 等類別
 def get_chat_id(event: MessageEvent) -> str:
+    """
+    透過判斷 source 物件的 type 屬性來取得 chat ID，
+    這個方法比 isinstance 更穩定，不受套件版本變動影響。
+    """
     source = event.source
-    if isinstance(source, SourceGroup): return source.group_id
-    if isinstance(source, SourceRoom): return source.room_id
+    if source.type == 'group':
+        return source.group_id
+    if source.type == 'room':
+        return source.room_id
     return source.user_id
 
 # --- 上傳與 TTS 輔助函式 ---
@@ -332,8 +333,9 @@ async def handle_text_message(event: MessageEvent):
     except Exception:
         bot_name = "AI 助手"
 
-    if isinstance(event.source, (SourceGroup, SourceRoom)) and not msg.startswith(f"@{bot_name}"):
-        return
+    if hasattr(event.source, 'group_id') or hasattr(event.source, 'room_id'):
+        if not msg.startswith(f"@{bot_name}"):
+            return
     
     msg = re.sub(f'^@{bot_name}\\s*', '', msg)
     if not msg: return
