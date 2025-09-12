@@ -22,32 +22,19 @@ from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# [修正] LINE Bot SDK 導入 - 使用正確的導入路徑
-from linebot.v3.messaging import (
-    AsyncApiClient, 
-    AsyncMessagingApi,
-    Configuration,
-    TextMessage as V3TextMessage,
-    AudioMessage as V3AudioMessage,
-    ReplyMessageRequest,
-    PushMessageRequest,
+# [最終修正] 1. 修正 AsyncWebhookHandler 的導入路徑
+from linebot import AsyncLineBotApi
+from linebot.webhook import AsyncWebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import (
+    MessageEvent, TextMessage, AudioMessage,
     TextSendMessage,
-    AudioSendMessage,
-    FlexMessage,
-    FlexContainer,
-    QuickReply,
-    QuickReplyItem,
-    MessageAction,
-    PostbackAction
+    SourceUser, SourceGroup, SourceRoom,
+    QuickReply, QuickReplyButton, MessageAction,
+    PostbackAction, PostbackEvent,
+    FlexSendMessage, BubbleContainer, BoxComponent,
+    TextComponent, ButtonComponent, SeparatorComponent
 )
-from linebot.v3.webhooks import (
-    WebhookHandler,
-    MessageEvent,
-    PostbackEvent,
-    TextMessageContent,
-    AudioMessageContent
-)
-from linebot.v3.exceptions import InvalidSignatureError
 
 # --- AI 相關 ---
 from groq import AsyncGroq, Groq
@@ -87,11 +74,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("缺少必要環境變數：CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET")
 
-# --- API 用戶端初始化 (使用 LINE Bot SDK v3) ---
-configuration = Configuration(access_token=CHANNEL_TOKEN)
-async_api_client = AsyncApiClient(configuration)
-line_bot_api = AsyncMessagingApi(async_api_client)
-handler = WebhookHandler(CHANNEL_SECRET)
+# --- API 用戶端初始化 ---
+line_bot_api = AsyncLineBotApi(CHANNEL_TOKEN)
+handler = AsyncWebhookHandler(CHANNEL_SECRET)
 
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 sync_groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -147,16 +132,9 @@ router = APIRouter()
 
 # ========== 4) Helpers ==========
 def get_chat_id(event: MessageEvent) -> str:
-    """取得聊天室 ID"""
-    source = event.source
-    if hasattr(source, 'group_id') and source.group_id:
-        return source.group_id
-    elif hasattr(source, 'room_id') and source.room_id:
-        return source.room_id
-    elif hasattr(source, 'user_id') and source.user_id:
-        return source.user_id
-    else:
-        return "unknown"
+    if isinstance(event.source, SourceGroup): return event.source.group_id
+    if isinstance(event.source, SourceRoom):  return event.source.room_id
+    return event.source.user_id
 
 # --- AI & 分析相關函式 ---
 def get_analysis_reply(messages):
@@ -383,82 +361,303 @@ def build_persona_prompt(chat_id: str, sentiment: str) -> str:
 
 def build_quick_reply() -> QuickReply:
     return QuickReply(items=[
-        QuickReplyItem(action=MessageAction(label="主選單", text="選單")),
-        QuickReplyItem(action=MessageAction(label="台股大盤", text="台股大盤")),
-        QuickReplyItem(action=MessageAction(label="美股大盤", text="美股大盤")),
-        QuickReplyItem(action=MessageAction(label="查台積電", text="2330")),
-        QuickReplyItem(action=MessageAction(label="查輝達", text="NVDA")),
-        QuickReplyItem(action=MessageAction(label="查日圓", text="JPY")),
-        QuickReplyItem(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
-        QuickReplyItem(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
+        QuickReplyButton(action=MessageAction(label="主選單", text="選單")),
+        QuickReplyButton(action=MessageAction(label="台股大盤", text="台股大盤")),
+        QuickReplyButton(action=MessageAction(label="美股大盤", text="美股大盤")),
+        QuickReplyButton(action=MessageAction(label="查台積電", text="2330")),
+        QuickReplyButton(action=MessageAction(label="查輝達", text="NVDA")),
+        QuickReplyButton(action=MessageAction(label="查日圓", text="JPY")),
+        QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
+        QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
     ])
 
 async def reply_with_quick_bar(reply_token: str, text: str):
     await line_bot_api.reply_message(
-        ReplyMessageRequest(
-            reply_token=reply_token,
-            messages=[TextSendMessage(text=text, quick_reply=build_quick_reply())]
-        )
+        reply_token,
+        TextSendMessage(text=text, quick_reply=build_quick_reply())
     )
 
-def build_main_menu_flex() -> FlexMessage:
-    # 由於 LINE Bot SDK v3 的 Flex 訊息結構較複雜，這裡簡化處理
-    # 實際使用時建議參考官方文件構建完整的 FlexContainer
-    flex_content = {
-        "type": "bubble",
-        "header": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [{"type": "text", "text": "AI 助理主選單", "weight": "bold", "size": "lg"}]
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "md",
-            "contents": [
-                {"type": "text", "text": "請選擇功能分類：", "size": "sm"},
-                {"type": "separator", "margin": "md"},
-                {"type": "button", "action": {"type": "postback", "label": "💹 金融查詢", "data": "menu:finance"}, "style": "primary", "color": "#5E86C1"},
-                {"type": "button", "action": {"type": "postback", "label": "🎰 彩票分析", "data": "menu:lottery"}, "style": "primary", "color": "#5EC186"},
-                {"type": "button", "action": {"type": "postback", "label": "💖 AI 角色扮演", "data": "menu:persona"}, "style": "secondary"},
-                {"type": "button", "action": {"type": "postback", "label": "🌐 翻譯工具", "data": "menu:translate"}, "style": "secondary"},
-                {"type": "button", "action": {"type": "postback", "label": "⚙️ 系統設定", "data": "menu:settings"}, "style": "secondary"},
+def build_main_menu_flex() -> FlexSendMessage:
+    bubble = BubbleContainer(
+        direction="ltr",
+        header=BoxComponent(layout="vertical", contents=[TextComponent(text="AI 助理主選單", weight="bold", size="lg")]),
+        body=BoxComponent(
+            layout="vertical", spacing="md",
+            contents=[
+                TextComponent(text="請選擇功能分類：", size="sm"),
+                SeparatorComponent(margin="md"),
+                ButtonComponent(action=PostbackAction(label="💹 金融查詢", data="menu:finance"), style="primary", color="#5E86C1"),
+                ButtonComponent(action=PostbackAction(label="🎰 彩票分析", data="menu:lottery"), style="primary", color="#5EC186"),
+                ButtonComponent(action=PostbackAction(label="💖 AI 角色扮演", data="menu:persona"), style="secondary"),
+                ButtonComponent(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate"), style="secondary"),
+                ButtonComponent(action=PostbackAction(label="⚙️ 系統設定", data="menu:settings"), style="secondary"),
             ]
-        }
-    }
-    return FlexMessage(alt_text="主選單", contents=FlexContainer.from_dict(flex_content))
+        )
+    )
+    return FlexSendMessage(alt_text="主選單", contents=bubble)
 
-def build_submenu_flex(kind: str) -> FlexMessage:
+def build_submenu_flex(kind: str) -> FlexSendMessage:
     title, buttons = "子選單", []
     if kind == "finance":
         title, buttons = "💹 金融查詢", [
-            {"type": "button", "action": {"type": "message", "label": "台股大盤", "text": "台股大盤"}},
-            {"type": "button", "action": {"type": "message", "label": "美股大盤", "text": "美股大盤"}},
-            {"type": "button", "action": {"type": "message", "label": "黃金價格", "text": "金價"}},
-            {"type": "button", "action": {"type": "message", "label": "日圓匯率", "text": "JPY"}},
-            {"type": "button", "action": {"type": "message", "label": "查 2330 台積電", "text": "2330"}},
-            {"type": "button", "action": {"type": "message", "label": "查 NVDA 輝達", "text": "NVDA"}},
+            ButtonComponent(action=MessageAction(label="台股大盤", text="台股大盤")), ButtonComponent(action=MessageAction(label="美股大盤", text="美股大盤")),
+            ButtonComponent(action=MessageAction(label="黃金價格", text="金價")), ButtonComponent(action=MessageAction(label="日圓匯率", text="JPY")),
+            ButtonComponent(action=MessageAction(label="查 2330 台積電", text="2330")), ButtonComponent(action=MessageAction(label="查 NVDA 輝達", text="NVDA")),
         ]
     elif kind == "lottery":
         title, buttons = "🎰 彩票分析", [
-            {"type": "button", "action": {"type": "message", "label": "大樂透", "text": "大樂透"}},
-            {"type": "button", "action": {"type": "message", "label": "威力彩", "text": "威力彩"}},
-            {"type": "button", "action": {"type": "message", "label": "今彩539", "text": "539"}},
+            ButtonComponent(action=MessageAction(label="大樂透", text="大樂透")), ButtonComponent(action=MessageAction(label="威力彩", text="威力彩")),
+            ButtonComponent(action=MessageAction(label="今彩539", text="539")),
         ]
     elif kind == "persona":
         title, buttons = "💖 AI 角色扮演", [
-            {"type": "button", "action": {"type": "message", "label": "甜美女友", "text": "甜"}},
-            {"type": "button", "action": {"type": "message", "label": "傲嬌女友", "text": "鹹"}},
-            {"type": "button", "action": {"type": "message", "label": "萌系女友", "text": "萌"}},
-            {"type": "button", "action": {"type": "message", "label": "酷系御姐", "text": "酷"}},
-            {"type": "button", "action": {"type": "message", "label": "隨機切換", "text": "random"}},
+            ButtonComponent(action=MessageAction(label="甜美女友", text="甜")), ButtonComponent(action=MessageAction(label="傲嬌女友", text="鹹")),
+            ButtonComponent(action=MessageAction(label="萌系女友", text="萌")), ButtonComponent(action=MessageAction(label="酷系御姐", text="酷")),
+            ButtonComponent(action=MessageAction(label="隨機切換", text="random")),
         ]
     elif kind == "translate":
         title, buttons = "🌐 翻譯工具", [
-            {"type": "button", "action": {"type": "message", "label": "翻成英文", "text": "翻譯->英文"}},
-            {"type": "button", "action": {"type": "message", "label": "翻成日文", "text": "翻譯->日文"}},
-            {"type": "button", "action": {"type": "message", "label": "翻成繁中", "text": "翻譯->繁體中文"}},
-            {"type": "button", "action": {"type": "message", "label": "結束翻譯模式", "text": "翻譯->結束"}},
+            ButtonComponent(action=MessageAction(label="翻成英文", text="翻譯->英文")), ButtonComponent(action=MessageAction(label="翻成日文", text="翻譯->日文")),
+            ButtonComponent(action=MessageAction(label="翻成繁中", text="翻譯->繁體中文")), ButtonComponent(action=MessageAction(label="結束翻譯模式", text="翻譯->結束")),
         ]
     elif kind == "settings":
-        title, buttons = "⚙️
+        title, buttons = "⚙️ 系統設定", [
+            ButtonComponent(action=MessageAction(label="開啟自動回答 (群組)", text="開啟自動回答")),
+            ButtonComponent(action=MessageAction(label="關閉自動回答 (群組)", text="關閉自動回答")),
+        ]
+    bubble = BubbleContainer(
+        direction="ltr",
+        header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="lg")]),
+        body=BoxComponent(layout="vertical", contents=buttons, spacing="sm")
+    )
+    return FlexSendMessage(alt_text=title, contents=bubble)
+
+# ========== 5) 語音（錄音）→ 轉文字 → 回覆 ==========
+async def _save_line_content_to_bytes_async(message_id: str) -> bytes:
+    """非同步下載 LINE 音訊內容為 bytes。"""
+    message_content = await line_bot_api.get_message_content(message_id)
+    return await message_content.read()
+
+def _transcribe_with_openai(audio_bytes: bytes, filename: str = "audio.m4a") -> str | None:
+    if not openai_client: return None
+    try:
+        f = io.BytesIO(audio_bytes)
+        f.name = filename
+        resp = openai_client.audio.transcriptions.create(model="whisper-1", file=f)
+        return resp.text.strip() if resp.text else None
+    except Exception as e:
+        logger.warning(f"OpenAI 轉錄失敗：{e}")
+        return None
+
+def _transcribe_with_groq(audio_bytes: bytes, filename: str = "audio.m4a") -> str | None:
+    if not sync_groq_client: return None
+    try:
+        f = io.BytesIO(audio_bytes)
+        f.name = filename
+        resp = sync_groq_client.audio.transcriptions.create(file=f, model="whisper-large-v3")
+        return resp.text.strip() if resp.text else None
+    except Exception as e:
+        logger.warning(f"Groq 轉錄失敗：{e}")
+        return None
+
+# ========== 6) LINE Handlers ==========
+@handler.add(MessageEvent, message=TextMessage)
+async def on_message_text(event: MessageEvent):
+    try:
+        await handle_message_async(event)
+    except Exception as e:
+        logger.error(f"Handle message failed: {e}", exc_info=True)
+
+@handler.add(MessageEvent, message=AudioMessage)
+async def on_message_audio(event: MessageEvent):
+    try:
+        await handle_audio_async(event)
+    except Exception as e:
+        logger.error(f"Handle audio failed: {e}", exc_info=True)
+
+@handler.add(PostbackEvent)
+async def on_postback(event: PostbackEvent):
+    data = (event.postback.data or "").strip()
+    if data.startswith("menu:"):
+        kind = data.split(":", 1)[-1]
+        await line_bot_api.reply_message(
+            event.reply_token,
+            [build_submenu_flex(kind), TextSendMessage(text="請選擇一項服務", quick_reply=build_quick_reply())]
+        )
+
+async def handle_audio_async(event: MessageEvent):
+    chat_id = get_chat_id(event)
+    reply_token = event.reply_token
+    try:
+        audio_bytes = await _save_line_content_to_bytes_async(event.message.id)
+        text = await run_in_threadpool(_transcribe_with_openai, audio_bytes)
+        if not text:
+            text = await run_in_threadpool(_transcribe_with_groq, audio_bytes)
+        if not text:
+            raise RuntimeError("語音轉文字失敗 (OpenAI 和 Groq 皆失敗)")
+    except Exception as e:
+        logger.error(f"語音轉文字失敗：{e}", exc_info=True)
+        await reply_with_quick_bar(reply_token, "抱歉我剛剛沒聽清楚 🙈 能再說一次或改用文字嗎？")
+        return
+
+    try:
+        sentiment = await analyze_sentiment(text)
+        sys_prompt = build_persona_prompt(chat_id, sentiment)
+        messages = [{"role":"system","content":sys_prompt},
+                    {"role":"user","content":f"(以下是使用者語音轉文字)\n{text}"}]
+        final_reply = await groq_chat_async(messages)
+        await reply_with_quick_bar(reply_token, f"🎧 我聽到了：\n{text}\n\n—\n{final_reply}")
+    except Exception as e:
+        logger.error(f"語音回覆失敗：{e}", exc_info=True)
+        await reply_with_quick_bar(reply_token, "我在～只是有點恍神😅 你再說一次，我會好好聽。")
+
+async def handle_message_async(event: MessageEvent):
+    chat_id, msg_raw = get_chat_id(event), event.message.text.strip()
+    reply_token, is_group = event.reply_token, not isinstance(event.source, SourceUser)
+
+    try:
+        bot_info = await line_bot_api.get_bot_info()
+        bot_name = bot_info.display_name
+    except Exception:
+        bot_name = "AI 助手"
+
+    if not msg_raw: return
+    if chat_id not in auto_reply_status: auto_reply_status[chat_id] = True
+
+    if is_group and not auto_reply_status.get(chat_id, True) and not msg_raw.startswith(f"@{bot_name}"):
+        return
+    msg = msg_raw[len(f"@{bot_name}"):].strip() if msg_raw.startswith(f"@{bot_name}") else msg_raw
+    if not msg: return
+
+    low = msg.lower()
+    
+    def is_stock_query(text: str) -> bool:
+        text_upper = text.upper()
+        if text_upper in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"]: return True
+        if re.match(r'^\d{4,6}[A-Z]?$', text_upper): return True
+        if re.match(r'^[A-Z]{1,5}$', text_upper) and text_upper not in ["JPY"]: return True
+        return False
+
+    if low in ("menu", "選單", "主選單"):
+        await line_bot_api.reply_message(reply_token, build_main_menu_flex())
+        return
+
+    LOTTERY_KEYWORDS = ["大樂透", "威力彩", "539"]
+    if msg in LOTTERY_KEYWORDS:
+        if not LOTTERY_ENABLED:
+            await reply_with_quick_bar(reply_token, "抱歉，彩票分析功能目前設定不完整。")
+            return
+        try:
+            analysis_report = await run_in_threadpool(get_lottery_analysis, msg)
+            await reply_with_quick_bar(reply_token, analysis_report)
+        except Exception as e:
+            logger.error(f"彩票分析流程失敗: {e}", exc_info=True)
+            await reply_with_quick_bar(reply_token, f"抱歉，分析 {msg} 時發生錯誤。")
+        return
+
+    if is_stock_query(msg):
+        if not STOCK_ENABLED:
+            await reply_with_quick_bar(reply_token, "抱歉，股票分析模組目前設定不完整或載入失敗。")
+            return
+        try:
+            analysis_report = await run_in_threadpool(get_stock_analysis, msg)
+            await reply_with_quick_bar(reply_token, analysis_report)
+        except Exception as e:
+            logger.error(f"股票分析流程失敗: {e}", exc_info=True)
+            await reply_with_quick_bar(reply_token, f"抱歉，分析 {msg} 時發生錯誤。")
+        return
+
+    if low in ("金價", "黃金"):
+        try:
+            analysis_report = await run_in_threadpool(get_gold_analysis)
+            await reply_with_quick_bar(reply_token, analysis_report)
+        except Exception as e:
+            logger.error(f"黃金分析流程失敗: {e}", exc_info=True)
+            await reply_with_quick_bar(reply_token, "抱歉，金價分析服務暫時無法使用。")
+        return
+
+    if low == "jpy":
+        try:
+            analysis_report = await run_in_threadpool(get_currency_analysis, "JPY")
+            await reply_with_quick_bar(reply_token, analysis_report)
+        except Exception as e:
+            logger.error(f"日圓分析流程失敗: {e}", exc_info=True)
+            await reply_with_quick_bar(reply_token, "抱歉，日圓匯率分析服務暫時無法使用。")
+        return
+
+    if low in ("開啟自動回答", "關閉自動回答"):
+        is_on = low == "開啟自動回答"
+        auto_reply_status[chat_id] = is_on
+        text = "✅ 已開啟自動回答" if is_on else "❌ 已關閉自動回答（群組需 @我 才回）"
+        await reply_with_quick_bar(reply_token, text)
+        return
+
+    if low.startswith("翻譯->"):
+        lang = msg.split("->", 1)[1].strip()
+        if lang == "結束":
+            translation_states.pop(chat_id, None)
+            await reply_with_quick_bar(reply_token, "✅ 已結束翻譯模式")
+        else:
+            translation_states[chat_id] = lang
+            await reply_with_quick_bar(reply_token, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
+        return
+
+    persona_keys = {"甜":"sweet", "鹹":"salty", "萌":"moe", "酷":"cool", "random":"random"}
+    if low in persona_keys:
+        key = set_user_persona(chat_id, persona_keys[low])
+        p = PERSONAS[key]
+        txt = f"💖 已切換人設：{p['title']}\n\n{p['greetings']}"
+        await reply_with_quick_bar(reply_token, txt)
+        return
+
+    if chat_id in translation_states:
+        try:
+            out = await translate_text(msg, translation_states[chat_id])
+            await reply_with_quick_bar(reply_token, f"🌐 ({translation_states[chat_id]})\n{out}")
+        except Exception as e:
+            logger.error(f"翻譯失敗: {e}", exc_info=True)
+            await reply_with_quick_bar(reply_token, "翻譯暫時失效，等我回神再來一次 🙏")
+        return
+
+    try:
+        history = conversation_history.get(chat_id, [])
+        sentiment = await analyze_sentiment(msg)
+        sys_prompt = build_persona_prompt(chat_id, sentiment)
+        messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
+        final_reply = await groq_chat_async(messages)
+        history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}])
+        conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
+        await reply_with_quick_bar(reply_token, final_reply)
+    except Exception as e:
+        logger.error(f"AI 回覆失敗: {e}", exc_info=True)
+        await reply_with_quick_bar(reply_token, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
+
+# ========== 7) FastAPI Routes ==========
+@router.post("/callback")
+async def callback(request: Request):
+    signature = request.headers.get("X-Line-Signature", "")
+    body = await request.body()
+    try:
+        await handler.handle(body.decode("utf-8"), signature)
+    except InvalidSignatureError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    except Exception as e:
+        logger.error(f"Callback 處理失敗：{e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
+    return JSONResponse({"status": "ok"})
+
+@router.get("/")
+async def root():
+    return PlainTextResponse("LINE Bot is running.", status_code=200)
+
+@router.get("/healthz")
+async def healthz():
+    return PlainTextResponse("ok")
+
+app.include_router(router)
+
+# ========== 8) Local run ==========
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
