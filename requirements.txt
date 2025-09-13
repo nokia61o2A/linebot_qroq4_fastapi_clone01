@@ -22,3 +22,4 @@ taiwanlottery
 #股票
 yfinance
 cloudinary  # <-- 新增這一行
+gtts==2.3.2
