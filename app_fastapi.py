@@ -319,35 +319,58 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
     )
     return resp.choices[0].message.content.strip()
 
-# ---------- 彩票 ----------
+# ---------- 彩票 (已更新) ----------
 def get_lottery_analysis(lottery_type_input: str) -> str:
     if not LOTTERY_ENABLED:
         return "彩票模組未啟用。"
+    
     lt = lottery_type_input.lower()
     if "威力" in lt:
         data = lottery_crawler.super_lotto()
+        lottery_name = "威力彩"
     elif "大樂" in lt:
         data = lottery_crawler.lotto649()
+        lottery_name = "大樂透"
     elif "539" in lt:
         data = lottery_crawler.daily_cash()
+        lottery_name = "今彩539"
     else:
         return f"不支援 {lottery_type_input}。"
 
-    # 可選加入財神方位
+    # 獲取財神方位資訊，如果失敗則優雅地跳過
+    extra_info = ""
     try:
         info = caiyunfangwei_crawler.get_caiyunfangwei()
-        extra = (
-            f'今天日期：{info.get("今天日期","未知")} / 歲次：{info.get("今日歲次","未知")} / 財神方位：{info.get("財神方位","未知")}\n'
+        extra_info = (
+            f'***財神方位提示***\n'
+            f'國歷：{info.get("今天日期", "未知")}\n'
+            f'農曆：{info.get("今日歲次", "未知")}\n'
+            f'今日財神方位：**{info.get("財神方位", "未知")}**\n\n'
         )
-    except Exception:
-        extra = ""
+    except Exception as e:
+        logger.warning(f"無法獲取財神方位資訊: {e}")
+        extra_info = "財神方位資訊暫時無法獲取。\n\n"
 
+    # 建立更詳細的分析指令 (Prompt)
     prompt = (
-        "你是專業的樂透彩分析師，請基於以下近幾期號碼資料，撰寫詳細趨勢分析並給出三組推薦號碼（符合彩種格式）。\n"
-        f"{extra}\n資料:\n{data}\n\n請用繁體中文回覆。"
+        f"你是一位專業的樂透彩分析師，請基於以下「{lottery_name}」的最近幾期開獎號碼資料，撰寫一份詳細的趨勢分析報告，並遵循以下指示：\n\n"
+        f"1.  **開頭資訊**：請先顯示我提供的「財神方位提示」。\n"
+        f"2.  **數據來源**：清楚列出最近幾期的開獎號碼。\n"
+        f"   - 資料:\n{data}\n\n"
+        f"3.  **趨勢分析**：\n"
+        f"   - 分析並列出「最熱門的號碼」(Hot Numbers) 和「最冷門的號碼」(Cold Numbers)。\n"
+        f"   - 根據號碼分佈（例如大小、奇偶比例）提供簡要的趨勢觀察。\n\n"
+        f"4.  **推薦號碼**：\n"
+        f"   - 根據你的專業分析，提供三組推薦號碼。\n"
+        f"   - 號碼組合必須符合「{lottery_name}」的遊戲規則（例如：大樂透為6個號碼，威力彩為6+1個號碼）。\n"
+        f"   - 每組號碼請由小到大排序。\n\n"
+        f"5.  **結語**：最後，請附上一句20字以內、具有勵志感的發財吉祥話。\n\n"
+        f"請務必使用台灣用語的繁體中文回覆。"
     )
+
+    # 呼叫 AI 模型進行分析
     return get_analysis_reply(
-        [{"role": "system", "content": "你是彩券分析師。"}, {"role": "user", "content": prompt}]
+        [{"role": "system", "content": f"你是一位專業且詳細的「{lottery_name}」彩券分析師。"}, {"role": "user", "content": prompt}]
     )
 
 # ---------- 股票（簡版） ----------
