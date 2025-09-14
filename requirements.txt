@@ -3,7 +3,8 @@ fastapi
 uvicorn
 
 # --- LINE Bot SDK (重要：必須是 v3 或以上) ---
-line-bot-sdk>=3.0.0
+line-bot-sdk>=3.5.0  # <--- 修改或新增這一行，確保版本夠新
+
 
 # --- AI 模型服務 ---
 groq
