@@ -1,11 +1,3 @@
-# app_fastapi.py  v1.3.2  (2025-09-15)
-# 修改摘要：
-# - [FIX] 翻譯指令解析：支援「-> / → / >」及「翻成英文/翻譯 英文」等
-# - [FIX] 翻譯模式優先：將翻譯模式攔截移到所有分支之前
-# - [NEW] translation_states_ttl：加入過期時間，避免翻譯模式卡住
-# - [CHG] get_chat_id() 強化：兼容 LINE v2/v3 命名差異更徹底
-# - 其餘：加強日誌、錯誤處理與註解
-
 import os
 import re
 import io
@@ -14,7 +6,7 @@ import logging
 import pkg_resources
 from typing import Dict, List, Tuple, Optional
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta  # [NEW] 用於 TTL
+from datetime import datetime
 
 # --- 數據處理與爬蟲 ---
 import requests
@@ -146,15 +138,34 @@ else:
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
+# --- 自訂模組（可無則降級） ---
+LOTTERY_ENABLED = True
+try:
+    from TaiwanLottery import TaiwanLotteryCrawler
+    from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
+    lottery_crawler = TaiwanLotteryCrawler()
+    caiyunfangwei_crawler = CaiyunfangweiCrawler()
+    logger.info("✅ 已載入 TaiwanLotteryCrawler / CaiyunfangweiCrawler")
+except Exception as e:
+    logger.warning(f"無法載入自訂彩券模組：{e}（將使用後備解析）")
+    LOTTERY_ENABLED = False
+
+STOCK_ENABLED = True
+try:
+    from my_commands.stock.stock_price import stock_price
+    from my_commands.stock.stock_news import stock_news
+    from my_commands.stock.stock_value import stock_fundamental
+    from my_commands.stock.stock_rate import stock_dividend
+    from my_commands.stock.YahooStock import YahooStock
+except Exception as e:
+    logger.warning(f"無法載入自訂股票模組：{e}（僅顯示快照/圖表）")
+    STOCK_ENABLED = False
+
 # --- 狀態字典與常數 ---
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 user_persona: Dict[str, str] = {}
-
-# [CHG] 原本只有 translation_states（無 TTL）；現在多一份 TTL 控制
-translation_states: Dict[str, str] = {}               # chat_id -> "英文/日文/繁體中文..."
-translation_states_ttl: Dict[str, datetime] = {}      # [NEW] chat_id -> expire time
-
+translation_states: Dict[str, str] = {}
 auto_reply_status: Dict[str, bool] = {}
 
 PERSONAS = {
@@ -165,15 +176,9 @@ PERSONAS = {
 }
 LANGUAGE_MAP = {
     "英文": "English", "日文": "Japanese", "韓文": "Korean",
-    "越南文": "Vietnamese", "繁體中文": "Traditional Chinese", "中文": "Chinese"
+    "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"
 }
 PERSONA_ALIAS = {"甜":"sweet", "鹹":"salty", "萌":"moe", "酷":"cool", "random":"random"}
-
-# [NEW] 翻譯指令正規表示式（支援 -> / → / > 與多餘空白、別名「翻成」）
-TRANSLATE_CMD = re.compile(
-    r"^(?:翻譯|翻译|翻成)\s*(?:->|→|>)?\s*(英文|English|日文|Japanese|韓文|Korean|越南文|Vietnamese|繁體中文|中文)\s*$",
-    re.IGNORECASE
-)
 
 
 # ========== 3) FastAPI Lifespan（啟動時設定 Webhook） ==========
@@ -199,58 +204,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.3.2")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.3.1")
 router = APIRouter()
 
 
 # ========== 4) Helpers ==========
 def get_chat_id(event: MessageEvent) -> str:
     """
-    [CHG] 更強韌的 ID 取得：同時嘗試 v3 snake_case 與 v2 camelCase。
-    目的：翻譯狀態以 chat_id 為 key，ID 一致才能在下一則訊息命中。
+    兼容 v2/v3 屬性命名：userId / user_id、groupId / group_id、roomId / room_id
+    避免翻譯模式的狀態用不同 key 造成「看起來開了卻沒翻」的情況。
     """
     source = event.source
-    stype = getattr(source, "type", "") or getattr(source, "_type", "")
+    stype = getattr(source, "type", "")
     if stype == "group":
-        return (
-            getattr(source, "group_id", None) or
-            getattr(source, "groupId", None) or
-            "group:unknown"
-        )
+        return getattr(source, "groupId", None) or getattr(source, "group_id", None) or "group:unknown"
     if stype == "room":
-        return (
-            getattr(source, "room_id", None) or
-            getattr(source, "roomId", None) or
-            "room:unknown"
-        )
+        return getattr(source, "roomId", None) or getattr(source, "room_id", None) or "room:unknown"
     # user
-    return (
-        getattr(source, "user_id", None) or
-        getattr(source, "userId", None) or
-        "user:unknown"
-    )
-
-def _now() -> datetime:
-    return datetime.utcnow()
-
-def _set_translate_mode(chat_id: str, lang_display: str, hours: int = 2):
-    """[NEW] 啟用翻譯模式並設定 TTL，避免永遠卡住。"""
-    translation_states[chat_id] = lang_display
-    translation_states_ttl[chat_id] = _now() + timedelta(hours=hours)
-    logger.info(f"[TranslateMode] ON chat={chat_id} -> {lang_display} (ttl {hours}h)")
-
-def _clear_translate_mode(chat_id: str):
-    translation_states.pop(chat_id, None)
-    translation_states_ttl.pop(chat_id, None)
-    logger.info(f"[TranslateMode] OFF chat={chat_id}")
-
-def _translate_mode_lang(chat_id: str) -> Optional[str]:
-    """[NEW] 讀取翻譯模式；若過期自動清除。"""
-    exp = translation_states_ttl.get(chat_id)
-    if exp and _now() > exp:
-        _clear_translate_mode(chat_id)
-        return None
-    return translation_states.get(chat_id)
+    return getattr(source, "userId", None) or getattr(source, "user_id", None) or "user:unknown"
 
 def build_quick_reply() -> QuickReply:
     return QuickReply(items=[
@@ -263,8 +234,6 @@ def build_quick_reply() -> QuickReply:
         QuickReplyItem(action=MessageAction(label="查日圓", text="JPY")),
         QuickReplyItem(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyItem(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
-        # [NEW] 快捷關閉翻譯
-        QuickReplyItem(action=MessageAction(label="結束翻譯", text="翻譯->結束")),
     ])
 
 def build_main_menu() -> FlexMessage:
@@ -309,7 +278,6 @@ def build_submenu(kind: str) -> FlexMessage:
             ("隨機切換", MessageAction(label="隨機切換", text="random")),
         ]),
         "translate": ("🌐 翻譯工具", [
-            # [CHG] label 可自由，文字統一走「翻譯->XXX」以利解析，也支援 regex
             ("翻成英文", MessageAction(label="翻成英文", text="翻譯->英文")),
             ("翻成日文", MessageAction(label="翻成日文", text="翻譯->日文")),
             ("翻成繁中", MessageAction(label="翻成繁中", text="翻譯->繁體中文")),
@@ -405,6 +373,7 @@ async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
 
 
 # ========== 6) 金融工具 ==========
+# ---- 6.1 台銀金價（穩定文字解析）----
 BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -476,10 +445,16 @@ def get_currency_analysis(target_currency: str) -> str:
         return "抱歉，外匯資料暫時無法取得。"
 
 # ---- 6.3 股票 ----
-_TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')     # 2330 / 006208 / 00937B / 1101B
+_TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')      # 2330 / 006208 / 00937B / 1101B
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')        # NVDA / AAPL / QQQ
 
 def normalize_ticker(user_text: str) -> Tuple[str, str, str, bool]:
+    """
+    回傳: (yfinance_symbol, yahoo_tw_slug, display_code, is_index)
+    - 台股數字代碼（含尾碼字母）加上 .TW 給 yfinance
+    - Yahoo 台股頁面 slug 用原始碼
+    - 指數：^TWII / ^GSPC
+    """
     t = user_text.strip().upper()
     if t in ["台股大盤", "大盤", "^TWII"]:
         return "^TWII", "^TWII", "^TWII", True
@@ -498,6 +473,7 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
         info = getattr(tk, "fast_info", None)
         hist = tk.history(period="2d", interval="1d")
 
+        # 名稱
         name = None
         try:
             name = tk.get_info().get("shortName")
@@ -505,6 +481,7 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
             pass
         snap["name"] = name or yf_symbol
 
+        # 價格 & 幣別
         price, ccy = None, None
         if info and getattr(info, "last_price", None):
             price = info.last_price
@@ -516,18 +493,21 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
             snap["now_price"] = f"{price:.2f}"
             snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
 
+        # 變動
         if not hist.empty and len(hist) >= 2:
             chg = float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2])
             pct = chg / float(hist["Close"].iloc[-2]) * 100 if hist["Close"].iloc[-2] else 0.0
             sign = "+" if chg >= 0 else "-"
             snap["change"] = f"{sign}{abs(chg):.2f} ({sign}{abs(pct):.2f}%)"
 
+        # 時間
         if not hist.empty:
             ts = hist.index[-1]
             snap["close_time"] = ts.strftime("%Y-%m-%d %H:%M")
     except Exception as e:
         logger.warning(f"yfinance 取得 {yf_symbol} 失敗：{e}")
 
+    # 後備：YahooStock（若可用）
     if (not snap["now_price"] or not snap["name"]) and 'YahooStock' in globals():
         try:
             ys = YahooStock(yahoo_slug)
@@ -541,6 +521,7 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
 
     return snap
 
+# 圖片上傳 + 圖表產生（可選）
 def _upload_image_sync(image_bytes: bytes) -> Optional[dict]:
     if not CLOUDINARY_URL:
         return None
@@ -597,6 +578,7 @@ async def get_stock_chart_url_async(user_input: str) -> Optional[str]:
         return None
     return await upload_image_to_cloudinary(img)
 
+# 進階報告（若有你自訂模組）
 stock_data_df: Optional[pd.DataFrame] = None
 def load_stock_data() -> pd.DataFrame:
     global stock_data_df
@@ -621,25 +603,22 @@ def get_stock_analysis(user_input: str) -> str:
     news_data = ""
     value_part = ""
     dividend_part = ""
-    if 'stock_price' in globals():
+    if STOCK_ENABLED:
         try:
             price_data = str(stock_price(yahoo_slug if _TW_CODE_RE.match(yahoo_slug) else yf_symbol))
         except Exception as e:
             logger.warning(f"price_data 失敗：{e}")
-    if 'stock_news' in globals():
         try:
             nm = get_stock_name(yahoo_slug) or snapshot.get("name") or yahoo_slug
             news_data = str(stock_news(nm)).replace("\u3000", " ")[:1024]
         except Exception as e:
             logger.warning(f"news_data 失敗：{e}")
-    if not is_index:
-        if 'stock_fundamental' in globals():
+        if not is_index:
             try:
                 val = stock_fundamental(yahoo_slug if _TW_CODE_RE.match(yahoo_slug) else yf_symbol)
                 value_part = f"{val}\n" if val else ""
             except Exception as e:
                 logger.warning(f"fundamental 失敗：{e}")
-        if 'stock_dividend' in globals():
             try:
                 dvd = stock_dividend(yahoo_slug if _TW_CODE_RE.match(yahoo_slug) else yf_symbol)
                 dividend_part = f"{dvd}\n" if dvd else ""
@@ -673,6 +652,7 @@ def get_stock_analysis(user_input: str) -> str:
 
 # ========== 7) 彩票分析 ==========
 def _lotto_fallback_scrape(kind: str) -> str:
+    """當自訂爬蟲不可用時，從台彩官網以文字方式粗略擷取最新號碼（易受改版影響）。"""
     try:
         if kind == "威力彩":
             url = "https://www.taiwanlottery.com/lotto/superlotto638/index.html"
@@ -708,20 +688,28 @@ def get_lottery_analysis(lottery_type_input: str) -> str:
            "539" if "539" in lottery_type_input else lottery_type_input))
 
     latest_data_str = ""
-    try:
-        from TaiwanLottery import TaiwanLotteryCrawler
-        latest_data_str = str(TaiwanLotteryCrawler().super_lotto() if kind=="威力彩"
-                              else TaiwanLotteryCrawler().lotto649() if kind=="大樂透"
-                              else TaiwanLotteryCrawler().daily_cash())
-    except Exception as e:
-        logger.warning(f"自訂彩票爬蟲失敗，改用後備：{e}")
+    if LOTTERY_ENABLED:
+        try:
+            if kind == "威力彩":
+                latest_data_str = str(TaiwanLotteryCrawler().super_lotto())
+            elif kind == "大樂透":
+                latest_data_str = str(TaiwanLotteryCrawler().lotto649())
+            elif kind == "539":
+                latest_data_str = str(TaiwanLotteryCrawler().daily_cash())
+            else:
+                return f"不支援 {kind}。"
+        except Exception as e:
+            logger.warning(f"自訂彩票爬蟲失敗，改用後備：{e}")
+            latest_data_str = _lotto_fallback_scrape(kind)
+    else:
         latest_data_str = _lotto_fallback_scrape(kind)
 
+    # 可選：財神方位
     cai_part = ""
     try:
-        from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
-        cai = CaiyunfangweiCrawler().get_caiyunfangwei()
-        cai_part = f"今天日期：{cai.get('今天日期','')}\n今日歲次：{cai.get('今日歲次','')}\n財神方位：{cai.get('財神方位','')}\n"
+        if 'caiyunfangwei_crawler' in globals():
+            cai = caiyunfangwei_crawler.get_caiyunfangwei()
+            cai_part = f"今天日期：{cai.get('今天日期','')}\n今日歲次：{cai.get('今日歲次','')}\n財神方位：{cai.get('財神方位','')}\n"
     except Exception:
         cai_part = ""
 
@@ -753,12 +741,11 @@ async def analyze_sentiment(text: str) -> str:
 async def translate_text(text: str, target_lang_display: str) -> str:
     """
     嚴格輸出翻譯文本，不加多餘說明。
+    target_lang_display 可為「英文/日文/繁體中文...」，會映射到英文語名給模型。
     """
     target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
     sys = "You are a precise translation engine. Output ONLY the translated text with no extra words."
-    # [FIX] 強制移除不可見字元，避免奇怪空白/零寬符影響結果
-    clean = re.sub(r"[\u200B-\u200D\uFEFF]", "", text).strip()
-    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{clean}"}}'
+    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
     return await groq_chat_async([{"role":"system","content":sys},{"role":"user","content":usr}], 800, 0.2)
 
 def set_user_persona(chat_id: str, key: str):
@@ -826,6 +813,7 @@ async def text_to_speech_async(text: str) -> Optional[bytes]:
         if b: return b
     return await try_gtts()
 
+# STT
 def _transcribe_with_openai_sync(audio_bytes: bytes, filename: str = "audio.m4a") -> Optional[str]:
     if not openai_client: return None
     try:
@@ -855,9 +843,7 @@ async def speech_to_text_async(audio_bytes: bytes) -> Optional[str]:
 # ========== 10) LINE Event Handlers ==========
 @handler.add(MessageEvent, message=TextMessageContent)
 async def handle_text_message(event: MessageEvent):
-    chat_id = get_chat_id(event)
-    msg_raw = (event.message.text or "").strip()
-    reply_token = event.reply_token
+    chat_id, msg_raw, reply_token = get_chat_id(event), event.message.text.strip(), event.reply_token
 
     # 取得 bot 顯示名稱（供 @bot 判斷）
     try:
@@ -885,54 +871,28 @@ async def handle_text_message(event: MessageEvent):
     if not msg:
         return
 
-    # [FIX] 先處理「翻譯模式切換」指令（含別名/箭頭/空白）
-    # e.g. "翻譯->英文", "翻譯 → 英文", "翻成英文", "翻譯 英文"
-    m = TRANSLATE_CMD.match(msg)
-    if m:
-        lang_token = m.group(1)
-        # 正規化為中文顯示名稱（英文別名也收斂）
-        rev = {
-            "English":"英文", "Japanese":"日文", "Korean":"韓文", "Vietnamese":"越南文",
-            "繁體中文":"繁體中文", "中文":"繁體中文"
-        }
-        lang_display = rev.get(lang_token, lang_token)
-        if lang_display in ("結束", "end", "stop"):
-            _clear_translate_mode(chat_id)
-            await reply_text_with_tts_and_extras(reply_token, "✅ 已結束翻譯模式")
-        else:
-            _set_translate_mode(chat_id, lang_display)
-            await reply_text_with_tts_and_extras(reply_token, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。")
-        return
-
-    # [FIX] 兼容舊寫法 "翻譯->結束"
-    if msg.startswith("翻譯->"):
-        lang = msg.split("->", 1)[1].strip()
-        if lang == "結束":
-            _clear_translate_mode(chat_id)
-            await reply_text_with_tts_and_extras(reply_token, "✅ 已結束翻譯模式")
-        else:
-            _set_translate_mode(chat_id, lang)
-            await reply_text_with_tts_and_extras(reply_token, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
-        return
-
-    # [FIX] ✅ 翻譯模式「優先攔截」：只要有開，就先翻譯（避免落到一般聊天）
-    current_lang = _translate_mode_lang(chat_id)
-    if current_lang:
-        try:
-            out = await translate_text(msg, current_lang)
-            await reply_text_with_tts_and_extras(reply_token, out)
-        except Exception as e:
-            logger.error(f"翻譯失敗: {e}", exc_info=True)
-            await reply_text_with_tts_and_extras(reply_token, "抱歉，翻譯目前不可用。")
-        return
-
     low = msg.lower()
 
-    # === 其餘路由（在翻譯模式之後） ===
+    # === 路由 ===
+    # 主選單 (優先級最高，方便跳出)
     if low in ("menu", "選單", "主選單"):
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[build_main_menu()]))
         return
 
+    # 只要翻譯模式開著，就優先翻譯，避免被其他關鍵字指令攔截
+    if chat_id in translation_states and msg:
+        try:
+            # 排除結束指令，讓使用者仍可透過 "翻譯->結束" 正常關閉模式
+            if not low.startswith("翻譯->"):
+                out = await translate_text(msg, translation_states[chat_id])
+                await reply_text_with_tts_and_extras(reply_token, out)
+                return # 完成翻譯後直接結束
+        except Exception as e:
+            logger.error(f"翻譯失敗: {e}", exc_info=True)
+            await reply_text_with_tts_and_extras(reply_token, "抱歉，翻譯目前不可用。")
+            return
+
+    # 彩票
     if msg in ("大樂透", "威力彩", "539"):
         try:
             report = await run_in_threadpool(get_lottery_analysis, msg)
@@ -942,6 +902,7 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_token, f"抱歉，分析 {msg} 時發生錯誤。")
         return
 
+    # 金價
     if low in ("金價", "黃金"):
         try:
             out = await run_in_threadpool(get_gold_analysis)
@@ -951,6 +912,7 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_token, "抱歉，金價分析服務暫時無法使用。")
         return
 
+    # 匯率（簡化：僅 JPY；你可自行擴充 USD/EUR）
     if low == "jpy":
         try:
             out = await run_in_threadpool(get_currency_analysis, "JPY")
@@ -960,6 +922,18 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_token, "抱歉，日圓匯率分析服務暫時無法使用。")
         return
 
+    # 翻譯模式切換（開/關）
+    if low.startswith("翻譯->"):
+        lang = msg.split("->", 1)[1].strip()
+        if lang == "結束":
+            translation_states.pop(chat_id, None)
+            await reply_text_with_tts_and_extras(reply_token, "✅ 已結束翻譯模式")
+        else:
+            translation_states[chat_id] = lang
+            await reply_text_with_tts_and_extras(reply_token, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
+        return
+
+    # 股票/指數
     if re.fullmatch(r"\^?[A-Z0-9.]{2,10}", msg) or msg.isdigit() or msg in ("台股大盤", "美股大盤", "大盤", "美股"):
         try:
             text = await run_in_threadpool(get_stock_analysis, msg)
@@ -976,6 +950,7 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_token, f"抱歉，分析 {msg} 時發生錯誤。")
         return
 
+    # 自動回覆設定（僅群組/聊天室有意義）
     if low in ("開啟自動回答", "關閉自動回答"):
         is_on = low == "開啟自動回答"
         auto_reply_status[chat_id] = is_on
@@ -983,6 +958,7 @@ async def handle_text_message(event: MessageEvent):
         await reply_text_with_tts_and_extras(reply_token, text)
         return
 
+    # 人設切換（注意：因為翻譯模式分支已提前處理，不會誤觸）
     if msg in PERSONA_ALIAS or low in PERSONA_ALIAS:
         key = set_user_persona(chat_id, PERSONA_ALIAS.get(msg, PERSONA_ALIAS.get(low, "sweet")))
         p = PERSONAS[user_persona[chat_id]]
@@ -990,6 +966,7 @@ async def handle_text_message(event: MessageEvent):
         await reply_text_with_tts_and_extras(reply_token, txt)
         return
 
+    # 一般聊天（人設 + 情緒）
     try:
         history = conversation_history.get(chat_id, [])
         sentiment = await analyze_sentiment(msg)
@@ -1069,5 +1046,4 @@ app.include_router(router)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    # [NOTE] 若使用 --reload，開多進程可能導致全域狀態不一致；建議 production 關閉 reload
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
