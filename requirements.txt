@@ -1,28 +1,31 @@
 # --- 核心 Web 框架與伺服器 ---
-fastapi
-uvicorn
+fastapi>=0.115.0
+uvicorn>=0.30.6
 
-# --- LINE Bot SDK (重要：必須是 v3 或以上) ---
+# --- LINE Bot SDK ---
 line-bot-sdk>=3.5.0
 
-
 # --- AI 模型服務 ---
-groq
-openai
+groq>=0.11.0
+openai>=1.47.1
 
 # --- 數據處理與網路爬蟲 ---
-requests
-pandas
-beautifulsoup4
-lxml
-html5lib
+requests>=2.32.3
+pandas>=2.2.2
+beautifulsoup4>=4.12.3
+lxml>=5.3.0
+html5lib>=1.1
+httpx>=0.27.2
 
-# --- (可選) 彩票功能 ---
-# 如果您有使用 TaiwanLottery 功能，請保留此行
-taiwanlottery
-#股票
-yfinance
-cloudinary  # <-- 新增這一行
-gTTS
-matplotlib>=3.8
+# --- 股票與圖表 ---
+yfinance>=0.2.43
+cloudinary>=1.41.0
+gTTS>=2.5.3
+matplotlib>=3.8.0
 mplfinance>=0.12.10b0
+
+# --- 環境變數管理（可選） ---
+python-dotenv>=1.0.1
+
+# --- 彩票功能（若為 PyPI 套件） ---
+taiwanlottery  # 註釋掉，因不確定是否為 PyPI 套件；若為本地模組，請移除並確保檔案存在
