@@ -1,5 +1,3 @@
-# app_fastapi.py
-# ========== 1) Imports ==========
 import os
 import re
 import io
@@ -764,7 +762,7 @@ def build_persona_prompt(chat_id: str, sentiment: str) -> str:
     p = PERSONAS[key]
     return (f"你是一位「{p['title']}」。風格：{p['style']}。\n"
             f"使用者情緒：{sentiment}（開心→分享喜悅；生氣/難過→先共情安撫再建議；中性→自然聊天）。\n"
-            f"回覆請精煉自然，使用繁體中文，帶少量表情 {p['emoji']}。")
+            f"回覆請精煉自然，使用繁體中文，帶少量表情 {p['emoji']}.")
 
 
 # ========== 9) TTS / STT（音訊處理） ==========
@@ -923,7 +921,7 @@ async def handle_text_message(event: MessageEvent):
         return
 
     # ✅ 只要翻譯模式開著，就優先翻譯（避免被其它分支攔截）
-    if chat_id in translation_states:
+    if chat_id in translation_states and msg:
         try:
             out = await translate_text(msg, translation_states[chat_id])
             await reply_text_with_tts_and_extras(reply_token, out)
