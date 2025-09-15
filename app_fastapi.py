@@ -1,8 +1,8 @@
-# app_fastapi.py  v1.4.2 (Async-native handler)
+# app_fastapi.py  v1.4.2  (Render-friendly, no-Redis)
 # 變更摘要：
-# - [FIX] 根本性修復 async/await 錯誤：改用 WebhookParser 取代同步的 WebhookHandler
-# - [CHG] 移除所有 @handler.add 裝飾器
-# - [NEW] 建立 handle_events 函式，以非同步方式分派事件
+# - [FIX] 使用 AsyncWebhookHandler；所有 @handler.add 的 async handler 會被正確 await
+# - [KEEP] 翻譯模式最高優先 / 行內翻譯 / get_chat_id 強化 / 單一 worker 建議
+# - [INFO] 關鍵改動標示為 [FIX]
 
 import os
 import re
@@ -29,14 +29,16 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 from linebot.v3.exceptions import InvalidSignatureError
+# 事件/訊息型別在 webhooks（複數）
 from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent,
     AudioMessageContent,
     PostbackEvent,
 )
-# [FIX] 改用 WebhookParser
-from linebot.v3.webhook import WebhookParser
+
+# [FIX] 改用 AsyncWebhookHandler（可 await）
+from linebot.v3.webhook import AsyncWebhookHandler
 from linebot.v3.messaging import (
     Configuration, ApiClient, AsyncMessagingApi, ReplyMessageRequest,
     TextMessage, AudioMessage, ImageMessage, FlexMessage, FlexBubble, FlexBox,
@@ -110,8 +112,9 @@ if CLOUDINARY_URL:
 configuration = Configuration(access_token=CHANNEL_TOKEN)
 async_api_client = ApiClient(configuration=configuration)
 line_bot_api = AsyncMessagingApi(api_client=async_api_client)
-# [FIX] 改用 WebhookParser
-parser = WebhookParser(CHANNEL_SECRET)
+
+# [FIX] 這裡改成 AsyncWebhookHandler
+handler = AsyncWebhookHandler(CHANNEL_SECRET)
 
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 sync_groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -131,9 +134,9 @@ GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 
-# [FIX] 翻譯模式記憶體 + TTL（Render 無 Redis）
-translation_states: Dict[str, str] = {}
-translation_states_ttl: Dict[str, datetime] = {}
+# 翻譯模式記憶體 + TTL（Render 無 Redis）
+translation_states: Dict[str, str] = {}                  # chat_id -> 顯示語名（中文）
+translation_states_ttl: Dict[str, datetime] = {}         # chat_id -> 到期時間
 TRANSLATE_TTL_SECONDS = int(os.getenv("TRANSLATE_TTL_SECONDS", "7200"))  # 2h
 
 auto_reply_status: Dict[str, bool] = {}
@@ -152,10 +155,13 @@ LANGUAGE_MAP = {
 }
 PERSONA_ALIAS = {"甜":"sweet","鹹":"salty","萌":"moe","酷":"cool","random":"random"}
 
+# 翻譯指令解析（多種箭頭/空白/別名）
 TRANSLATE_CMD = re.compile(
     r"^(?:翻譯|翻译|翻成)\s*(?:->|→|>)?\s*(英文|English|日文|Japanese|韓文|Korean|越南文|Vietnamese|繁體中文|中文)\s*$",
     re.IGNORECASE
 )
+
+# 一次性行內翻譯前綴（stateless）：en:/英文:/EN>/ja:/日文:/zh:/繁中:
 INLINE_TRANSLATE = re.compile(
     r"^(en|eng|英文|ja|jp|日文|zh|繁中|中文)\s*[:：>]\s*(.+)$",
     re.IGNORECASE
@@ -165,6 +171,9 @@ INLINE_TRANSLATE = re.compile(
 def _now() -> datetime: return datetime.utcnow()
 
 def get_chat_id(event: MessageEvent) -> str:
+    """
+    取得可穩定識別對話的 chat_id（群/房/人）。翻譯模式需要穩定 key。
+    """
     source = event.source
     stype = getattr(source, "type", None) or getattr(source, "_type", None)
     uid = getattr(source, "userId", None) or getattr(source, "user_id", None)
@@ -174,9 +183,9 @@ def get_chat_id(event: MessageEvent) -> str:
         if hasattr(source, "to_dict"):
             d = source.to_dict() or {}
             stype = stype or d.get("type")
-            uid = uid or d.get("userId")  or d.get("user_id")
+            uid = uid or d.get("userId") or d.get("user_id")
             gid = gid or d.get("groupId") or d.get("group_id")
-            rid = rid or d.get("roomId")  or d.get("room_id")
+            rid = rid or d.get("roomId") or d.get("room_id")
     except Exception:
         pass
     if gid: return f"group:{gid}"
@@ -247,8 +256,10 @@ def build_submenu(kind: str) -> FlexMessage:
     rows, row = [], []
     for _, action in items:
         row.append(FlexButton(action=action, style="primary"))
-        if len(row)==2: rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row)); row=[]
-    if row: rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row))
+        if len(row)==2:
+            rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row)); row=[]
+    if row:
+        rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row))
     bubble = FlexBubble(
         header=FlexBox(layout="vertical", contents=[FlexText(text=title, weight="bold", size="lg")]),
         body=FlexBox(layout="vertical", spacing="md", contents=rows or [FlexText(text="（尚無項目）")]),
@@ -256,9 +267,11 @@ def build_submenu(kind: str) -> FlexMessage:
     return FlexMessage(alt_text=title, contents=bubble)
 
 async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
-    if not text: text = "（無內容）"
+    if not text:
+        text = "（無內容）"
     messages = [TextMessage(text=text, quick_reply=build_quick_reply())]
-    if extras: messages.extend(extras)
+    if extras:
+        messages.extend(extras)
     if CLOUDINARY_URL:
         try:
             audio_bytes = await text_to_speech_async(text)
@@ -313,7 +326,8 @@ async def analyze_sentiment(text: str) -> str:
         return "neutral"
 
 async def translate_text(text: str, target_lang_display: str) -> str:
-    target = LANGUAGE_MAP.get(target_lang_display.lower(), target_lang_display)
+    """只輸出譯文（嚴格）"""
+    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
     sys = "You are a precise translation engine. Output ONLY the translated text with no extra words."
     clean = re.sub(r"[\u200B-\u200D\uFEFF]", "", text).strip()
     usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{clean}"}}'
@@ -321,8 +335,10 @@ async def translate_text(text: str, target_lang_display: str) -> str:
 
 def set_user_persona(chat_id: str, key: str):
     key_mapped = PERSONA_ALIAS.get(key, key)
-    if key_mapped == "random": key_mapped = random.choice(list(PERSONAS.keys()))
-    if key_mapped not in PERSONAS: key_mapped = "sweet"
+    if key_mapped == "random":
+        key_mapped = random.choice(list(PERSONAS.keys()))
+    if key_mapped not in PERSONAS:
+        key_mapped = "sweet"
     user_persona[chat_id] = key_mapped
     return key_mapped
 
@@ -350,35 +366,46 @@ def get_bot_gold_quote() -> dict:
     r = requests.get(BOT_GOLD_URL, headers=DEFAULT_HEADERS, timeout=10); r.raise_for_status()
     return parse_bot_gold_text(r.text)
 
-# ====== 事件處理 ======
-# [FIX] 移除 @handler.add
+# ====== 事件處理（async） ======
+@handler.add(MessageEvent, message=TextMessageContent)
 async def handle_text_message(event: MessageEvent):
     chat_id   = get_chat_id(event)
     msg_raw   = (event.message.text or "").strip()
     reply_tok = event.reply_token
-    if not msg_raw: return
+    if not msg_raw:
+        return
 
+    # 取得 bot 名稱（支援 @提及）
     try:
         bot_info: BotInfoResponse = await line_bot_api.get_bot_info()
         bot_name = bot_info.display_name
     except Exception:
         bot_name = "AI 助手"
 
-    if chat_id not in auto_reply_status: auto_reply_status[chat_id] = True
-    is_group_or_room = getattr(event.source, "type", "") in ("group","room")
+    if chat_id not in auto_reply_status:
+        auto_reply_status[chat_id] = True
+    stype = getattr(event.source, "type", None)
+    try:
+        if not stype and hasattr(event.source, "to_dict"):
+            stype = (event.source.to_dict() or {}).get("type")
+    except Exception:
+        pass
+    is_group_or_room = stype in ("group","room")
     if is_group_or_room and not auto_reply_status.get(chat_id, True) and not msg_raw.startswith(f"@{bot_name}"):
         return
 
     msg = msg_raw
     if msg_raw.startswith(f"@{bot_name}"):
         msg = re.sub(f'^@{re.escape(bot_name)}\\s*','',msg_raw).strip()
-    if not msg: return
+    if not msg:
+        return
 
+    # --- 1) 指令：翻譯模式開/關 ---
     m = TRANSLATE_CMD.match(msg)
     if m:
         lang_token = m.group(1)
-        rev = {"english":"英文","japanese":"日文","korean":"韓文","vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
-        lang_display = rev.get(lang_token.lower(), lang_token)
+        rev = {"English":"英文","Japanese":"日文","Korean":"韓文","Vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
+        lang_display = rev.get(lang_token, lang_token)
         _tstate_set(chat_id, lang_display)
         await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。")
         return
@@ -393,6 +420,7 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
         return
 
+    # --- 2) 一次性行內翻譯（stateless）---
     im = INLINE_TRANSLATE.match(msg)
     if im:
         lang_key, text_to_translate = im.group(1).lower(), im.group(2)
@@ -405,6 +433,7 @@ async def handle_text_message(event: MessageEvent):
         await reply_text_with_tts_and_extras(reply_tok, out)
         return
 
+    # --- 3) 翻譯模式最高優先 ---
     current_lang = _tstate_get(chat_id)
     if current_lang:
         try:
@@ -415,6 +444,7 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_tok, "抱歉，翻譯目前不可用。")
         return
 
+    # --- 4) 其他路由 ---
     low = msg.lower()
     if low in ("menu","選單","主選單"):
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=[build_main_menu()]))
@@ -428,10 +458,11 @@ async def handle_text_message(event: MessageEvent):
             txt = (f"**金價（台灣銀行）**\n- 掛牌時間：{ts}\n- 賣出(1g)：{sell:,.0f} 元\n- 買進(1g)：{buy:,.0f} 元\n"
                    f"- 價差：{spread:,.0f} 元\n來源：{BOT_GOLD_URL}")
             await reply_text_with_tts_and_extras(reply_tok, txt)
-        except Exception as e:
+        except Exception:
             await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價。")
         return
 
+    # --- 5) 一般聊天（人設） ---
     try:
         history = conversation_history.get(chat_id, [])
         sentiment = await analyze_sentiment(msg)
@@ -445,12 +476,12 @@ async def handle_text_message(event: MessageEvent):
         logger.error(f"聊天回覆失敗: {e}", exc_info=True)
         await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
 
-# [FIX] 移除 @handler.add
+@handler.add(MessageEvent, message=AudioMessageContent)
 async def handle_audio_message(event: MessageEvent):
     reply_tok = event.reply_token
     await reply_text_with_tts_and_extras(reply_tok, "（語音處理沿用原實作；與翻譯功能無關）")
 
-# [FIX] 移除 @handler.add
+@handler.add(PostbackEvent)
 async def handle_postback(event: PostbackEvent):
     data = event.postback.data or ""
     if data.startswith("menu:"):
@@ -458,17 +489,6 @@ async def handle_postback(event: PostbackEvent):
         await line_bot_api.reply_message(
             ReplyMessageRequest(reply_token=event.reply_token, messages=[build_submenu(kind)])
         )
-
-# [NEW] 非同步事件分派器
-async def handle_events(events):
-    for event in events:
-        if isinstance(event, MessageEvent):
-            if isinstance(event.message, TextMessageContent):
-                await handle_text_message(event)
-            elif isinstance(event.message, AudioMessageContent):
-                await handle_audio_message(event)
-        elif isinstance(event, PostbackEvent):
-            await handle_postback(event)
 
 # ====== FastAPI ======
 @asynccontextmanager
@@ -491,14 +511,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.2")
 router = APIRouter()
 
-# [FIX] 重構 callback 函式
 @router.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
-        events = parser.parse(body.decode("utf-8"), signature)
-        await handle_events(events)
+        # [FIX] AsyncWebhookHandler：handle 可 await
+        await handler.handle(body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
