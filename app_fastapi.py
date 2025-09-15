@@ -244,6 +244,66 @@ def build_main_menu() -> FlexMessage:
     return FlexMessage(alt_text="主選單", contents=bubble)
 
 def build_submenu(kind: str) -> FlexMessage:
+    """
+    子選單（Flex）：
+    - finance：常用金融查詢
+    - lottery：彩券常用
+    - persona：AI 人設（← 你現在缺這段，所以會顯示「無效選單」）
+    - translate：翻譯工具
+    """
+    menus = {
+        "finance": ("💹 金融查詢", [
+            ("台股大盤", MessageAction(label="台股大盤", text="台股大盤")),
+            ("美股大盤", MessageAction(label="美股大盤", text="美股大盤")),
+            ("黃金價格", MessageAction(label="黃金價格", text="金價")),
+            ("日圓匯率", MessageAction(label="日圓匯率", text="JPY")),
+            ("查 2330 台積電", MessageAction(label="查 2330 台積電", text="2330")),
+            ("查 NVDA 輝達", MessageAction(label="查 NVDA 輝達", text="NVDA")),
+        ]),
+        "lottery": ("🎰 彩票分析", [
+            ("大樂透", MessageAction(label="大樂透", text="大樂透")),
+            ("威力彩", MessageAction(label="威力彩", text="威力彩")),
+            ("今彩539", MessageAction(label="今彩539", text="539")),
+        ]),
+        "persona": ("💖 AI 人設", [
+            ("甜美女友", MessageAction(label="甜美女友", text="甜")),
+            ("傲嬌女友", MessageAction(label="傲嬌女友", text="鹹")),
+            ("萌系女友", MessageAction(label="萌系女友", text="萌")),
+            ("酷系御姐", MessageAction(label="酷系御姐", text="酷")),
+            ("隨機切換", MessageAction(label="隨機切換", text="random")),
+        ]),
+        "translate": ("🌐 翻譯工具", [
+            ("翻成英文", MessageAction(label="翻成英文", text="翻譯->英文")),
+            ("翻成日文", MessageAction(label="翻成日文", text="翻譯->日文")),
+            ("翻成繁中", MessageAction(label="翻成繁中", text="翻譯->繁體中文")),
+            ("結束翻譯模式", MessageAction(label="結束翻譯模式", text="翻譯->結束")),
+        ]),
+    }
+
+    title, items = menus.get(kind, ("無效選單", []))
+
+    if not items:
+        bubble = FlexBubble(
+            header=FlexBox(layout="vertical", contents=[FlexText(text=title, weight="bold", size="lg")]),
+            body=FlexBox(layout="vertical", spacing="md", contents=[FlexText(text="（尚無項目）")]),
+        )
+        return FlexMessage(alt_text=title, contents=bubble)
+
+    # 將每兩顆按鈕排成一列
+    rows, row = [], []
+    for _, action in items:
+        row.append(FlexButton(action=action, style="primary"))
+        if len(row) == 2:
+            rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row))
+            row = []
+    if row:
+        rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row))
+
+    bubble = FlexBubble(
+        header=FlexBox(layout="vertical", contents=[FlexText(text=title, weight="bold", size="lg")]),
+        body=FlexBox(layout="vertical", spacing="md", contents=rows),
+    )
+    return FlexMessage(alt_text=title, contents=bubble)
     menus = {
         "translate": ("🌐 翻譯工具", [
             ("翻成英文", MessageAction(label="翻成英文", text="翻譯->英文")),
