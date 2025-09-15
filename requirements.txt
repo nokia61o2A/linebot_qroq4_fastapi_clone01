@@ -24,8 +24,5 @@ gTTS>=2.5.3
 matplotlib>=3.8.0
 mplfinance>=0.12.10b0
 
-# --- 環境變數管理（可選） ---
+# --- 環境變數管理 ---
 python-dotenv>=1.0.1
-
-# --- 彩票功能（若為 PyPI 套件） ---
-taiwanlottery  # 註釋掉，因不確定是否為 PyPI 套件；若為本地模組，請移除並確保檔案存在

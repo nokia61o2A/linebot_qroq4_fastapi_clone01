@@ -5,6 +5,7 @@ import re
 import io
 import random
 import logging
+import pkg_resources
 from typing import Dict, List, Tuple, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -27,7 +28,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
     AudioMessageContent,
     PostbackEvent,
-    WebhookHandler,  # 已修正：使用 WebhookHandler 替代 AsyncWebhookHandler
+    WebhookHandler,
 )
 from linebot.v3.messaging import (
     Configuration,
@@ -80,6 +81,15 @@ except Exception:
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 
+# --- 版本檢查 ---
+logger.info("已安裝套件版本：")
+for pkg in ["line-bot-sdk", "fastapi", "uvicorn", "groq", "openai", "requests", "pandas", "beautifulsoup4", "httpx", "yfinance", "cloudinary", "gTTS", "matplotlib", "mplfinance"]:
+    try:
+        version = pkg_resources.get_distribution(pkg).version
+        logger.info(f"{pkg}: {version}")
+    except pkg_resources.DistributionNotFound:
+        logger.warning(f"{pkg}: 未安裝")
+
 # --- 環境變數 ---
 BASE_URL = os.getenv("BASE_URL")
 CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
@@ -111,7 +121,7 @@ else:
 configuration = Configuration(access_token=CHANNEL_TOKEN)
 async_api_client = ApiClient(configuration=configuration)
 line_bot_api = AsyncMessagingApi(api_client=async_api_client)
-handler = WebhookHandler(CHANNEL_SECRET)  # 已修正：使用 WebhookHandler
+handler = WebhookHandler(CHANNEL_SECRET)
 
 # --- AI 客戶端 ---
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -477,10 +487,10 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
         price, ccy = None, None
         if info and getattr(info, "last_price", None):
             price = info.last_price
-            ccy = getattr(info, "currency", None)  # 修正：確保雙引號完整
+            ccy = getattr(info, "currency", None)
         elif not hist.empty:
             price = float(hist["Close"].iloc[-1])
-            ccy = getattr(info, "currency", None)  # 修正：確保雙引號完整
+            ccy = getattr(info, "currency", None)
         if price:
             snap["now_price"] = f"{price:.2f}"
             snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
