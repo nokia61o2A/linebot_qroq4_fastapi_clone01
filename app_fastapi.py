@@ -30,9 +30,16 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 from linebot.v3.exceptions import InvalidSignatureError
+# 事件/訊息型別還是在 webhooks（複數）
 from linebot.v3.webhooks import (
-    MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent, WebhookHandler,
+    MessageEvent,
+    TextMessageContent,
+    AudioMessageContent,
+    PostbackEvent,
 )
+
+# WebhookHandler 在 webhook（單數）模組
+from linebot.v3.webhook import WebhookHandler
 from linebot.v3.messaging import (
     Configuration, ApiClient, AsyncMessagingApi, ReplyMessageRequest,
     TextMessage, AudioMessage, ImageMessage, FlexMessage, FlexBubble, FlexBox,
@@ -162,33 +169,66 @@ INLINE_TRANSLATE = re.compile(
 # ====== 小工具 ======
 def _now() -> datetime: return datetime.utcnow()
 
+# ------------------- 修正版：chat_id 取用（完整覆蓋此函式） -------------------
 def get_chat_id(event: MessageEvent) -> str:
-    """強韌來源 ID 取得（v2/v3 兼容）"""
+    """
+    取得可穩定識別對話的 chat_id。
+    - 先讀 attribute：userId/user_id、groupId/group_id、roomId/room_id
+    - 若物件支援 to_dict()，再從 dict 兜底一次（有些 SDK 版本屬性讀不到，但 dict 有）
+    - 最後保底：用 type + source 的字串雜湊，避免回傳 'user:unknown'
+    為了讓翻譯模式在「下一則訊息」讀得到，我們需要兩次訊息得到**同一把 key**。
+    """
     source = event.source
-    stype = getattr(source, "type", "") or getattr(source, "_type", "")
-    if stype == "group":
-        return getattr(source,"group_id",None) or getattr(source,"groupId",None) or "group:unknown"
-    if stype == "room":
-        return getattr(source,"room_id",None)  or getattr(source,"roomId",None)  or "room:unknown"
-    return getattr(source,"user_id",None)      or getattr(source,"userId",None)  or "user:unknown"
 
+    # 1) 先嘗試直讀屬性（不同版本/環境屬性名可能不同）
+    stype = getattr(source, "type", None) or getattr(source, "_type", None)
+    uid = getattr(source, "userId", None) or getattr(source, "user_id", None)
+    gid = getattr(source, "groupId", None) or getattr(source, "group_id", None)
+    rid = getattr(source, "roomId", None)  or getattr(source, "room_id", None)
+
+    # 2) 如果有 to_dict()，再兜底一次（很多 v3 型別都支援）
+    try:
+        if hasattr(source, "to_dict"):
+            d = source.to_dict() or {}
+            stype = stype or d.get("type")
+            uid = uid or d.get("userId")  or d.get("user_id")
+            gid = gid or d.get("groupId") or d.get("group_id")
+            rid = rid or d.get("roomId")  or d.get("room_id")
+    except Exception:
+        pass
+
+    # 3) 依群組/聊天室/私訊優先序回傳
+    if gid: return f"group:{gid}"
+    if rid: return f"room:{rid}"
+    if uid: return f"user:{uid}"
+
+    # 4) 最後保底，避免 'user:unknown' 造成下次 key 不同
+    #    使用 source 的字串表現做 hash（不含機敏資訊）
+    key_fallback = f"{stype or 'unknown'}:{abs(hash(str(source)))%10_000_000}"
+    return key_fallback
+# ------------------- /修正版：chat_id 取用 -------------------
+
+# 這三個函式原本就有，但這裡加入更明確的 log（可覆蓋）
 def _tstate_set(chat_id: str, lang_display: str):
     translation_states[chat_id] = lang_display
     translation_states_ttl[chat_id] = _now() + timedelta(seconds=TRANSLATE_TTL_SECONDS)
-    logger.info(f"[TranslateMode] ON {chat_id} -> {lang_display} (ttl={TRANSLATE_TTL_SECONDS}s)")
+    logger.info(f"[TranslateMode] SET chat_id={chat_id} -> {lang_display} (ttl={TRANSLATE_TTL_SECONDS}s)")
 
 def _tstate_get(chat_id: str) -> Optional[str]:
     exp = translation_states_ttl.get(chat_id)
     if exp and _now() > exp:
         translation_states.pop(chat_id, None)
         translation_states_ttl.pop(chat_id, None)
+        logger.info(f"[TranslateMode] EXPIRE chat_id={chat_id}")
         return None
-    return translation_states.get(chat_id)
+    val = translation_states.get(chat_id)
+    logger.info(f"[TranslateMode] GET chat_id={chat_id} -> {val}")
+    return val
 
 def _tstate_clear(chat_id: str):
     translation_states.pop(chat_id, None)
     translation_states_ttl.pop(chat_id, None)
-    logger.info(f"[TranslateMode] OFF {chat_id}")
+    logger.info(f"[TranslateMode] CLEAR chat_id={chat_id}")
 
 def build_quick_reply() -> QuickReply:
     return QuickReply(items=[
