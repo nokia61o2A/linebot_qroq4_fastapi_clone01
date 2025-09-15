@@ -24,3 +24,5 @@ taiwanlottery
 yfinance
 cloudinary  # <-- 新增這一行
 gTTS
+matplotlib>=3.8
+mplfinance>=0.12.10b0
