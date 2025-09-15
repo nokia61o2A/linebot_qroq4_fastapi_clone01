@@ -27,7 +27,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
     AudioMessageContent,
     PostbackEvent,
-    WebhookHandler,  # 修正：使用 WebhookHandler 替代 AsyncWebhookHandler
+    WebhookHandler,  # 已修正：使用 WebhookHandler 替代 AsyncWebhookHandler
 )
 from linebot.v3.messaging import (
     Configuration,
@@ -111,7 +111,7 @@ else:
 configuration = Configuration(access_token=CHANNEL_TOKEN)
 async_api_client = ApiClient(configuration=configuration)
 line_bot_api = AsyncMessagingApi(api_client=async_api_client)
-handler = WebhookHandler(CHANNEL_SECRET)  # 修正：使用 WebhookHandler
+handler = WebhookHandler(CHANNEL_SECRET)  # 已修正：使用 WebhookHandler
 
 # --- AI 客戶端 ---
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -474,14 +474,13 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
         snap["name"] = name or yf_symbol
 
         # 價格 & 幣別
-                # 價格 & 幣別
         price, ccy = None, None
         if info and getattr(info, "last_price", None):
             price = info.last_price
-            ccy = getattr(info, "currency", None)
+            ccy = getattr(info, "currency", None)  # 修正：確保雙引號完整
         elif not hist.empty:
             price = float(hist["Close"].iloc[-1])
-            ccy = getattr(info, "currency", None)
+            ccy = getattr(info, "currency", None)  # 修正：確保雙引號完整
         if price:
             snap["now_price"] = f"{price:.2f}"
             snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
