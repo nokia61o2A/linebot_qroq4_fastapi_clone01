@@ -196,19 +196,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.3.0")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.3.1")
 router = APIRouter()
 
 
 # ========== 4) Helpers ==========
 def get_chat_id(event: MessageEvent) -> str:
-    """以 source.type 分辨 chat id（不依賴型別 class）"""
+    """
+    兼容 v2/v3 屬性命名：userId / user_id、groupId / group_id、roomId / room_id
+    避免翻譯模式的狀態用不同 key 造成「看起來開了卻沒翻」的情況。
+    """
     source = event.source
-    if getattr(source, "type", "") == "group":
-        return source.group_id
-    if getattr(source, "type", "") == "room":
-        return source.room_id
-    return source.user_id
+    stype = getattr(source, "type", "")
+    if stype == "group":
+        return getattr(source, "groupId", None) or getattr(source, "group_id", None) or "group:unknown"
+    if stype == "room":
+        return getattr(source, "roomId", None) or getattr(source, "room_id", None) or "room:unknown"
+    # user
+    return getattr(source, "userId", None) or getattr(source, "user_id", None) or "user:unknown"
 
 def build_quick_reply() -> QuickReply:
     return QuickReply(items=[
@@ -726,8 +731,12 @@ async def analyze_sentiment(text: str) -> str:
         return "neutral"
 
 async def translate_text(text: str, target_lang_display: str) -> str:
+    """
+    嚴格輸出翻譯文本，不加多餘說明。
+    target_lang_display 可為「英文/日文/繁體中文...」，會映射到英文語名給模型。
+    """
     target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
-    sys = "You are a precise translation engine. Output ONLY the translated text."
+    sys = "You are a precise translation engine. Output ONLY the translated text with no extra words."
     usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
     return await groq_chat_async([{"role":"system","content":sys},{"role":"user","content":usr}], 800, 0.2)
 
@@ -811,7 +820,6 @@ def _transcribe_with_groq_sync(audio_bytes: bytes, filename: str = "audio.m4a") 
     if not sync_groq_client: return None
     try:
         f = io.BytesIO(audio_bytes); f.name = filename
-        # groq 套件若不支援此方法將拋例外，屆時落回 None
         resp = sync_groq_client.audio.transcriptions.create(file=f, model="whisper-large-v3")
         return (resp.text or "").strip() or None
     except Exception as e:
@@ -863,9 +871,6 @@ async def handle_text_message(event: MessageEvent):
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[build_main_menu()]))
         return
 
-    # 子選單（Postback）
-    # 由 handle_postback 處理
-
     # 彩票
     if msg in ("大樂透", "威力彩", "539"):
         try:
@@ -896,6 +901,27 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_token, "抱歉，日圓匯率分析服務暫時無法使用。")
         return
 
+    # 翻譯模式切換（開/關）
+    if low.startswith("翻譯->"):
+        lang = msg.split("->", 1)[1].strip()
+        if lang == "結束":
+            translation_states.pop(chat_id, None)
+            await reply_text_with_tts_and_extras(reply_token, "✅ 已結束翻譯模式")
+        else:
+            translation_states[chat_id] = lang
+            await reply_text_with_tts_and_extras(reply_token, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
+        return
+
+    # ✅ 只要翻譯模式開著，就優先翻譯（避免被其它分支攔截）
+    if chat_id in translation_states:
+        try:
+            out = await translate_text(msg, translation_states[chat_id])
+            await reply_text_with_tts_and_extras(reply_token, out)
+        except Exception as e:
+            logger.error(f"翻譯失敗: {e}", exc_info=True)
+            await reply_text_with_tts_and_extras(reply_token, "抱歉，翻譯目前不可用。")
+        return
+
     # 股票/指數
     if re.fullmatch(r"\^?[A-Z0-9.]{2,10}", msg) or msg.isdigit() or msg in ("台股大盤", "美股大盤", "大盤", "美股"):
         try:
@@ -921,33 +947,12 @@ async def handle_text_message(event: MessageEvent):
         await reply_text_with_tts_and_extras(reply_token, text)
         return
 
-    # 翻譯模式切換
-    if low.startswith("翻譯->"):
-        lang = msg.split("->", 1)[1].strip()
-        if lang == "結束":
-            translation_states.pop(chat_id, None)
-            await reply_text_with_tts_and_extras(reply_token, "✅ 已結束翻譯模式")
-        else:
-            translation_states[chat_id] = lang
-            await reply_text_with_tts_and_extras(reply_token, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
-        return
-
-    # 人設切換
+    # 人設切換（注意：因為翻譯模式分支已提前處理，不會誤觸）
     if msg in PERSONA_ALIAS or low in PERSONA_ALIAS:
         key = set_user_persona(chat_id, PERSONA_ALIAS.get(msg, PERSONA_ALIAS.get(low, "sweet")))
         p = PERSONAS[user_persona[chat_id]]
         txt = f"💖 已切換人設：{p['title']}\n\n{p['greetings']}"
         await reply_text_with_tts_and_extras(reply_token, txt)
-        return
-
-    # 翻譯內容（若開啟）
-    if chat_id in translation_states:
-        try:
-            out = await translate_text(msg, translation_states[chat_id])
-            await reply_text_with_tts_and_extras(reply_token, out)
-        except Exception as e:
-            logger.error(f"翻譯失敗: {e}", exc_info=True)
-            await reply_text_with_tts_and_extras(reply_token, "抱歉，翻譯目前不可用。")
         return
 
     # 一般聊天（人設 + 情緒）
