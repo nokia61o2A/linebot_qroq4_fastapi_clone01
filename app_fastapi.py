@@ -27,7 +27,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
     AudioMessageContent,
     PostbackEvent,
-    WebhookParser,  # 改用 Parser（v3 正確做法）
+    WebhookParser,  # 使用 Parser（v3 正確做法）
 )
 from linebot.v3.messaging import (
     Configuration,
@@ -112,7 +112,7 @@ configuration = Configuration(access_token=CHANNEL_TOKEN)
 async_api_client = ApiClient(configuration=configuration)
 line_bot_api = AsyncMessagingApi(api_client=async_api_client)
 
-# v3 解析用 Parser（取代 AsyncWebhookHandler/WebhookHandler）
+# v3 解析用 Parser（取代 Handler）
 parser = WebhookParser(CHANNEL_SECRET)
 
 # --- AI 客戶端 ---
@@ -198,7 +198,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.3.2")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.0")
 router = APIRouter()
 
 
@@ -206,7 +206,6 @@ router = APIRouter()
 def get_chat_id(event: MessageEvent) -> str:
     """
     兼容 v2/v3 屬性命名：userId / user_id、groupId / group_id、roomId / room_id
-    避免翻譯模式的狀態用不同 key 造成「看起來開了卻沒翻」的情況。
     """
     source = event.source
     stype = getattr(source, "type", "")
@@ -216,6 +215,13 @@ def get_chat_id(event: MessageEvent) -> str:
         return getattr(source, "roomId", None) or getattr(source, "room_id", None) or "room:unknown"
     # user
     return getattr(source, "userId", None) or getattr(source, "user_id", None) or "user:unknown"
+
+async def get_bot_display_name() -> str:
+    try:
+        bot_info: BotInfoResponse = await line_bot_api.get_bot_info()
+        return bot_info.display_name
+    except Exception:
+        return "AI 助手"
 
 def build_quick_reply() -> QuickReply:
     return QuickReply(items=[
@@ -343,16 +349,25 @@ def get_analysis_reply(messages: List[dict]) -> str:
     except Exception as e:
         logger.warning(f"Groq 主模型失敗：{e}")
         try:
-            resp = sync_groq_client.chat.completions.create(
+            resp = sync_groq_client.chat_completions.create(  # 部分版本別名
                 model=GROQ_MODEL_FALLBACK,
                 messages=messages,
                 temperature=0.9,
                 max_tokens=1500,
             )
             return resp.choices[0].message.content
-        except Exception as ee:
-            logger.error(f"所有 AI API 都失敗：{ee}")
-            return "抱歉，AI 分析師目前連線不穩定，請稍後再試。"
+        except Exception:
+            try:
+                resp = sync_groq_client.chat.completions.create(
+                    model=GROQ_MODEL_FALLBACK,
+                    messages=messages,
+                    temperature=0.9,
+                    max_tokens=1500,
+                )
+                return resp.choices[0].message.content
+            except Exception as ee:
+                logger.error(f"所有 AI API 都失敗：{ee}")
+                return "抱歉，AI 分析師目前連線不穩定，請稍後再試。"
 
 async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
     if not async_groq_client:
@@ -515,7 +530,7 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
 
     return snap
 
-# 圖片上傳 + 圖表產生（可選）
+# 圖片上傳 + 因應圖表產生
 def _upload_image_sync(image_bytes: bytes) -> Optional[dict]:
     if not CLOUDINARY_URL:
         return None
@@ -834,17 +849,8 @@ async def speech_to_text_async(audio_bytes: bytes) -> Optional[str]:
     return await run_in_threadpool(_transcribe_with_groq_sync, audio_bytes)
 
 
-# ========== 10) LINE Event Handlers（函式化，供 Parser 呼叫） ==========
-async def on_text_message(event: MessageEvent):
-    chat_id, msg_raw, reply_token = get_chat_id(event), event.message.text.strip(), event.reply_token
-
-    # 取得 bot 顯示名稱（供 @bot 判斷）
-    try:
-        bot_info: BotInfoResponse = await line_bot_api.get_bot_info()
-        bot_name = bot_info.display_name
-    except Exception:
-        bot_name = "AI 助手"
-
+# ========== 10) 共用路由：把文字（含語音轉文字）走同一套邏輯 ==========
+async def route_user_message(chat_id: str, msg_raw: str, reply_token: str, event: MessageEvent, bot_name: str):
     if not msg_raw:
         return
 
@@ -892,7 +898,7 @@ async def on_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_token, "抱歉，金價分析服務暫時無法使用。")
         return
 
-    # 匯率（簡化：僅 JPY；你可自行擴充 USD/EUR）
+    # 匯率
     if low == "jpy":
         try:
             out = await run_in_threadpool(get_currency_analysis, "JPY")
@@ -948,7 +954,7 @@ async def on_text_message(event: MessageEvent):
         await reply_text_with_tts_and_extras(reply_token, text)
         return
 
-    # 人設切換（注意：因為翻譯模式分支已提前處理，不會誤觸）
+    # 人設切換
     if msg in PERSONA_ALIAS or low in PERSONA_ALIAS:
         key = set_user_persona(chat_id, PERSONA_ALIAS.get(msg, PERSONA_ALIAS.get(low, "sweet")))
         p = PERSONAS[user_persona[chat_id]]
@@ -971,8 +977,23 @@ async def on_text_message(event: MessageEvent):
         await reply_text_with_tts_and_extras(reply_token, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
 
 
+# ========== 11) LINE Event Handlers（Parser 解析後呼叫） ==========
+async def on_text_message(event: MessageEvent):
+    bot_name = await get_bot_display_name()
+    await route_user_message(
+        chat_id=get_chat_id(event),
+        msg_raw=event.message.text.strip(),
+        reply_token=event.reply_token,
+        event=event,
+        bot_name=bot_name,
+    )
+
 async def on_audio_message(event: MessageEvent):
+    """
+    先做 STT -> 把轉出的文字走與文字訊息相同的路由（不再另外回「我聽到了」）。
+    """
     reply_token = event.reply_token
+    bot_name = await get_bot_display_name()
     try:
         content_stream = await line_bot_api.get_message_content(event.message.id)
         audio_in = await content_stream.read()
@@ -981,20 +1002,16 @@ async def on_audio_message(event: MessageEvent):
         if not text:
             raise RuntimeError("語音轉文字失敗")
 
-        sentiment = await analyze_sentiment(text)
-        sys_prompt = build_persona_prompt(get_chat_id(event), sentiment)
-        final_reply_text = await groq_chat_async(
-            [{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}]
-        )
-
-        await reply_text_with_tts_and_extras(
-            reply_token,
-            f"🎧 我聽到了：\n{text}\n\n—\n{final_reply_text}"
+        await route_user_message(
+            chat_id=get_chat_id(event),
+            msg_raw=text.strip(),
+            reply_token=reply_token,
+            event=event,
+            bot_name=bot_name,
         )
     except Exception as e:
         logger.error(f"處理語音訊息失敗: {e}", exc_info=True)
         await reply_text_with_tts_and_extras(reply_token, "抱歉，我沒聽清楚，可以再說一次嗎？")
-
 
 async def on_postback(event: PostbackEvent):
     data = event.postback.data or ""
@@ -1005,7 +1022,7 @@ async def on_postback(event: PostbackEvent):
         )
 
 
-# ========== 11) FastAPI Routes ==========
+# ========== 12) FastAPI Routes ==========
 @router.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
@@ -1020,7 +1037,6 @@ async def callback(request: Request):
         logger.error(f"Webhook 解析失敗：{e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Parse error")
 
-    # 逐一處理事件（v3 沒有 handler.add，因此自行分派）
     for event in events:
         try:
             if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
@@ -1030,7 +1046,6 @@ async def callback(request: Request):
             elif isinstance(event, PostbackEvent):
                 await on_postback(event)
             else:
-                # 其他事件暫不處理
                 pass
         except Exception as e:
             logger.error(f"事件處理失敗：{e}", exc_info=True)
@@ -1048,7 +1063,7 @@ async def healthz():
 app.include_router(router)
 
 
-# ========== 12) Local run ==========
+# ========== 13) Local run ==========
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
