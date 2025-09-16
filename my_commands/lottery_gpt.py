@@ -1,3 +1,4 @@
+# lottery_gpt.py
 import os
 from groq import Groq
 from TaiwanLottery import TaiwanLotteryCrawler
