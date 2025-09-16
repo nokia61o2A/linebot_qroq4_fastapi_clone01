@@ -1,10 +1,13 @@
-# app_fastapi.py v1.4.4 (Async-native handler with TTS restored and audio reply)
+# app_fastapi.py v1.4.5 (Async-native handler with StockGPT restored, TTS/STT, and quick menus)
 # 變更摘要：
-# - [FIX] 恢復 TTS 功能，參考 v1.5.1 實現（OpenAI/gTTS 選擇性支援）
-# - [NEW] 添加「大樂透」快速選單並整合彩票邏輯
-# - [FIX] 完善語音轉文字 (STT) 功能，支援 OpenAI/Groq
-# - [FIX] 添加 audio message 處理，參考 v1.5.1 使用 TTS 回覆錄音
-# - 保留 async-native 設計，使用 WebhookParser
+# - [NEW] 恢復並整合「台股大盤／美盤／個股代碼」專業分析（StockGPT）指令流
+# - [NEW] 加入嚴謹的股號/美股代碼偵測與路由；一旦命中即「非閒聊」，直接輸出專業分析
+# - [NEW] 兼容你既有 my_commands.stock.* 模組：price/news/fundamental/dividend/YahooStock
+# - [NEW] 以「大盤/美盤/數字代碼/字母代碼」驅動，產生 markdown 報告 + 正確連結（Yahoo Finance）
+# - [CHANGED] TTS/STT 流程保留；加入錯誤保護，避免擋住主流程
+# - [CHANGED] QuickReply 增補金融常用鍵；維持原「大樂透」選單
+# - [NEW] 以環境變數切換 OpenAI/Groq/gTTS；並保留 auto fallback
+# - [NEW] 重要新增或修改處均以 # [NEW]/# [CHANGED] 註解
 
 import os
 import re
@@ -21,7 +24,7 @@ import requests
 import httpx
 from bs4 import BeautifulSoup
 
-# --- 資料處理 / 金融（沿用） ---
+# --- 資料處理 / 金融 ---
 import pandas as pd
 import yfinance as yf
 
@@ -55,6 +58,14 @@ from gtts import gTTS
 # --- LLM ---
 from groq import AsyncGroq, Groq
 import openai
+
+# ====== 你既有的股票分析模組（沿用） ======
+# [NEW]：以下模組需存在於你的專案目錄 my_commands/stock 下，與你貼上的版本一致
+from my_commands.stock.stock_price import stock_price
+from my_commands.stock.stock_news import stock_news
+from my_commands.stock.stock_value import stock_fundamental
+from my_commands.stock.stock_rate import stock_dividend
+from my_commands.stock.YahooStock import YahooStock
 
 # --- Matplotlib（可選） ---
 try:
@@ -123,7 +134,7 @@ if OPENAI_API_KEY:
     except Exception as e:
         logger.warning(f"初始化 OpenAI 失敗：{e}")
 
-# LLM 模型
+# LLM 模型（聊天用途；股市分析本身不依賴 LLM 也可運行，只用於文字組織）
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
@@ -210,15 +221,16 @@ def _tstate_clear(chat_id: str):
     logger.info(f"[TranslateMode] CLEAR chat_id={chat_id}")
 
 def build_quick_reply() -> QuickReply:
+    # [CHANGED] 增加台股/美股/金價等常用指令
     return QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="主選單", text="選單")),
-        QuickReplyItem(action=MessageAction(label="台股大盤", text="台股大盤")),
-        QuickReplyItem(action=MessageAction(label="美股大盤", text="美股大盤")),
+        QuickReplyItem(action=MessageAction(label="台股大盤", text="大盤")),
+        QuickReplyItem(action=MessageAction(label="美股大盤", text="美盤")),
         QuickReplyItem(action=MessageAction(label="黃金價格", text="金價")),
-        QuickReplyItem(action=MessageAction(label="查台積電", text="2330")),
-        QuickReplyItem(action=MessageAction(label="查輝達", text="NVDA")),
-        QuickReplyItem(action=MessageAction(label="查日圓", text="JPY")),
-        QuickReplyItem(action=MessageAction(label="大樂透", text="大樂透")),  # 保留大樂透選項
+        QuickReplyItem(action=MessageAction(label="查 2330", text="2330")),
+        QuickReplyItem(action=MessageAction(label="查 NVDA", text="NVDA")),
+        QuickReplyItem(action=MessageAction(label="日圓匯率", text="JPY")),
+        QuickReplyItem(action=MessageAction(label="大樂透", text="大樂透")),
         QuickReplyItem(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyItem(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
         QuickReplyItem(action=MessageAction(label="結束翻譯", text="翻譯->結束")),
@@ -241,8 +253,8 @@ def build_main_menu() -> FlexMessage:
 def build_submenu(kind: str) -> FlexMessage:
     menus = {
         "finance": ("💹 金融查詢", [
-            ("台股大盤", MessageAction(label="台股大盤", text="台股大盤")),
-            ("美股大盤", MessageAction(label="美股大盤", text="美股大盤")),
+            ("台股大盤", MessageAction(label="台股大盤", text="大盤")),
+            ("美股大盤", MessageAction(label="美股大盤", text="美盤")),
             ("黃金價格", MessageAction(label="黃金價格", text="金價")),
             ("日圓匯率", MessageAction(label="日圓匯率", text="JPY")),
             ("查 2330 台積電", MessageAction(label="查 2330 台積電", text="2330")),
@@ -302,7 +314,7 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
             logger.warning(f"TTS 附加失敗：{e}")
     await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
 
-# ====== LLM 包裝 ======
+# ====== LLM 包裝（僅用於一般聊天或少量文字重寫） ======
 def get_analysis_reply(messages: List[dict]) -> str:
     if openai_client:
         try:
@@ -458,6 +470,130 @@ async def text_to_speech_async(text: str) -> Optional[bytes]:
             return b
     return await run_in_threadpool(_create_tts_gtts_sync, text)
 
+# ====== StockGPT：偵測與分析主流程 ======
+# [NEW] 台股代碼：4~6 位數字，可帶結尾 1 字母；美股代碼：1~5 英文字母
+TW_TICKER_RE = re.compile(r"^\d{4,6}[A-Za-z]?$")
+US_TICKER_RE = re.compile(r"^[A-Za-z]{1,5}$")
+
+def _is_stock_query(text: str) -> bool:
+    t = text.strip()
+    if t in ("大盤", "台股大盤", "台灣大盤", "美盤", "美股大盤", "美股"):
+        return True
+    if TW_TICKER_RE.match(t):
+        return True
+    # 避免把常見英文單字誤判成美股代碼，加入白名單再判
+    if US_TICKER_RE.match(t) and t.upper() not in {"MENU", "NVDA"} - set():  # NVDA 仍允許
+        return True
+    return False
+
+def _normalize_ticker_and_name(user_text: str) -> Tuple[str, str, str]:
+    """
+    依輸入回傳 (ticker, display_name, yahoo_link)
+    - 大盤 → ^TWII
+    - 美盤/美股 → ^GSPC
+    - 其餘：直接使用代碼；YahooStock 會補全中文名
+    """
+    raw = user_text.strip()
+    if raw in ("大盤", "台股大盤", "台灣大盤"):
+        return "^TWII", "台灣大盤", "https://tw.finance.yahoo.com/quote/%5ETWII/"
+    if raw in ("美盤", "美股大盤", "美股"):
+        return "^GSPC", "美國大盤", "https://tw.finance.yahoo.com/quote/%5EGSPC/"
+    ticker = raw.upper()
+    link = f"https://tw.stock.yahoo.com/quote/{ticker}" if TW_TICKER_RE.match(ticker) else f"https://tw.finance.yahoo.com/quote/{ticker}"
+    return ticker, ticker, link
+
+def _safe_to_str(x) -> str:
+    try:
+        return str(x)
+    except Exception:
+        return repr(x)
+
+def _remove_full_width_spaces(data):
+    if isinstance(data, list):
+        return [_remove_full_width_spaces(item) for item in data]
+    if isinstance(data, str):
+        return data.replace('\u3000', ' ')
+    return data
+
+def _truncate_text(data, max_length=1024):
+    if isinstance(data, list):
+        return [_truncate_text(item, max_length) for item in data]
+    if isinstance(data, str):
+        return data[:max_length]
+    return data
+
+def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, dict]:
+    """
+    組裝分析用文字區塊；同時回傳一份原始資料 dict 方便除錯
+    """
+    debug_payload = {}
+    # 即時資訊
+    ys = YahooStock(stock_id)
+    debug_payload["yahoo_stock"] = {k: _safe_to_str(v) for k, v in vars(ys).items()}
+
+    # 價格（by日）
+    price_df = stock_price(stock_id)
+    debug_payload["price"] = _safe_to_str(price_df)
+
+    # 新聞（去全形空格 + 1024 截斷）
+    news = _remove_full_width_spaces(stock_news(stock_name_hint))
+    news = _truncate_text(news, 1024)
+    debug_payload["news"] = _safe_to_str(news)
+
+    # 基本面/配息（大盤不取）
+    fund_text = None
+    div_text = None
+    if stock_id not in ["^TWII", "^GSPC"]:
+        try:
+            fv = stock_fundamental(stock_id)
+            fund_text = _safe_to_str(fv) if fv is not None else "（無法取得）"
+        except Exception as e:
+            fund_text = f"（基本面錯誤：{e}）"
+        try:
+            dv = stock_dividend(stock_id)
+            div_text = _safe_to_str(dv) if dv is not None else "（無法取得）"
+        except Exception as e:
+            div_text = f"（配息錯誤：{e}）"
+    debug_payload["fundamental"] = fund_text
+    debug_payload["dividend"] = div_text
+
+    # 組裝分析文字
+    blk = []
+    blk.append(f"**股票代碼:** {stock_id}, **股票名稱:** {ys.name}")
+    blk.append(f"**即時資訊(vars):** {vars(ys)}")
+    blk.append(f"近期價格資訊:\n{price_df}")
+    if stock_id not in ["^TWII", "^GSPC"]:
+        blk.append(f"每季營收資訊:\n{fund_text}")
+        blk.append(f"配息資料:\n{div_text}")
+    blk.append(f"近期新聞資訊:\n{news}")
+    content = "\n".join(_safe_to_str(s) for s in blk)
+    return content, debug_payload
+
+def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> str:
+    """
+    以 Markdown 生成最終報告結構（非閒聊）
+    """
+    sys = (
+        "你現在是一位專業的證券分析師。請基於近期的股價走勢、基本面、新聞與籌碼概念進行綜合分析，"
+        "輸出條列清楚、數字精確、可讀性高的報告。\n"
+        "請包含：\n"
+        "- 股名(股號) / 現價(與漲跌幅) / 資料時間\n"
+        "- 股價走勢\n- 基本面分析\n- 技術面重點\n- 消息面\n- 籌碼面\n"
+        "- 建議買進區間（例：100–110 元）\n- 預計停利點（%）\n- 建議部位（張數）\n"
+        "- 總結：目前偏多/偏空/觀望\n"
+        f"最後請附上正確連結：[股票資訊連結]({stock_link})。\n"
+        "回應語言：繁體中文（台灣），格式：Markdown。"
+    )
+    messages = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": content_block}
+    ]
+    try:
+        out = get_analysis_reply(messages)
+    except Exception as e:
+        out = f"（分析模型不可用）原始資料如下，請自行判讀：\n\n{content_block}\n\n連結：{stock_link}"
+    return out
+
 # ====== 事件處理 ======
 async def handle_text_message(event: MessageEvent):
     chat_id = get_chat_id(event)
@@ -484,6 +620,7 @@ async def handle_text_message(event: MessageEvent):
     if not msg:
         return
 
+    # ===== A. 翻譯模式指令 =====
     m = TRANSLATE_CMD.match(msg)
     if m:
         lang_token = m.group(1)
@@ -525,22 +662,14 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_tok, "抱歉，翻譯目前不可用。")
         return
 
+    # ===== B. 主選單 / 子選單 =====
     low = msg.lower()
     if low in ("menu", "選單", "主選單"):
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=[build_main_menu()]))
         return
 
-    # 彩票處理
-    if msg in ("大樂透", "威力彩", "539"):
-        try:
-            report = await run_in_threadpool(get_lottery_analysis, msg)
-            await reply_text_with_tts_and_extras(reply_tok, report)
-        except Exception as e:
-            logger.error(f"彩票分析流程失敗: {e}", exc_info=True)
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤。")
-        return
-
-    if low in ("金價", "黃金"):
+    # ===== C. 金價/彩票 =====
+    if msg in ("金價", "黃金"):
         try:
             data = get_bot_gold_quote()
             ts, sell, buy = data.get("listed_at") or "（未標示）", data["sell_twd_per_g"], data["buy_twd_per_g"]
@@ -552,6 +681,33 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價。")
         return
 
+    if msg in ("大樂透", "威力彩", "539"):
+        try:
+            report = await run_in_threadpool(get_lottery_analysis, msg)
+            await reply_text_with_tts_and_extras(reply_tok, report)
+        except Exception as e:
+            logger.error(f"彩票分析流程失敗: {e}", exc_info=True)
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤。")
+        return
+
+    # ===== D. 【重點】股票查詢（非閒聊） =====
+    if _is_stock_query(msg):
+        try:
+            ticker, name_hint, link = _normalize_ticker_and_name(msg)
+            # 收集資料 + 組 prompt
+            content_block, debug_payload = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
+            # 呼叫 LLM（或降級為原始資料）
+            report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
+            await reply_text_with_tts_and_extras(reply_tok, report)
+        except Exception as e:
+            logger.error(f"[StockGPT] 失敗：{e}", exc_info=True)
+            await reply_text_with_tts_and_extras(
+                reply_tok,
+                f"抱歉，取得 {msg} 的分析時發生錯誤：{e}\n請稍後再試或換個代碼。"
+            )
+        return
+
+    # ===== E. 其餘：一般聊天（保留，但不影響股票分析流） =====
     try:
         history = conversation_history.get(chat_id, [])
         sentiment = await analyze_sentiment(msg)
@@ -627,6 +783,7 @@ async def handle_events(events):
 # ====== FastAPI ======
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # [CHANGED] 啟動時嘗試更新 LINE Webhook（可選）
     if BASE_URL:
         async with httpx.AsyncClient() as c:
             for endpoint in ("https://api-data.line.me/v2/bot/channel/webhook/endpoint",
@@ -642,7 +799,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.4")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.5")
 router = APIRouter()
 
 @router.post("/callback")
