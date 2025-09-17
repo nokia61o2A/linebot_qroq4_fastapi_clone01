@@ -1,4 +1,4 @@
-# app_fastapi.py v1.4.5 (Async-native handler with StockGPT restored, TTS/STT, and quick menus)
+# app_fastapi.py v1.4.6 (Async-native handler with StockGPT restored, TTS/STT, and quick menus)
 # 變更摘要：
 # - [NEW] 恢復並整合「台股大盤／美盤／個股代碼」專業分析（StockGPT）指令流
 # - [NEW] 加入嚴謹的股號/美股代碼偵測與路由；一旦命中即「非閒聊」，直接輸出專業分析
@@ -8,6 +8,7 @@
 # - [CHANGED] QuickReply 增補金融常用鍵；維持原「大樂透」選單
 # - [NEW] 以環境變數切換 OpenAI/Groq/gTTS；並保留 auto fallback
 # - [NEW] 重要新增或修改處均以 # [NEW]/# [CHANGED] 註解
+# - [CHANGED] v1.4.6：所有回覆（含 FlexMessage / AudioMessage）一律附上 Quick Reply（包含「主選單」）
 
 import os
 import re
@@ -248,7 +249,8 @@ def build_main_menu() -> FlexMessage:
         header=FlexBox(layout="vertical", contents=[FlexText(text="AI 助理主選單", weight="bold", size="lg")]),
         body=FlexBox(layout="vertical", spacing="md", contents=buttons),
     )
-    return FlexMessage(alt_text="主選單", contents=bubble)
+    # [CHANGED] v1.4.6：FlexMessage 也加上 Quick Reply（含主選單）
+    return FlexMessage(alt_text="主選單", contents=bubble, quick_reply=build_quick_reply())
 
 def build_submenu(kind: str) -> FlexMessage:
     menus = {
@@ -292,14 +294,25 @@ def build_submenu(kind: str) -> FlexMessage:
         header=FlexBox(layout="vertical", contents=[FlexText(text=title, weight="bold", size="lg")]),
         body=FlexBox(layout="vertical", spacing="md", contents=rows or [FlexText(text="（尚無項目）")]),
     )
-    return FlexMessage(alt_text=title, contents=bubble)
+    # [CHANGED] v1.4.6：Flex 子選單也帶 Quick Reply
+    return FlexMessage(alt_text=title, contents=bubble, quick_reply=build_quick_reply())
 
 async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List] = None):
     if not text:
         text = "（無內容）"
+    # TextMessage 本來就有 Quick Reply
     messages = [TextMessage(text=text, quick_reply=build_quick_reply())]
     if extras:
-        messages.extend(extras)
+        # [CHANGED] v1.4.6：確保 extras 內的訊息（如 AudioMessage）也帶 Quick Reply
+        patched = []
+        for m in extras:
+            try:
+                # 若該訊息型別支援 quick_reply 屬性，則補上（LINE v3 訊息物件皆支援）
+                setattr(m, "quick_reply", build_quick_reply())
+            except Exception:
+                pass
+            patched.append(m)
+        messages.extend(patched)
     if CLOUDINARY_URL:
         try:
             audio_bytes = await text_to_speech_async(text)
@@ -309,7 +322,8 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
                 url = res.get("secure_url")
                 if url:
                     est = max(3000, min(30000, len(text) * 60))
-                    messages.append(AudioMessage(original_content_url=url, duration=est))
+                    # [CHANGED] v1.4.6：TTS AudioMessage 也加 Quick Reply
+                    messages.append(AudioMessage(original_content_url=url, duration=est, quick_reply=build_quick_reply()))
         except Exception as e:
             logger.warning(f"TTS 附加失敗：{e}")
     await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
@@ -665,6 +679,7 @@ async def handle_text_message(event: MessageEvent):
     # ===== B. 主選單 / 子選單 =====
     low = msg.lower()
     if low in ("menu", "選單", "主選單"):
+        # [CHANGED] v1.4.6：build_main_menu() 已內建 quick_reply
         await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=[build_main_menu()]))
         return
 
@@ -736,7 +751,7 @@ async def handle_audio_message(event: MessageEvent):
         await line_bot_api.reply_message(
             ReplyMessageRequest(
                 reply_token=reply_tok,
-                messages=[TextMessage(text=f"🎧 我聽到了：\n{text}", quick_reply=build_quick_reply())]
+                messages=[TextMessage(text=f"🎧 我聽到了：\n{text}", quick_reply=build_quick_reply())]  # [CHANGED] 已含 Quick Reply
             )
         )
 
@@ -749,10 +764,11 @@ async def handle_audio_message(event: MessageEvent):
                 url = res.get("secure_url")
                 if url:
                     est = max(3000, min(30000, len(text) * 60))
+                    # [CHANGED] v1.4.6：第二段 AudioMessage 也帶 Quick Reply，確保該回覆本身也有主選單
                     await line_bot_api.reply_message(
                         ReplyMessageRequest(
                             reply_token=reply_tok,
-                            messages=[AudioMessage(original_content_url=url, duration=est)]
+                            messages=[AudioMessage(original_content_url=url, duration=est, quick_reply=build_quick_reply())]
                         )
                     )
             except Exception as e:
@@ -766,6 +782,7 @@ async def handle_postback(event: PostbackEvent):
     data = event.postback.data or ""
     if data.startswith("menu:"):
         kind = data.split(":", 1)[-1]
+        # [CHANGED] build_submenu() 已內建 quick_reply
         await line_bot_api.reply_message(
             ReplyMessageRequest(reply_token=event.reply_token, messages=[build_submenu(kind)])
         )
@@ -799,7 +816,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.5")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.6")  # [CHANGED] bump version
 router = APIRouter()
 
 @router.post("/callback")
