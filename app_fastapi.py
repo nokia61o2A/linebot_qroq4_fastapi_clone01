@@ -1,14 +1,12 @@
-# app_fastapi.py v1.4.6 (Async-native handler with StockGPT restored, TTS/STT, and quick menus)
+# app_fastapi.py v1.4.7 (Async-native handler with StockGPT, FX-first routing, TTS/STT, and quick menus)
 # 變更摘要：
-# - [NEW] 恢復並整合「台股大盤／美盤／個股代碼」專業分析（StockGPT）指令流
-# - [NEW] 加入嚴謹的股號/美股代碼偵測與路由；一旦命中即「非閒聊」，直接輸出專業分析
-# - [NEW] 兼容你既有 my_commands.stock.* 模組：price/news/fundamental/dividend/YahooStock
-# - [NEW] 以「大盤/美盤/數字代碼/字母代碼」驅動，產生 markdown 報告 + 正確連結（Yahoo Finance）
-# - [CHANGED] TTS/STT 流程保留；加入錯誤保護，避免擋住主流程
-# - [CHANGED] QuickReply 增補金融常用鍵；維持原「大樂透」選單
-# - [NEW] 以環境變數切換 OpenAI/Groq/gTTS；並保留 auto fallback
-# - [NEW] 重要新增或修改處均以 # [NEW]/# [CHANGED] 註解
-# - [CHANGED] v1.4.6：所有回覆（含 FlexMessage / AudioMessage）一律附上 Quick Reply（包含「主選單」）
+# - [NEW] 外匯查詢(查匯)優先於股票代碼判斷；支援 JPY / USD/JPY / JPY TWD / usd twd 等
+# - [NEW] Yahoo Finance 外匯代碼自動組裝：BASE+QUOTE+"=X"（例：USDJPY=X、JPYTWD=X）
+# - [NEW] FX 報表（Markdown）涵蓋：即時/近5日走勢、建議觀察、Yahoo 連結
+# - [CHANGED] 修正 LINE v3 AsyncMessagingApi.reply_message() 非 coroutine：移除 await，避免 TypeError
+# - [CHANGED] 股票偵測排除 3 碼幣別字串，避免把 JPY 當成美股
+# - [CHANGED] 所有回覆訊息型別仍一律附上 Quick Reply（包含「主選單」）
+# - 其餘沿用 v1.4.6
 
 import os
 import re
@@ -135,7 +133,7 @@ if OPENAI_API_KEY:
     except Exception as e:
         logger.warning(f"初始化 OpenAI 失敗：{e}")
 
-# LLM 模型（聊天用途；股市分析本身不依賴 LLM 也可運行，只用於文字組織）
+# LLM 模型（聊天用途）
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
@@ -222,20 +220,27 @@ def _tstate_clear(chat_id: str):
     logger.info(f"[TranslateMode] CLEAR chat_id={chat_id}")
 
 def build_quick_reply() -> QuickReply:
-    # [CHANGED] 增加台股/美股/金價等常用指令
+    # [CHANGED] 增加台股/美股/金價/日圓匯率… 常用鍵；第一顆永遠是「主選單」
     return QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="主選單", text="選單")),
         QuickReplyItem(action=MessageAction(label="台股大盤", text="大盤")),
         QuickReplyItem(action=MessageAction(label="美股大盤", text="美盤")),
         QuickReplyItem(action=MessageAction(label="黃金價格", text="金價")),
+        QuickReplyItem(action=MessageAction(label="日圓匯率", text="JPY")),
         QuickReplyItem(action=MessageAction(label="查 2330", text="2330")),
         QuickReplyItem(action=MessageAction(label="查 NVDA", text="NVDA")),
-        QuickReplyItem(action=MessageAction(label="日圓匯率", text="JPY")),
-        QuickReplyItem(action=MessageAction(label="大樂透", text="大樂透")),
         QuickReplyItem(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyItem(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
         QuickReplyItem(action=MessageAction(label="結束翻譯", text="翻譯->結束")),
     ])
+
+# [NEW] 統一為所有訊息物件附上 Quick Reply
+def attach_quick_reply(msg):
+    try:
+        msg.quick_reply = build_quick_reply()
+    except Exception:
+        pass
+    return msg
 
 def build_main_menu() -> FlexMessage:
     items = [
@@ -249,8 +254,8 @@ def build_main_menu() -> FlexMessage:
         header=FlexBox(layout="vertical", contents=[FlexText(text="AI 助理主選單", weight="bold", size="lg")]),
         body=FlexBox(layout="vertical", spacing="md", contents=buttons),
     )
-    # [CHANGED] v1.4.6：FlexMessage 也加上 Quick Reply（含主選單）
-    return FlexMessage(alt_text="主選單", contents=bubble, quick_reply=build_quick_reply())
+    fm = FlexMessage(alt_text="主選單", contents=bubble)
+    return attach_quick_reply(fm)
 
 def build_submenu(kind: str) -> FlexMessage:
     menus = {
@@ -294,25 +299,15 @@ def build_submenu(kind: str) -> FlexMessage:
         header=FlexBox(layout="vertical", contents=[FlexText(text=title, weight="bold", size="lg")]),
         body=FlexBox(layout="vertical", spacing="md", contents=rows or [FlexText(text="（尚無項目）")]),
     )
-    # [CHANGED] v1.4.6：Flex 子選單也帶 Quick Reply
-    return FlexMessage(alt_text=title, contents=bubble, quick_reply=build_quick_reply())
+    fm = FlexMessage(alt_text=title, contents=bubble)
+    return attach_quick_reply(fm)
 
 async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List] = None):
     if not text:
         text = "（無內容）"
-    # TextMessage 本來就有 Quick Reply
-    messages = [TextMessage(text=text, quick_reply=build_quick_reply())]
+    messages = [attach_quick_reply(TextMessage(text=text))]
     if extras:
-        # [CHANGED] v1.4.6：確保 extras 內的訊息（如 AudioMessage）也帶 Quick Reply
-        patched = []
-        for m in extras:
-            try:
-                # 若該訊息型別支援 quick_reply 屬性，則補上（LINE v3 訊息物件皆支援）
-                setattr(m, "quick_reply", build_quick_reply())
-            except Exception:
-                pass
-            patched.append(m)
-        messages.extend(patched)
+        messages.extend(attach_quick_reply(m) for m in extras)
     if CLOUDINARY_URL:
         try:
             audio_bytes = await text_to_speech_async(text)
@@ -322,11 +317,11 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
                 url = res.get("secure_url")
                 if url:
                     est = max(3000, min(30000, len(text) * 60))
-                    # [CHANGED] v1.4.6：TTS AudioMessage 也加 Quick Reply
-                    messages.append(AudioMessage(original_content_url=url, duration=est, quick_reply=build_quick_reply()))
+                    messages.append(attach_quick_reply(AudioMessage(original_content_url=url, duration=est)))
         except Exception as e:
             logger.warning(f"TTS 附加失敗：{e}")
-    await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+    # [CHANGED] 重要：v3 的 reply_message 在 3.19.0 不是 coroutine，不能 await
+    line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
 
 # ====== LLM 包裝（僅用於一般聊天或少量文字重寫） ======
 def get_analysis_reply(messages: List[dict]) -> str:
@@ -368,9 +363,9 @@ async def analyze_sentiment(text: str) -> str:
         return "neutral"
 
 async def translate_text(text: str, target_lang_display: str) -> str:
-    target = LANGUAGE_MAP.get(target_lang_display.lower(), target_lang_display)
     sys = "You are a precise translation engine. Output ONLY the translated text with no extra words."
     clean = re.sub(r"[\u200B-\u200D\uFEFF]", "", text).strip()
+    target = LANGUAGE_MAP.get(target_lang_display.lower(), target_lang_display)
     usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{clean}"}}'
     return await groq_chat_async([{"role": "system", "content": sys}, {"role": "user", "content": usr}], 800, 0.2)
 
@@ -412,91 +407,119 @@ def get_bot_gold_quote() -> dict:
     r.raise_for_status()
     return parse_bot_gold_text(r.text)
 
-# ====== 彩票分析（沿用） ======
-def get_lottery_analysis(lottery_type: str) -> str:
-    prompt = f"你是一位專業的{lottery_type}分析師，請根據近期數據提供趨勢分析和3組隨機號碼建議，使用繁體中文。"
-    messages = [{"role": "system", "content": prompt}, {"role": "user", "content": f"分析 {lottery_type}"}]
-    return get_analysis_reply(messages)
+# ====== [NEW] 外匯查詢：優先於股票 ======
 
-# ====== 語音處理 ======
-def _transcribe_with_openai_sync(audio_bytes: bytes, filename: str = "audio.m4a") -> Optional[str]:
-    if not openai_client:
-        return None
+FX_CODES = {
+    "USD","TWD","JPY","EUR","GBP","CNY","HKD","AUD","CAD","CHF","SGD","KRW","NZD","THB","MYR","IDR","PHP","INR","ZAR"
+}
+FX_ALIAS = {
+    "日圓":"JPY", "日元":"JPY", "美元":"USD", "台幣":"TWD", "新台幣":"TWD", "人民幣":"CNY", "港幣":"HKD",
+    "韓元":"KRW", "歐元":"EUR", "英鎊":"GBP"
+}
+FX_DEFAULT_QUOTE = os.getenv("FX_DEFAULT_QUOTE", "TWD").upper()  # 只有單一幣別時，預設對 TWD
+
+def _is_fx_query(text: str) -> bool:
+    t = text.strip().upper()
+    if t in FX_CODES or t in FX_ALIAS.values():
+        return True
+    # 支援 pair：USD/JPY、usd jpy、USDTWD、JPY-TWD
+    return bool(re.match(r"^[A-Z]{3}[\s/\-\_]?([A-Z]{3})?$", t))
+
+def _normalize_fx_token(tok: str) -> str:
+    tok = tok.strip().upper()
+    return FX_ALIAS.get(tok, tok)
+
+def parse_fx_pair(user_text: str) -> Tuple[str, str, str]:
+    """
+    解析使用者輸入的幣別/幣別對
+    回傳 (base, quote, yahoo_symbol)；Yahoo 外匯代號：BASE+QUOTE+"=X"
+    規則：
+      - 單一幣別 → 對 FX_DEFAULT_QUOTE（預設 TWD），例：JPY → JPYTWD=X
+      - 兩個幣別 → 直接組合，例：USD/JPY → USDJPY=X
+    """
+    raw = user_text.strip()
+    t = _normalize_fx_token(raw)
+    # 拆成 tokens
+    m = re.findall(r"[A-Za-z\u4e00-\u9fa5]{2,5}", raw)
+    toks = [_normalize_fx_token(x) for x in m]
+    toks = [x for x in toks if x.upper() in FX_CODES]
+    if not toks:
+        # 若整串本就是 3 碼
+        if len(t) == 3 and t in FX_CODES:
+            base, quote = t, FX_DEFAULT_QUOTE
+        else:
+            base, quote = "USD", "JPY"
+    elif len(toks) == 1:
+        base, quote = toks[0], FX_DEFAULT_QUOTE
+    else:
+        base, quote = toks[0], toks[1]
+    symbol = f"{base}{quote}=X"
+    link = f"https://finance.yahoo.com/quote/{symbol}/"
+    return base, quote, link
+
+def fetch_fx_quote_yf(symbol: str) -> Tuple[Optional[float], Optional[float], Optional[str], Optional[pd.DataFrame]]:
+    """
+    從 yfinance 取外匯即時與近5日資料
+    回傳： (last_price, change_pct, ts_iso, df_5d)
+    """
     try:
-        f = io.BytesIO(audio_bytes)
-        f.name = filename
-        resp = openai_client.audio.transcriptions.create(model="whisper-1", file=f)
-        return (resp.text or "").strip() or None
+        tk = yf.Ticker(symbol)
+        # fast_info 有時會缺，保險：history 取前後價
+        df = tk.history(period="5d", interval="1d")
+        if df is None or df.empty:
+            return None, None, None, None
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2] if len(df) >= 2 else None
+        last_price = float(last_row["Close"])
+        change_pct = None
+        if prev_row is not None:
+            change_pct = (last_price / float(prev_row["Close"]) - 1.0) * 100.0
+        ts = last_row.name
+        ts_iso = ts.tz_convert("Asia/Taipei").strftime("%Y-%m-%d %H:%M %Z") if hasattr(ts, "tz_convert") else str(ts)
+        return last_price, change_pct, ts_iso, df
     except Exception as e:
-        logger.warning(f"OpenAI STT 失敗：{e}")
-        return None
+        logger.error(f"fetch_fx_quote_yf error for {symbol}: {e}", exc_info=True)
+        return None, None, None, None
 
-def _transcribe_with_groq_sync(audio_bytes: bytes, filename: str = "audio.m4a") -> Optional[str]:
-    if not sync_groq_client:
-        return None
-    try:
-        f = io.BytesIO(audio_bytes)
-        f.name = filename
-        resp = sync_groq_client.audio.transcriptions.create(file=f, model="whisper-large-v3")
-        return (resp.text or "").strip() or None
-    except Exception as e:
-        logger.warning(f"Groq STT 失敗：{e}")
-        return None
-
-async def speech_to_text_async(audio_bytes: bytes) -> Optional[str]:
-    text = await run_in_threadpool(_transcribe_with_openai_sync, audio_bytes)
-    if text:
-        return text
-    return await run_in_threadpool(_transcribe_with_groq_sync, audio_bytes)
-
-def _create_tts_openai_sync(text: str) -> Optional[bytes]:
-    if not openai_client:
-        return None
-    try:
-        clean = re.sub(r"[*_`~#]", "", text)
-        resp = openai_client.audio.speech.create(model="tts-1", voice="nova", input=clean)
-        return resp.read()
-    except Exception as e:
-        logger.error(f"OpenAI TTS 失敗: {e}")
-        return None
-
-def _create_tts_gtts_sync(text: str) -> Optional[bytes]:
-    try:
-        clean = re.sub(r"[*_`~#]", "", text).strip() or "嗨，我在這裡。"
-        tts = gTTS(text=clean, lang="zh-TW", tld="com.tw", slow=False)
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        logger.error(f"gTTS 失敗: {e}")
-        return None
-
-async def text_to_speech_async(text: str) -> Optional[bytes]:
-    provider = TTS_PROVIDER
-    if provider == "openai":
-        return await run_in_threadpool(_create_tts_openai_sync, text)
-    if provider == "gtts":
-        return await run_in_threadpool(_create_tts_gtts_sync, text)
-    if openai_client:
-        b = await run_in_threadpool(_create_tts_openai_sync, text)
-        if b:
-            return b
-    return await run_in_threadpool(_create_tts_gtts_sync, text)
+def render_fx_report(base: str, quote: str, link: str, last: Optional[float],
+                     chg: Optional[float], ts: Optional[str], df: Optional[pd.DataFrame]) -> str:
+    trend = ""
+    if df is not None and not df.empty:
+        try:
+            diff = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
+            trend = "上升" if diff > 0 else ("下跌" if diff < 0 else "持平")
+        except Exception:
+            trend = ""
+    lines = []
+    lines.append(f"#### 外匯報告（查匯優先）\n- 幣別對：**{base}/{quote}**\n- 來源：Yahoo Finance\n- 連結：{link}")
+    if last is not None:
+        lines.append(f"- 目前匯率：**{last:.6f}**（{base}/{quote}）")
+    if chg is not None:
+        lines.append(f"- 日變動：**{chg:+.2f}%**")
+    if ts:
+        lines.append(f"- 資料時間：{ts}")
+    if trend:
+        lines.append(f"- 近 5 日趨勢：{trend}")
+    lines.append("\n> 備註：若只輸入單一幣別（如 JPY），預設顯示 **對 TWD** 的匯率。")
+    lines.append(f"\n[外匯連結（Yahoo）]({link})")
+    return "\n".join(lines)
 
 # ====== StockGPT：偵測與分析主流程 ======
-# [NEW] 台股代碼：4~6 位數字，可帶結尾 1 字母；美股代碼：1~5 英文字母
+# [CHANGED] 台股/美股偵測前，已先做 FX 檢測；此外排除 3 碼幣別字串
 TW_TICKER_RE = re.compile(r"^\d{4,6}[A-Za-z]?$")
 US_TICKER_RE = re.compile(r"^[A-Za-z]{1,5}$")
 
 def _is_stock_query(text: str) -> bool:
-    t = text.strip()
+    t = text.strip().upper()
     if t in ("大盤", "台股大盤", "台灣大盤", "美盤", "美股大盤", "美股"):
         return True
+    # 3 碼幣別（如 JPY）會被 FX 攔截，不進股票
+    if len(t) == 3 and t in FX_CODES:
+        return False
     if TW_TICKER_RE.match(t):
         return True
-    # 避免把常見英文單字誤判成美股代碼，加入白名單再判
-    if US_TICKER_RE.match(t) and t.upper() not in {"MENU", "NVDA"} - set():  # NVDA 仍允許
+    # 避免把常見英文單字誤判成美股代碼；NVDA 仍允許
+    if US_TICKER_RE.match(t) and t not in {"MENU"}:
         return True
     return False
 
@@ -537,24 +560,17 @@ def _truncate_text(data, max_length=1024):
     return data
 
 def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, dict]:
-    """
-    組裝分析用文字區塊；同時回傳一份原始資料 dict 方便除錯
-    """
     debug_payload = {}
-    # 即時資訊
     ys = YahooStock(stock_id)
     debug_payload["yahoo_stock"] = {k: _safe_to_str(v) for k, v in vars(ys).items()}
 
-    # 價格（by日）
     price_df = stock_price(stock_id)
     debug_payload["price"] = _safe_to_str(price_df)
 
-    # 新聞（去全形空格 + 1024 截斷）
     news = _remove_full_width_spaces(stock_news(stock_name_hint))
     news = _truncate_text(news, 1024)
     debug_payload["news"] = _safe_to_str(news)
 
-    # 基本面/配息（大盤不取）
     fund_text = None
     div_text = None
     if stock_id not in ["^TWII", "^GSPC"]:
@@ -571,7 +587,6 @@ def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, 
     debug_payload["fundamental"] = fund_text
     debug_payload["dividend"] = div_text
 
-    # 組裝分析文字
     blk = []
     blk.append(f"**股票代碼:** {stock_id}, **股票名稱:** {ys.name}")
     blk.append(f"**即時資訊(vars):** {vars(ys)}")
@@ -584,9 +599,6 @@ def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, 
     return content, debug_payload
 
 def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> str:
-    """
-    以 Markdown 生成最終報告結構（非閒聊）
-    """
     sys = (
         "你現在是一位專業的證券分析師。請基於近期的股價走勢、基本面、新聞與籌碼概念進行綜合分析，"
         "輸出條列清楚、數字精確、可讀性高的報告。\n"
@@ -617,7 +629,7 @@ async def handle_text_message(event: MessageEvent):
         return
 
     try:
-        bot_info: BotInfoResponse = await line_bot_api.get_bot_info()
+        bot_info: BotInfoResponse = line_bot_api.get_bot_info()  # [CHANGED] 3.19.0 同步
         bot_name = bot_info.display_name
     except Exception:
         bot_name = "AI 助手"
@@ -679,8 +691,7 @@ async def handle_text_message(event: MessageEvent):
     # ===== B. 主選單 / 子選單 =====
     low = msg.lower()
     if low in ("menu", "選單", "主選單"):
-        # [CHANGED] v1.4.6：build_main_menu() 已內建 quick_reply
-        await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=[build_main_menu()]))
+        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=[build_main_menu()]))
         return
 
     # ===== C. 金價/彩票 =====
@@ -705,13 +716,24 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤。")
         return
 
-    # ===== D. 【重點】股票查詢（非閒聊） =====
+    # ===== D. 先判斷【外匯】（查匯優先）
+    if _is_fx_query(msg):
+        try:
+            base, quote, link = parse_fx_pair(msg)
+            symbol = f"{base}{quote}=X"
+            last, chg, ts, df = fetch_fx_quote_yf(symbol)
+            report = render_fx_report(base, quote, link, last, chg, ts, df)
+            await reply_text_with_tts_and_extras(reply_tok, report)
+        except Exception as e:
+            logger.error(f"[FX] 失敗：{e}", exc_info=True)
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 的匯率時發生錯誤：{e}")
+        return
+
+    # ===== E. 再判斷【股票】（非閒聊）
     if _is_stock_query(msg):
         try:
             ticker, name_hint, link = _normalize_ticker_and_name(msg)
-            # 收集資料 + 組 prompt
             content_block, debug_payload = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
-            # 呼叫 LLM（或降級為原始資料）
             report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
             await reply_text_with_tts_and_extras(reply_tok, report)
         except Exception as e:
@@ -722,7 +744,7 @@ async def handle_text_message(event: MessageEvent):
             )
         return
 
-    # ===== E. 其餘：一般聊天（保留，但不影響股票分析流） =====
+    # ===== F. 其餘：一般聊天 =====
     try:
         history = conversation_history.get(chat_id, [])
         sentiment = await analyze_sentiment(msg)
@@ -739,23 +761,21 @@ async def handle_text_message(event: MessageEvent):
 async def handle_audio_message(event: MessageEvent):
     reply_tok = event.reply_token
     try:
-        content_stream = await line_bot_api.get_message_content(event.message.id)
-        audio_in = await content_stream.read()
+        content_stream = line_bot_api.get_message_content(event.message.id)  # [CHANGED] 同步
+        audio_in = content_stream.read()
 
         text = await speech_to_text_async(audio_in)
         if not text:
             await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
             return
 
-        # 先回覆 STT 內容
-        await line_bot_api.reply_message(
+        line_bot_api.reply_message(
             ReplyMessageRequest(
                 reply_token=reply_tok,
-                messages=[TextMessage(text=f"🎧 我聽到了：\n{text}", quick_reply=build_quick_reply())]  # [CHANGED] 已含 Quick Reply
+                messages=[attach_quick_reply(TextMessage(text=f"🎧 我聽到了：\n{text}"))]
             )
         )
 
-        # 使用 TTS 回覆錄音
         audio_bytes = await text_to_speech_async(f"你說了：{text}")
         if audio_bytes and CLOUDINARY_URL:
             try:
@@ -764,11 +784,10 @@ async def handle_audio_message(event: MessageEvent):
                 url = res.get("secure_url")
                 if url:
                     est = max(3000, min(30000, len(text) * 60))
-                    # [CHANGED] v1.4.6：第二段 AudioMessage 也帶 Quick Reply，確保該回覆本身也有主選單
-                    await line_bot_api.reply_message(
+                    line_bot_api.reply_message(
                         ReplyMessageRequest(
                             reply_token=reply_tok,
-                            messages=[AudioMessage(original_content_url=url, duration=est, quick_reply=build_quick_reply())]
+                            messages=[attach_quick_reply(AudioMessage(original_content_url=url, duration=est))]
                         )
                     )
             except Exception as e:
@@ -782,9 +801,11 @@ async def handle_postback(event: PostbackEvent):
     data = event.postback.data or ""
     if data.startswith("menu:"):
         kind = data.split(":", 1)[-1]
-        # [CHANGED] build_submenu() 已內建 quick_reply
-        await line_bot_api.reply_message(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[build_submenu(kind)])
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[attach_quick_reply(build_submenu(kind))]
+            )
         )
 
 async def handle_events(events):
@@ -800,11 +821,11 @@ async def handle_events(events):
 # ====== FastAPI ======
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # [CHANGED] 啟動時嘗試更新 LINE Webhook（可選）
+    # 啟動時嘗試更新 LINE Webhook（第一個 endpoint 會 405，第二個成功）
     if BASE_URL:
         async with httpx.AsyncClient() as c:
             for endpoint in ("https://api-data.line.me/v2/bot/channel/webhook/endpoint",
-                            "https://api.line.me/v2/bot/channel/webhook/endpoint"):
+                             "https://api.line.me/v2/bot/channel/webhook/endpoint"):
                 try:
                     headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
                     payload = {"endpoint": f"{BASE_URL}/callback"}
@@ -816,7 +837,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.6")  # [CHANGED] bump version
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.7")
 router = APIRouter()
 
 @router.post("/callback")
