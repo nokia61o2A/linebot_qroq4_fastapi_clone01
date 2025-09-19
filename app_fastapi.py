@@ -26,8 +26,7 @@ try:
 except Exception as e:
     LOTTERY_OK = False
     LOTTERY_IMPORT_ERR = str(e)
-    def run_lottery_analysis(_lottery_type: str) -> str:
-        return f"彩票分析模組未載入（匯入失敗）。詳情：{LOTTERY_IMPORT_ERR}"
+        return  lottery_gpt(lottery_type)   
 
 # --- HTTP/解析 ---
 import requests, httpx
