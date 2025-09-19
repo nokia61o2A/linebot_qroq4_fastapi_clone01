@@ -26,7 +26,7 @@ try:
 except Exception as e:
     LOTTERY_OK = False
     LOTTERY_IMPORT_ERR = str(e)
-        return  lottery_gpt(lottery_type)   
+    lottery_gpt(lottery_type)   
 
 # --- HTTP/解析 ---
 import requests, httpx
