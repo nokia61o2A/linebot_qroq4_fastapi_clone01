@@ -1,5 +1,4 @@
-# app_fastapi.py  v1.4.8
-
+# app_fastapi.py  v1.5.0
 import os
 import re
 import io
@@ -69,18 +68,17 @@ from my_commands.stock.YahooStock import YahooStock
 # ====== 彩票分析（實作版）======
 LOTTERY_OK = False
 LOTTERY_IMPORT_ERRORS: List[str] = []
+# NEW/CHANGED: 先嘗試從 my_commands 匯入；再退回根目錄；錯誤訊息整合
 try:
-    # 專案中的路徑（建議）
     from my_commands.lottery_gpt import lottery_gpt as run_lottery_analysis
     LOTTERY_OK = True
 except Exception as e1:
-    LOTTERY_IMPORT_ERRORS.append(f"from my_commands.lottery_gpt import lottery_gpt -> {e1}")
+    LOTTERY_IMPORT_ERRORS.append(f"my_commands.lottery_gpt -> {e1}")
     try:
-        # 退回根目錄
-        from lottery_gpt import lottery_gpt as run_lottery_analysis
+        from lottery_gpt import lottery_gpt as run_lottery_analysis  # 專案根目錄
         LOTTERY_OK = True
     except Exception as e2:
-        LOTTERY_IMPORT_ERRORS.append(f"from lottery_gpt import lottery_gpt -> {e2}")
+        LOTTERY_IMPORT_ERRORS.append(f"root.lottery_gpt -> {e2}")
         run_lottery_analysis = None  # type: ignore
 
 # --- Matplotlib（可選） ---
@@ -161,7 +159,7 @@ MAX_HISTORY_LEN = 10
 
 translation_states: Dict[str, str] = {}
 translation_states_ttl: Dict[str, datetime] = {}
-TRANSLATE_TTL_SECONDS = int(os.getenv("TRANSLATE_TTL_SECONDS", "7200"))  # 2h
+TRANSLATE_TTL_SECONDS = int(os.getenv("TRANSLATE_TTL_SECONDS", "7200"))
 
 auto_reply_status: Dict[str, bool] = {}
 user_persona: Dict[str, str] = {}
@@ -234,6 +232,7 @@ def _tstate_clear(chat_id: str):
 
 # ====== Quick Reply ======
 def build_quick_reply() -> QuickReply:
+    # NEW/CHANGED: 固定含 🎰 彩票選單 與彩種常用鍵；所有訊息都會帶上
     return QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="主選單", text="選單")),
         QuickReplyItem(action=MessageAction(label="台股大盤", text="大盤")),
@@ -243,6 +242,8 @@ def build_quick_reply() -> QuickReply:
         QuickReplyItem(action=MessageAction(label="查 NVDA", text="NVDA")),
         QuickReplyItem(action=MessageAction(label="日圓匯率", text="JPY")),
         QuickReplyItem(action=MessageAction(label="大樂透", text="大樂透")),
+        QuickReplyItem(action=MessageAction(label="威力彩", text="威力彩")),
+        QuickReplyItem(action=MessageAction(label="今彩539", text="今彩539")),
         QuickReplyItem(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyItem(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
         QuickReplyItem(action=MessageAction(label="結束翻譯", text="翻譯->結束")),
@@ -643,7 +644,6 @@ def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> s
 def get_lottery_analysis(lottery_type: str) -> str:
     if LOTTERY_OK and callable(run_lottery_analysis):
         return run_lottery_analysis(lottery_type)  # 真正去抓資料＋LLM 生成
-    # 匯入失敗時的清楚提示（同你聊天畫面）
     errs = " | ".join(LOTTERY_IMPORT_ERRORS) or "未知原因"
     return f"彩票分析模組未載入（匯入失敗）。詳情：{errs}"
 
@@ -835,7 +835,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.4.8")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.0")
 router = APIRouter()
 
 @router.post("/callback")

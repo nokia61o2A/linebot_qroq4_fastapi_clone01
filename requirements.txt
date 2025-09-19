@@ -12,7 +12,7 @@ openai>=1.47.1
 # --- 數據處理與網路爬蟲 ---
 requests>=2.32.3
 pandas>=2.2.2
-beautifulsoup4>=4.12.3
+beautifulsoup4>=4.12.0
 lxml>=5.3.0
 html5lib>=1.1
 httpx>=0.27.2
@@ -27,5 +27,5 @@ mplfinance>=0.12.10b0
 # --- 環境變數管理 ---
 python-dotenv>=1.0.1
 
-# --- 彩票分析套件 (你提到的 GitHub repo) ---
-TaiwanLotteryCrawler 
+# --- lottery / parsing ---
+TaiwanLotteryCrawler>=0.1.6
