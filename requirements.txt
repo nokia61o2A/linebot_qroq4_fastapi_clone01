@@ -28,4 +28,4 @@ mplfinance>=0.12.10b0
 python-dotenv>=1.0.1
 
 # --- 彩票分析套件 (你提到的 GitHub repo) ---
-TaiwanLotteryCrawler @ git+https://github.com/stu01509/TaiwanLotteryCrawler.git
+TaiwanLotteryCrawler 
