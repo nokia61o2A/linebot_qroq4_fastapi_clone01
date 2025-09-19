@@ -34,7 +34,7 @@ import requests, httpx
 from bs4 import BeautifulSoup
 
 # --- 資料處理 / 金融 ---
-import pandas as pd
+import pandas as pdf
 import yfinance as yf
 
 # --- FastAPI / LINE SDK v3 ---
