@@ -1,13 +1,12 @@
 # app_fastapi.py  v1.5.2
 # 變更重點：
-# - CHANGED: 正確匯入 TaiwanLotteryCrawler；若不可用則用 HTML fallback
-# - NEW: 語音處理恢復（STT + 回聲 + 可選 TTS + Quick Reply）
-# - FIX: get_chat_id() 回到穩健寫法（支援 to_dict() 與駝峰屬性）
-# - FIX: 金價/外匯/股票/彩票路由齊備；所有回覆都帶 Quick Reply
-# - INFO: 關鍵段落加註解，便於維護
+# - CHANGED: 直接呼叫你自家的 my_commands/lottery_gpt.py（import 並封裝）
+# - FIX: 移除殘留的調試碼（lottery_gpt(NameError)、錯誤呼叫）
+# - FIX: AsyncMessagingApi 一律 await
+# - NEW: 語音處理（STT + 回聲 + 可選 TTS + Quick Reply）
+# - INFO: 所有回覆都帶 Quick Reply；金價/外匯/股票/彩票路由齊備
 
-from my_commands import lottery_gpt
-import os, re, io, sys, random, logging, pkg_resources
+import os, re, io, sys, random, logging
 from typing import Dict, List, Tuple, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -19,6 +18,16 @@ if BASE_DIR not in sys.path:
 MC_DIR = os.path.join(BASE_DIR, "my_commands")
 if MC_DIR not in sys.path:
     sys.path.append(MC_DIR)
+
+# --- 直接使用你的程式庫 ---
+try:
+    from my_commands.lottery_gpt import lottery_gpt as run_lottery_analysis
+    LOTTERY_OK = True
+except Exception as e:
+    LOTTERY_OK = False
+    LOTTERY_IMPORT_ERR = str(e)
+    def run_lottery_analysis(_lottery_type: str) -> str:
+        return f"彩票分析模組未載入（匯入失敗）。詳情：{LOTTERY_IMPORT_ERR}"
 
 # --- HTTP/解析 ---
 import requests, httpx
@@ -53,6 +62,8 @@ from gtts import gTTS
 from groq import AsyncGroq, Groq
 import openai
 
+logger = logging.getLogger("uvicorn.error"); logger.setLevel(logging.INFO)
+
 # ====== 股票模組（沿用，若失敗則降級） ======
 try:
     from my_commands.stock.stock_price import stock_price
@@ -62,7 +73,7 @@ try:
     from my_commands.stock.YahooStock import YahooStock
     STOCK_OK = True
 except Exception as e:
-    logging.warning(f"股票模組載入失敗：{e}")
+    logger.warning(f"股票模組載入失敗：{e}")
     def stock_price(s): return pd.DataFrame()
     def stock_news(s): return "（股票新聞模組未載入）"
     def stock_fundamental(s): return "（股票基本面模組未載入）"
@@ -71,17 +82,7 @@ except Exception as e:
         def __init__(self, s): self.name = "（YahooStock 未載入）"
     STOCK_OK = False
 
-# ====== 彩票：優先使用 TaiwanLotteryCrawler，失敗就 HTML fallback ======
-CrawlerOK = False
-try:
-    # CHANGED: 正確的套件/模組名稱
-    from TaiwanLotteryCrawler import TaiwanLotteryCrawler  # pip install TaiwanLotteryCrawler
-    _tl = TaiwanLotteryCrawler()
-    CrawlerOK = True
-except Exception as e:
-    logging.warning(f"TaiwanLotteryCrawler 匯入失敗：{e}")
-    _tl = None
-
+# ====== （可選）官方 TaiwanLotteryCrawler，給你保留但不強依賴 ======
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
 _TL_ENDPOINTS = {
     "威力彩": "https://www.taiwanlottery.com.tw/lotto/superlotto638/history.aspx",
@@ -97,15 +98,18 @@ _TL_ENDPOINTS = {
 }
 
 def _html_fetch_numbers(url: str, limit: int = 6) -> List[Dict]:
-    """官方歷史頁簡易解析，容錯重點是『就算格式變動，也抓得到幾筆號碼』。"""
+    """官方歷史頁簡易解析（備用），就算格式變動也盡量抓得到幾筆號碼。"""
     out: List[Dict] = []
+    if not url:
+        return out
     r = requests.get(url, headers=_HEADERS, timeout=10)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     rows = soup.select("table tbody tr") or soup.select("table tr")
     for tr in rows[:max(1, limit)]:
         txt = " ".join(tr.get_text(" ", strip=True).split())
-        if not txt: continue
+        if not txt:
+            continue
         m = re.search(r"(\d{3,4}|\d{6,8})\s*期", txt)
         period = m.group(0) if m else "未知期數"
         nums = re.findall(r"\b\d{1,2}\b", txt)
@@ -117,34 +121,11 @@ def _html_fetch_numbers(url: str, limit: int = 6) -> List[Dict]:
     return out
 
 def _fetch_recent_draws(lottery_type: str) -> List[Dict]:
-    """優先官方套件，其次 HTML fallback。"""
+    """若你之後想在前置做資料，這裡保留 HTML fallback。現在主流程已改為直接 call 你的庫。"""
     name = lottery_type
-    lottery_gpt(NameError)
     if "539" in lottery_type: name = "今彩539"
     if "威力" in lottery_type: name = "威力彩"
     if "大樂" in lottery_type: name = "大樂透"
-    # 1) 官方套件
-    if CrawlerOK and _tl:
-        try:
-            if name == "威力彩": data = _tl.super_lotto()
-            elif name == "大樂透": data = lottery_gpt()
-            elif name == "今彩539": data = _tl.daily_cash()
-            elif name == "雙贏彩": data = _tl.lotto1224()
-            elif name in ("3星彩", "三星彩"): data = _tl.lotto3d()
-            elif name == "4星彩": data = _tl.lotto4d()
-            elif name == "38樂合彩": data = _tl.lotto38m6()
-            elif name == "39樂合彩": data = _tl.lotto39m5()
-            elif name == "49樂合彩": data = _tl.lotto49m6()
-            else: data = []
-            fmt = []
-            for row in (data or [])[:6]:
-                period = str(row.get("期別") or row.get("期數") or "未知期數")
-                nums = row.get("號碼") or row.get("中獎號碼") or []
-                bonus = row.get("特別號") or row.get("第二區") or []
-                fmt.append({"period": period, "nums": [int(x) for x in nums], "bonus": [int(x) for x in bonus]})
-            if fmt: return fmt
-        except Exception: pass
-    # 2) HTML fallback
     url = _TL_ENDPOINTS.get(name)
     return _html_fetch_numbers(url, 6) if url else []
 
@@ -162,8 +143,7 @@ def _fetch_caiyunfangwei() -> Dict[str, str]:
             "財神方位": "東北（示意）",
         }
 
-# ====== LLM 設定 ======
-logger = logging.getLogger("uvicorn.error"); logger.setLevel(logging.INFO)
+# ====== LLM / 環境 ======
 BASE_URL = os.getenv("BASE_URL")
 CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
@@ -370,9 +350,10 @@ async def _stt_groq(audio_bytes: bytes, filename="audio.m4a") -> Optional[str]:
         return None
 
 async def speech_to_text_async(audio_bytes: bytes) -> Optional[str]:
-    text = await run_in_threadpool(lambda: None)  # keep event loop happy
-    text = await _stt_openai(audio_bytes) or await _stt_groq(audio_bytes)
-    return text
+    # 依序嘗試
+    text = await _stt_openai(audio_bytes)
+    if text: return text
+    return await _stt_groq(audio_bytes)
 
 def _tts_openai(text: str) -> Optional[bytes]:
     if not openai_client: return None
@@ -425,15 +406,12 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
             logger.warning(f"TTS 附加失敗：{e}")
     await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
 
-def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
+async def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
     # 先送文字(帶 QuickReply)，再送 Flex，確保快速鍵一直在
-    try:
-        line_bot_api.reply_message(ReplyMessageRequest(
-            reply_token=reply_token,
-            messages=[TextMessage(text=hint, quick_reply=build_quick_reply()), flex]
-        ))
-    except Exception as e:
-        logger.error(f"reply_menu_with_hint 失敗：{e}")
+    await line_bot_api.reply_message(ReplyMessageRequest(
+        reply_token=reply_token,
+        messages=[TextMessage(text=hint, quick_reply=build_quick_reply()), flex]
+    ))
 
 # ====== 一般聊天/翻譯 LLM ======
 def get_analysis_reply(messages: List[dict]) -> str:
@@ -616,85 +594,13 @@ def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> s
     except Exception:
         return f"（分析模型不可用）原始資料：\n{content_block}\n\n連結：{stock_link}"
 
-# ====== 彩票主流程 ======
-def _gen_three_sets(draws: List[Dict], main_pick: int, pool_max: int, second_pick=0, second_pool_max=0):
-    def _count_freq(ds):
-        f={}; [f.__setitem__(n, f.get(n,0)+1) for d in ds for n in d.get("nums",[])]; return f
-    def _pick_sorted(pool,k): import random; return sorted(random.sample(pool,k))
-    freq = _count_freq(draws); all_nums=list(range(1,pool_max+1))
-    hot_sorted = sorted(all_nums, key=lambda x:(-freq.get(x,0),x))
-    cold_sorted= sorted(all_nums, key=lambda x:( freq.get(x,0),x))
-    hot = sorted(hot_sorted[:max(1,main_pick)]); cold = sorted(cold_sorted[:max(1,main_pick)])
-    rnd = _pick_sorted(all_nums, main_pick)
-    sec = {}
-    if second_pick>0 and second_pool_max>0:
-        sec_all=list(range(1,second_pool_max+1))
-        sec={"cold":_pick_sorted(sec_all,second_pick),
-             "hot": _pick_sorted(sec_all,second_pick),
-             "rnd": _pick_sorted(sec_all,second_pick)}
-    return cold, hot, rnd, sec
-
+# ====== 彩票主流程（直接呼叫你的庫） ======
 def get_lottery_analysis(lottery_type: str) -> str:
-    return lottery_gpt(lottery_type)
-    # draws = _fetch_recent_draws(lottery_type)
-    # if not draws:
-    #     msg = f"找不到「{lottery_type}」近期開獎資料，請稍後再試。"
-    #     if not CrawlerOK: msg += "（外部套件不可用，已嘗試 HTML 但仍無資料）"
-    #     return msg
-    # cai = _fetch_caiyunfangwei()
-    # today, year_str, god_dir = cai.get("今天日期",""), cai.get("今日歲次",""), cai.get("財神方位","")
-    # # 各彩種的號碼數與池大小（簡化）
-    # main_pick, pool_max, s_pick, s_pool = 6,49,0,0
-    # if "威力" in lottery_type: main_pick,pool_max,s_pick,s_pool = 6,38,1,8
-    # elif "539" in lottery_type: main_pick,pool_max = 5,39
-    # elif "雙贏" in lottery_type: main_pick,pool_max = 12,24
-    # elif "3星彩" in lottery_type or "三星彩" in lottery_type: main_pick,pool_max = 3,10
-    # elif "4星彩" in lottery_type: main_pick,pool_max = 4,10
-    # cold, hot, rnd, sec = _gen_three_sets(draws, main_pick, pool_max, s_pick, s_pool)
-    # recent_txt = "\n".join(
-    #     f"期別：{d['period']}｜號碼：{sorted(d.get('nums',[]))}" + (f"｜特別/第二區：{sorted(d['bonus'])}" if d.get("bonus") else "")
-    #     for d in draws
-    # )
-    # # 讓 LLM 生出敘述
-    # prompt=[{"role":"system","content":f"你是台灣彩券分析師，彩種：{lottery_type}。請精準、條列、可讀性高。"},
-    #         {"role":"user","content":f"""近幾期號碼：
-{recent_txt}
-
-今天日期：{today}
-今日歲次：{year_str}
-財神方位：{god_dir}
-
-請寫出：
-- 走勢/冷熱分析（引用上面的近期資料）
-- 常見組合/連號觀察
-- 簡短風險聲明（非保證獲勝）
-- 最後附上 20 字內勵志吉祥句
-
-語氣：專業但親切；輸出使用台灣繁體中文。"""}]
-    analysis = get_analysis_reply(prompt)
-    def _fmt_group(title, main, sec_pack):
-        t=f"- {title}主區：{main}"
-        if s_pick>0 and sec_pack: t+=f"｜第二區建議：{sec_pack.get('rnd',[])}"
-        return t
-    sec_pack = sec if isinstance(sec, dict) else {}
-    groups_txt = "\n".join([_fmt_group("最冷組合", cold, sec_pack),
-                            _fmt_group("最熱組合", hot, sec_pack),
-                            _fmt_group("隨機組合", rnd, sec_pack)])
-    return (f"""《{lottery_type}》分析報告
-***財神方位提示***
-國曆/農曆：{today}｜{year_str}
-根據財神方位：{god_dir}
-
-【近幾期號碼】
-{recent_txt}
-
-【趨勢分析】
-{analysis}
-
-【三組建議號碼】
-{groups_txt}
-
-（提醒：以上僅供娛樂與趨勢參考，非保證中獎。）""").strip()
+    # 直接使用你寫的 my_commands.lottery_gpt.lottery_gpt
+    try:
+        return run_lottery_analysis(lottery_type)
+    except Exception as e:
+        return f"彩票分析模組執行失敗：{e}"
 
 # ====== 事件處理 ======
 async def handle_text_message(event: MessageEvent):
@@ -747,7 +653,7 @@ async def handle_text_message(event: MessageEvent):
     # 主選單/子選單
     low = msg.lower()
     if low in ("menu","選單","主選單"):
-        reply_menu_with_hint(reply_tok, build_main_menu()); return
+        await reply_menu_with_hint(reply_tok, build_main_menu()); return
 
     if msg in PERSONA_ALIAS:
         key = set_user_persona(chat_id, msg)
@@ -833,7 +739,7 @@ async def handle_audio_message(event: MessageEvent):
                 if url:
                     est = max(3000, min(30000, len(text) * 60))
                     msgs.append(AudioMessage(original_content_url=url, duration=est))
-        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=msgs))
+        await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=msgs))
     except Exception as e:
         logger.error(f"語音處理失敗: {e}", exc_info=True)
         await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
@@ -842,7 +748,7 @@ async def handle_postback(event: PostbackEvent):
     data = event.postback.data or ""
     if data.startswith("menu:"):
         kind = data.split(":",1)[-1]
-        reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
+        await reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
 
 # ====== FastAPI ======
 @asynccontextmanager
