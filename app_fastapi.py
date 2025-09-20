@@ -1,9 +1,8 @@
-# app_fastapi.py  v1.5.4
+# app_fastapi.py  v1.5.5
 # 變更重點：
-# - 修正 LINE Bot SDK v3 的同步/非同步調用問題
-# - 移除所有不必要的 await (reply_message 已是同步方法)
-# - 內建錯誤處理和詳細日誌記錄
-# - 保持所有原有功能：TTS、翻譯、股票、外匯、金價
+# - 修正 TTS 語音功能：確保每則回覆都有語音
+# - 改進非同步 TTS 處理邏輯
+# - 保持所有原有功能：翻譯、股票、外匯、金價
 # - Quick Reply 每則訊息都帶；Flex 選單策略不變
 
 import os, re, io, sys, random, logging, asyncio
@@ -45,10 +44,14 @@ from linebot.v3.messaging import (
 # ── Cloudinary（可選） ───────────────────────────────────────────────────────
 CLOUDINARY_AVAILABLE = False
 CLOUDINARY_CONFIGURED = False
+cloudinary = None
+cloudinary_uploader = None
 if 'CLOUDINARY_URL' in os.environ:
     try:
         import cloudinary, cloudinary.uploader
         CLOUDINARY_AVAILABLE = True
+        cloudinary = cloudinary
+        cloudinary_uploader = cloudinary.uploader
     except ImportError:
         pass
 
@@ -110,8 +113,7 @@ TTS_SEND_ALWAYS = os.getenv("TTS_SEND_ALWAYS", "true").lower() == "true"
 if not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("缺少必要環境變數：CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET")
 
-logger.info(f"環境變數檢查：CHANNEL_TOKEN={'*' * len(CHANNEL_TOKEN) if CHANNEL_TOKEN else 'None'}")
-logger.info(f"TTS 設定：Provider={TTS_PROVIDER}, Always={TTS_SEND_ALWAYS}, Cloudinary={CLOUDINARY_AVAILABLE}")
+logger.info(f"環境變數檢查：TTS={TTS_SEND_ALWAYS}, Provider={TTS_PROVIDER}, Cloudinary={CLOUDINARY_AVAILABLE}")
 
 # Cloudinary（可選）
 if CLOUDINARY_URL and CLOUDINARY_AVAILABLE:
@@ -122,7 +124,7 @@ if CLOUDINARY_URL and CLOUDINARY_AVAILABLE:
             api_key=re.search(r"//(\d+):", CLOUDINARY_URL).group(1),
             api_secret=re.search(r":([A-Za-z0-9_-]+)@", CLOUDINARY_URL).group(1),
         )
-        logger.info("Cloudinary OK")
+        logger.info("Cloudinary 配置成功")
         CLOUDINARY_CONFIGURED = True
     except Exception as e:
         logger.error(f"Cloudinary 設定失敗: {e}")
@@ -156,7 +158,7 @@ if OPENAI_API_KEY:
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
-logger.info(f"LLM 設定：Groq Primary={GROQ_MODEL_PRIMARY}, Fallback={GROQ_MODEL_FALLBACK}, OpenAI={'可用' if openai_client else '不可用'}")
+logger.info(f"LLM 設定：Groq Primary={GROQ_MODEL_PRIMARY}, Fallback={GROQ_MODEL_FALLBACK}")
 
 # ── 會話狀態 / 翻譯 / 人設 ───────────────────────────────────────────────────
 conversation_history: Dict[str, List[dict]] = {}
@@ -328,6 +330,7 @@ def _tts_openai(text: str) -> Optional[bytes]:
     if not openai_client: return None
     try:
         clean = re.sub(r"[*_`~#]", "", text)
+        if not clean: clean = "內容為空"
         resp = openai_client.audio.speech.create(model="tts-1", voice="nova", input=clean)
         return resp.read()
     except Exception as e:
@@ -338,9 +341,12 @@ def _tts_gtts(text: str) -> Optional[bytes]:
     """gTTS（同步）"""
     if not GTTS_AVAILABLE: return None
     try:
-        clean = re.sub(r"[*_`~#]", "", text).strip() or "嗨，我在這裡。"
+        clean = re.sub(r"[*_`~#]", "", text).strip()
+        if not clean: clean = "嗨，我在這裡。"
         tts = gTTS(text=clean, lang="zh-TW", tld="com.tw", slow=False)
-        buf = io.BytesIO(); tts.write_to_fp(buf); buf.seek(0)
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        buf.seek(0)
         return buf.read()
     except Exception as e:
         logger.error(f"gTTS 失敗: {e}")
@@ -348,78 +354,152 @@ def _tts_gtts(text: str) -> Optional[bytes]:
 
 async def text_to_speech_async(text: str) -> Optional[bytes]:
     """文字轉語音（非同步）"""
+    # 清理文字，避免特殊字符影響 TTS
+    clean_text = re.sub(r"[*_`~#]", "", text).strip()
+    if not clean_text:
+        clean_text = "內容為空"
+    
     if TTS_PROVIDER == "openai":
-        b = await run_in_threadpool(_tts_openai, text)
-        return b or await run_in_threadpool(_tts_gtts, text)
-    if TTS_PROVIDER == "gtts":
-        return await run_in_threadpool(_tts_gtts, text)
-    # auto
-    b = await run_in_threadpool(_tts_openai, text)
-    return b or await run_in_threadpool(_tts_gtts, text)
+        # 先試 OpenAI
+        try:
+            result = await run_in_threadpool(_tts_openai, clean_text)
+            if result:
+                logger.debug("OpenAI TTS 成功")
+                return result
+        except Exception as e:
+            logger.warning(f"OpenAI TTS 失敗，嘗試 gTTS：{e}")
+        
+        # OpenAI 失敗，嘗試 gTTS
+        try:
+            result = await run_in_threadpool(_tts_gtts, clean_text)
+            if result:
+                logger.debug("gTTS 成功（OpenAI 備用）")
+                return result
+        except Exception as e:
+            logger.error(f"gTTS 也失敗：{e}")
+            return None
+    
+    elif TTS_PROVIDER == "gtts":
+        try:
+            result = await run_in_threadpool(_tts_gtts, clean_text)
+            if result:
+                logger.debug("gTTS 成功")
+                return result
+        except Exception as e:
+            logger.error(f"gTTS 失敗：{e}")
+            return None
+    
+    else:  # auto
+        # 自動選擇，先試 OpenAI
+        try:
+            result = await run_in_threadpool(_tts_openai, clean_text)
+            if result:
+                logger.debug("OpenAI TTS 成功（自動）")
+                return result
+        except Exception as e:
+            logger.warning(f"OpenAI TTS 失敗，嘗試 gTTS：{e}")
+        
+        try:
+            result = await run_in_threadpool(_tts_gtts, clean_text)
+            if result:
+                logger.debug("gTTS 成功（自動備用）")
+                return result
+        except Exception as e:
+            logger.error(f"gTTS 也失敗：{e}")
+            return None
 
-def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
-    """所有文字回覆統一走這裡，Quick Reply 每次都會帶上。（同步方法）"""
+async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
+    """
+    所有文字回覆統一走這裡，Quick Reply 每次都會帶上。
+    修正版：確保 TTS 語音正常工作
+    """
     if not text: 
         text = "（無內容）"
     
+    logger.debug(f"準備回覆：{text[:50]}...，TTS={TTS_SEND_ALWAYS}, Cloudinary={CLOUDINARY_CONFIGURED}")
+    
+    # 建立基本訊息
     messages = [TextMessage(text=text, quick_reply=build_quick_reply())]
     if extras: 
         messages.extend(extras)
     
-    # TTS 處理（非同步，但用 run_in_threadpool 包裝）
-    def add_tts_async():
-        if TTS_SEND_ALWAYS and CLOUDINARY_CONFIGURED:
-            try:
-                # 在 thread 中執行 async 函式
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                audio_bytes = loop.run_until_complete(text_to_speech_async(text))
-                loop.close()
+    # TTS 處理 - 關鍵修正！
+    if TTS_SEND_ALWAYS and CLOUDINARY_CONFIGURED:
+        try:
+            logger.debug("開始 TTS 處理...")
+            audio_bytes = await text_to_speech_async(text)
+            
+            if audio_bytes and len(audio_bytes) > 0:
+                logger.debug(f"TTS 音檔生成成功，大小：{len(audio_bytes)} bytes")
                 
-                if audio_bytes:
-                    upload_result = cloudinary.uploader.upload(
-                        io.BytesIO(audio_bytes),
-                        resource_type="video", 
-                        folder="line-bot-tts", 
-                        format="mp3"
+                # 上傳到 Cloudinary
+                try:
+                    upload_result = await run_in_threadpool(
+                        lambda: cloudinary_uploader.upload(
+                            io.BytesIO(audio_bytes),
+                            resource_type="video", 
+                            folder="line-bot-tts", 
+                            format="mp3"
+                        )
                     )
+                    
                     url = upload_result.get("secure_url")
                     if url:
-                        est = max(3000, min(30000, len(text) * 60))
-                        messages.append(AudioMessage(original_content_url=url, duration=est))
-                        logger.info(f"TTS 上傳成功：{url}")
-            except Exception as e:
-                logger.warning(f"TTS 附加失敗：{e}")
-    
-    try:
-        run_in_threadpool(add_tts_async)
-    except Exception as e:
-        logger.warning(f"TTS 執行失敗：{e}")
+                        # 計算音檔持續時間（估計）
+                        est_duration = max(3000, min(30000, len(text) * 60))
+                        audio_msg = AudioMessage(original_content_url=url, duration=est_duration)
+                        messages.append(audio_msg)
+                        logger.info(f"TTS 上傳成功：{url}，持續時間：{est_duration}ms")
+                    else:
+                        logger.warning("Cloudinary 上傳成功但無 secure_url")
+                        
+                except Exception as upload_e:
+                    logger.error(f"Cloudinary 上傳失敗：{upload_e}")
+            else:
+                logger.warning("TTS 生成空音檔")
+                
+        except Exception as tts_e:
+            logger.error(f"TTS 處理失敗：{tts_e}")
+        finally:
+            logger.debug(f"TTS 處理完成，訊息數量：{len(messages)}")
     
     # LINE API 調用（同步，無 await）
     try:
-        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
-        logger.debug(f"LINE 回覆成功：{reply_token[:20]}...")
-    except Exception as e:
-        logger.error(f"LINE 回覆失敗：{e}")
-        # 如果回覆失敗，嘗試發送簡單文字
+        response = line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+        logger.debug(f"LINE 回覆成功：{reply_token[:20]}...，訊息數：{len(messages)}")
+        return response
+    except Exception as line_e:
+        logger.error(f"LINE 回覆失敗：{line_e}")
+        # 備用方案：只發送文字訊息
         try:
-            simple_msg = TextMessage(text=text[:100] + "..." if len(text) > 100 else text)
+            simple_msg = TextMessage(text=text[:100] + "..." if len(text) > 100 else text, quick_reply=build_quick_reply())
             line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[simple_msg]))
-        except Exception as e2:
-            logger.error(f"LINE 簡化回覆也失敗：{e2}")
+            logger.info("LINE 備用回覆成功（僅文字）")
+        except Exception as backup_e:
+            logger.error(f"LINE 備用回覆也失敗：{backup_e}")
+            raise line_e
 
-def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
-    """先送文字(含 QuickReply)再送 Flex，確保快速鍵一直在。（同步方法）"""
+async def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
+    """先送文字(含 QuickReply)再送 Flex，確保快速鍵一直在。"""
     messages = [
         TextMessage(text=hint, quick_reply=build_quick_reply()), 
         flex
     ]
+    
     try:
-        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+        response = line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
         logger.debug(f"LINE 選單回覆成功：{reply_token[:20]}...")
+        return response
     except Exception as e:
         logger.error(f"LINE 選單回覆失敗：{e}")
+        # 備用方案
+        try:
+            simple_msg = TextMessage(text=hint, quick_reply=build_quick_reply())
+            line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[simple_msg]))
+            logger.info("LINE 選單備用回覆成功")
+        except Exception as backup_e:
+            logger.error(f"LINE 選單備用回覆也失敗：{backup_e}")
+            raise e
 
 # ── 一般聊天/翻譯 LLM ────────────────────────────────────────────────────────
 def get_analysis_reply(messages: List[dict]) -> str:
@@ -481,7 +561,7 @@ async def analyze_sentiment(text: str) -> str:
     try:
         out = await groq_chat_async(msgs, max_tokens=10, temperature=0)
         sentiment = (out or "neutral").strip().lower()
-        logger.debug(f"情緒分析結果：{sentiment}")
+        logger.debug(f"情緒分析結果：{sentiment} for '{text[:30]}...'")
         return sentiment
     except Exception as e:
         logger.warning(f"情緒分析失敗：{e}")
@@ -498,7 +578,7 @@ async def translate_text(text: str, target_lang_display: str) -> str:
     usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{clean}"}}'
     try:
         result = await groq_chat_async([{"role":"system","content":sys_prompt},{"role":"user","content":usr}], 800, 0.2)
-        logger.debug(f"翻譯結果：{result[:50]}...")
+        logger.debug(f"翻譯結果：{target} <- {result[:50]}...")
         return result if result.strip() else f"翻譯失敗：{text[:20]}..."
     except Exception as e:
         logger.error(f"翻譯失敗：{e}")
@@ -512,7 +592,7 @@ def set_user_persona(chat_id: str, key: str):
     if key_mapped not in PERSONAS: 
         key_mapped = "sweet"
     user_persona[chat_id] = key_mapped
-    logger.debug(f"人設切換：{chat_id} -> {PERSONAS[key_mapped]['title']}")
+    logger.debug(f"人設切換：{chat_id[:20]}... -> {PERSONAS[key_mapped]['title']}")
     return key_mapped
 
 def build_persona_prompt(chat_id: str, sentiment: str) -> str:
@@ -776,7 +856,7 @@ async def handle_text_message(event: MessageEvent):
         rev = {"english":"英文","japanese":"日文","korean":"韓文","vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
         lang_display = rev.get(lang_token.lower(), lang_token)
         _tstate_set(chat_id, lang_display)
-        reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。")
+        await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。")
         logger.info(f"開啟翻譯模式：{lang_display}")
         return
     
@@ -784,11 +864,11 @@ async def handle_text_message(event: MessageEvent):
         lang = msg.split("->",1)[1].strip()
         if lang=="結束":
             _tstate_clear(chat_id)
-            reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式")
+            await reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式")
             logger.info(f"結束翻譯模式：{chat_id}")
         else:
             _tstate_set(chat_id, lang)
-            reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
+            await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
             logger.info(f"開啟翻譯模式：{lang}")
         return
     
@@ -799,7 +879,7 @@ async def handle_text_message(event: MessageEvent):
         lang_display = {"en":"英文","eng":"英文","英文":"英文","ja":"日文","jp":"日文","日文":"日文","zh":"繁體中文","繁中":"繁體中文","中文":"繁體中文"}.get(lang_key,"英文")
         logger.info(f"內聯翻譯：{lang_display} <- {text_to_translate[:30]}...")
         out = await translate_text(text_to_translate, lang_display)
-        reply_text_with_tts_and_extras(reply_tok, out)
+        await reply_text_with_tts_and_extras(reply_tok, out)
         return
 
     # ── 翻譯模式中 ────────────────────────────────────────────────────────────
@@ -807,20 +887,20 @@ async def handle_text_message(event: MessageEvent):
     if current_lang:
         logger.debug(f"翻譯模式中：{current_lang}")
         out = await translate_text(msg, current_lang)
-        reply_text_with_tts_and_extras(reply_tok, out)
+        await reply_text_with_tts_and_extras(reply_tok, out)
         return
 
     # ── 主選單 / 子選單 / 人設 ─────────────────────────────────────────────────
     low = msg.lower()
     if low in ("menu","選單","主選單"):
         logger.info("顯示主選單")
-        reply_menu_with_hint(reply_tok, build_main_menu())
+        await reply_menu_with_hint(reply_tok, build_main_menu())
         return
     
     if msg in PERSONA_ALIAS:
         key = set_user_persona(chat_id, msg)
         p = PERSONAS[key]
-        reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}")
+        await reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}")
         return
 
     # ── 金價 ───────────────────────────────────────────────────────────────────
@@ -836,25 +916,25 @@ async def handle_text_message(event: MessageEvent):
                    f"- 買進(1g)：{buy:,.0f} 元\n"
                    f"- 價差：{spread:,.0f} 元\n"
                    f"來源：{BOT_GOLD_URL}")
-            reply_text_with_tts_and_extras(reply_tok, txt)
+            await reply_text_with_tts_and_extras(reply_tok, txt)
         except Exception as e:
             logger.error(f"金價查詢失敗：{e}")
-            reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價，請稍後再試。")
+            await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價，請稍後再試。")
         return
 
     # ── 彩票分析 ──────────────────────────────────────────────────────────────
-    if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","四星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
+    if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
         logger.info(f"收到彩票查詢：{msg}，模組狀態：LOTTERY_OK={LOTTERY_OK}")
         if LOTTERY_OK and callable(run_lottery_analysis):
             try:
                 logger.info(f"開始執行 {msg} 分析...")
                 report = await run_in_threadpool(run_lottery_analysis, msg)
                 logger.info(f"{msg} 分析完成，長度：{len(report)} 字元")
-                reply_text_with_tts_and_extras(reply_tok, report)
+                await reply_text_with_tts_and_extras(reply_tok, report)
             except Exception as e:
                 logger.error(f"彩票分析失敗: {e}", exc_info=True)
                 error_msg = f"抱歉，分析 {msg} 時發生錯誤：{str(e)[:100]}..."
-                reply_text_with_tts_and_extras(reply_tok, error_msg)
+                await reply_text_with_tts_and_extras(reply_tok, error_msg)
         else:
             error_details = f"LOTTERY_OK={LOTTERY_OK}, ERR={LOTTERY_IMPORT_ERR[:50]}..."
             logger.error(f"彩票模組未載入：{error_details}")
@@ -866,7 +946,7 @@ async def handle_text_message(event: MessageEvent):
                 f"• 稍後再試\n"
                 f"其他功能（如股票、外匯）正常使用！"
             )
-            reply_text_with_tts_and_extras(reply_tok, error_msg)
+            await reply_text_with_tts_and_extras(reply_tok, error_msg)
         return
 
     # ── 外匯 ───────────────────────────────────────────────────────────────────
@@ -876,10 +956,10 @@ async def handle_text_message(event: MessageEvent):
             base, quote, link = parse_fx_pair(msg)
             last, chg, ts, df = fetch_fx_quote_yf(f"{base}{quote}=X")
             report = render_fx_report(base, quote, link, last, chg, ts, df)
-            reply_text_with_tts_and_extras(reply_tok, report)
+            await reply_text_with_tts_and_extras(reply_tok, report)
         except Exception as e:
             logger.error(f"外匯查詢失敗：{e}")
-            reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}")
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}")
         return
 
     # ── 股票 ───────────────────────────────────────────────────────────────────
@@ -891,10 +971,10 @@ async def handle_text_message(event: MessageEvent):
             
             content_block, _ = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
             report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
-            reply_text_with_tts_and_extras(reply_tok, report)
+            await reply_text_with_tts_and_extras(reply_tok, report)
         except Exception as e:
             logger.error(f"股票查詢失敗：{e}")
-            reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。")
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。")
         return
 
     # ── 一般聊天 ──────────────────────────────────────────────────────────────
@@ -912,10 +992,10 @@ async def handle_text_message(event: MessageEvent):
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
         
         logger.debug(f"聊天回應長度：{len(final_reply)}")
-        reply_text_with_tts_and_extras(reply_tok, final_reply)
+        await reply_text_with_tts_and_extras(reply_tok, final_reply)
     except Exception as e:
         logger.error(f"一般聊天失敗：{e}")
-        reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
 
 async def handle_audio_message(event: MessageEvent):
     """處理語音訊息"""
@@ -929,7 +1009,7 @@ async def handle_audio_message(event: MessageEvent):
         
         text = await speech_to_text_async(audio_in)
         if not text:
-            reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
+            await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
             logger.warning("語音轉文字失敗")
             return
         
@@ -940,12 +1020,14 @@ async def handle_audio_message(event: MessageEvent):
         if TTS_SEND_ALWAYS and CLOUDINARY_CONFIGURED:
             try:
                 echo_bytes = await text_to_speech_async(f"你說了：{text}")
-                if echo_bytes:
-                    upload_result = cloudinary.uploader.upload(
-                        io.BytesIO(echo_bytes),
-                        resource_type="video", 
-                        folder="line-bot-tts", 
-                        format="mp3"
+                if echo_bytes and len(echo_bytes) > 0:
+                    upload_result = await run_in_threadpool(
+                        lambda: cloudinary_uploader.upload(
+                            io.BytesIO(echo_bytes),
+                            resource_type="video", 
+                            folder="line-bot-tts", 
+                            format="mp3"
+                        )
                     )
                     url = upload_result.get("secure_url")
                     if url:
@@ -960,7 +1042,7 @@ async def handle_audio_message(event: MessageEvent):
         
     except Exception as e:
         logger.error(f"語音處理失敗: {e}", exc_info=True)
-        reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
 
 async def handle_postback(event: PostbackEvent):
     """處理 Postback 事件"""
@@ -970,9 +1052,10 @@ async def handle_postback(event: PostbackEvent):
     if data.startswith("menu:"):
         kind = data.split(":",1)[-1]
         logger.info(f"顯示子選單：{kind}")
-        reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
+        await reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
     else:
         logger.warning(f"未知 Postback 資料：{data}")
+        await reply_text_with_tts_and_extras(event.reply_token, "收到你的選擇，正在處理中...")
 
 async def handle_events(events):
     """處理事件列表"""
@@ -997,7 +1080,7 @@ async def handle_events(events):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理"""
-    logger.info("應用程式啟動中...")
+    logger.info("🚀 LINE Bot 啟動中...")
     
     if BASE_URL:
         async with httpx.AsyncClient() as c:
@@ -1008,16 +1091,16 @@ async def lifespan(app: FastAPI):
                     payload={"endpoint":f"{BASE_URL}/callback"}
                     r = await c.put(endpoint, headers=headers, json=payload, timeout=10.0)
                     r.raise_for_status()
-                    logger.info(f"Webhook 更新成功: {endpoint} {r.status_code}")
+                    logger.info(f"✅ Webhook 更新成功: {r.status_code}")
                     break
                 except Exception as e:
-                    logger.warning(f"Webhook 更新失敗：{e}")
+                    logger.warning(f"⚠️ Webhook 更新失敗：{e}")
     
-    logger.info("應用程式啟動完成")
+    logger.info("✅ 應用程式啟動完成")
     yield
-    logger.info("應用程式關閉")
+    logger.info("👋 應用程式關閉")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.4")
+app = FastAPI(lifespan=lifespan, title="AI醬 LINE Bot", version="1.5.5", description="全方位 AI 助理：彩票分析、股票、外匯、翻譯")
 router = APIRouter()
 
 @router.post("/callback")
@@ -1026,39 +1109,50 @@ async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     
-    logger.info(f"收到 Webhook，簽名長度：{len(signature)}")
+    logger.info(f"📨 收到 Webhook，簽名長度：{len(signature)}")
     
     try:
         events = parser.parse(body.decode("utf-8"), signature)
         await handle_events(events)
-        logger.debug("Webhook 處理完成")
+        logger.debug("✅ Webhook 處理完成")
+        return JSONResponse({"status":"ok"})
     except InvalidSignatureError:
-        logger.warning("無效簽名")
+        logger.warning("❌ 無效簽名")
         raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
-        logger.error(f"Callback 失敗：{e}", exc_info=True)
+        logger.error(f"💥 Callback 失敗：{e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
-    
-    return JSONResponse({"status":"ok"})
 
 @router.get("/")
 async def root(): 
-    """根路徑"""
-    return PlainTextResponse("LINE Bot is running v1.5.4", status_code=200)
+    """根路徑 - 歡迎訊息"""
+    return PlainTextResponse(
+        "🤖 AI醬 LINE Bot v1.5.5 運行中！\n"
+        "功能：彩票分析 💰 | 股票查詢 📈 | 外匯匯率 💱 | 即時翻譯 🌐 | 語音互動 🎤\n"
+        "健康檢查：/healthz"
+    )
 
 @router.get("/healthz")
 async def healthz(): 
-    """健康檢查"""
+    """健康檢查端點"""
     status = {
         "status": "ok",
-        "version": "1.5.4",
-        "lottery_ok": LOTTERY_OK,
-        "stock_ok": STOCK_OK,
-        "cloudinary": CLOUDINARY_CONFIGURED,
-        "tts": TTS_SEND_ALWAYS,
-        "timestamp": datetime.utcnow().isoformat()
+        "version": "1.5.5",
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {
+            "line_bot": "active",
+            "lottery_module": LOTTERY_OK,
+            "stock_module": STOCK_OK,
+            "cloudinary": CLOUDINARY_CONFIGURED,
+            "tts_enabled": TTS_SEND_ALWAYS,
+            "gtts_available": GTTS_AVAILABLE,
+            "openai_available": openai_client is not None,
+            "groq_available": sync_groq_client is not None,
+            "active_conversations": len(conversation_history),
+            "tts_provider": TTS_PROVIDER
+        }
     }
-    logger.debug(f"健康檢查：{status}")
+    logger.debug(f"🩺 健康檢查：{status}")
     return JSONResponse(status)
 
 app.include_router(router)
@@ -1066,5 +1160,5 @@ app.include_router(router)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    logger.info(f"啟動開發伺服器，端口：{port}")
+    logger.info(f"🎬 啟動開發伺服器，端口：{port}，TTS：{TTS_SEND_ALWAYS}")
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
