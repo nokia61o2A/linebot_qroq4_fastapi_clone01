@@ -1,11 +1,8 @@
-# app_fastapi.py  v1.5.8
+# app_fastapi.py  v1.5.9
 # 變更重點：
-# - 修正 logger 定義順序：先定義 logger，再載入模組
-# - 確保 Quick Reply 每則訊息都帶（修正 TextMessage 參數）
-# - 確保 TTS 語音每則回覆都有（修正非同步邏輯）
-# - Quick Reply + TTS + 文字並存正常工作
-# - 修正 LINE Bot SDK v3 參數格式
-# - 保持所有功能完整：彩票、股票、外匯、金價、翻譯
+# - 基於 v1.5.8 修正：確保 Quick Reply 在每一則回覆中都存在（透過統一回覆函數強制附加 TextMessage 帶 Quick Reply）
+# - 所有回覆路徑（文字、選單、語音、彩票、股票等）均走統一入口，保證 Quick Reply 一致性
+# - 保持所有功能完整：彩票、股票、外匯、金價、翻譯、TTS + Quick Reply 並存
 
 import os, re, io, sys, random, logging, asyncio
 from typing import Dict, List, Tuple, Optional
@@ -17,7 +14,7 @@ logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO)
 
-logger.info("=== 🚀 AI醬 LINE Bot v1.5.8 啟動 (Quick Reply + TTS 修正版) ===")
+logger.info("=== 🚀 AI醬 LINE Bot v1.5.9 啟動 (Quick Reply 強制每則版) ===")
 
 # ── 專案路徑 ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -392,22 +389,22 @@ async def text_to_speech_async(text: str) -> Optional[bytes]:
 
 async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
     """
-    所有文字回覆統一走這裡，Quick Reply 每次都會帶上。
-    修正版：確保 Quick Reply + TTS 語音並存正常工作
+    所有文字回覆統一走這裡，強制 Quick Reply 附加在 TextMessage 上。
+    修正版：確保 Quick Reply + TTS 語音 + extras（Flex/Audio）並存，每則回覆至少有一個帶 Quick Reply 的 TextMessage。
     """
     if not text: 
         text = "（無內容）"
     
     logger.debug(f"準備回覆：{text[:50]}...，TTS={TTS_SEND_ALWAYS}, Cloudinary={CLOUDINARY_CONFIGURED}")
     
-    # 建立基本文字訊息，並附加 Quick Reply
+    # 建立基本文字訊息，並強制附加 Quick Reply（這是每則回覆的核心）
     text_message = TextMessage(text=text, quick_reply=build_quick_reply())
     
     messages = [text_message]
     if extras: 
         messages.extend(extras)
     
-    # TTS 處理
+    # TTS 處理（Audio 附加在後，不影響 Quick Reply）
     if TTS_SEND_ALWAYS and CLOUDINARY_CONFIGURED and cloudinary_uploader:
         try:
             logger.debug("開始 TTS 處理...")
@@ -442,10 +439,10 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
     # LINE API 調用（同步）
     try:
         line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
-        logger.debug(f"LINE 回覆成功：{reply_token[:20]}...，訊息數：{len(messages)}，有語音：{any(isinstance(m, AudioMessage) for m in messages)}")
+        logger.debug(f"LINE 回覆成功：{reply_token[:20]}...，訊息數：{len(messages)}，有 Quick Reply：True，有語音：{any(isinstance(m, AudioMessage) for m in messages)}")
     except Exception as line_e:
         logger.error(f"LINE 回覆失敗：{line_e}")
-        # 備用方案：只發送文字 + Quick Reply
+        # 備用方案：只發送文字 + Quick Reply（強制保留）
         try:
             simple_msg = TextMessage(text=text[:100] + "..." if len(text) > 100 else text, quick_reply=build_quick_reply())
             line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[simple_msg]))
@@ -454,22 +451,21 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
             logger.error(f"LINE 備用回覆也失敗：{backup_e}")
 
 async def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
-    """先送文字(含 QuickReply)再送 Flex，確保快速鍵一直在。"""
-    messages = [
-        TextMessage(text=hint, quick_reply=build_quick_reply()), 
-        flex
-    ]
+    """選單回覆：先送帶 Quick Reply 的文字，再送 Flex，確保 Quick Reply 每則都有"""
+    # 強制附加 Quick Reply 在文字訊息上
+    text_msg = TextMessage(text=hint, quick_reply=build_quick_reply())
+    messages = [text_msg, flex]
     
     try:
         line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
-        logger.debug(f"LINE 選單回覆成功：{reply_token[:20]}...")
+        logger.debug(f"LINE 選單回覆成功：{reply_token[:20]}...，有 Quick Reply：True")
     except Exception as e:
         logger.error(f"LINE 選單回覆失敗：{e}")
-        # 備用方案
+        # 備用方案：僅文字 + Quick Reply
         try:
             simple_msg = TextMessage(text=hint, quick_reply=build_quick_reply())
             line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[simple_msg]))
-            logger.info("LINE 選單備用回覆成功")
+            logger.info("LINE 選單備用回覆成功（僅文字 + Quick Reply）")
         except Exception as backup_e:
             logger.error(f"LINE 選單備用回覆也失敗：{backup_e}")
 
@@ -793,7 +789,7 @@ def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> s
 
 # ── 事件處理 ─────────────────────────────────────────────────────────────────
 async def handle_text_message(event: MessageEvent):
-    """處理文字訊息"""
+    """處理文字訊息（所有分支均走統一回覆，確保 Quick Reply）"""
     chat_id = get_chat_id(event)
     msg_raw = (event.message.text or "").strip()
     reply_tok = event.reply_token
@@ -957,7 +953,7 @@ async def handle_text_message(event: MessageEvent):
         await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
 
 async def handle_audio_message(event: MessageEvent):
-    """處理語音訊息"""
+    """處理語音訊息（統一走帶 Quick Reply 的回覆）"""
     reply_tok = event.reply_token
     logger.info(f"收到語音訊息：{event.message.id}")
     
@@ -968,25 +964,16 @@ async def handle_audio_message(event: MessageEvent):
         if not text:
             await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
             return
-        msgs = [TextMessage(text=f"🎧 我聽到了：\n{text}", quick_reply=build_quick_reply())]
-        if TTS_SEND_ALWAYS and CLOUDINARY_CONFIGURED:
-            echo_bytes = await text_to_speech_async(f"你說了：{text}")
-            if echo_bytes:
-                upload_result = await run_in_threadpool(
-                    lambda: cloudinary_uploader.upload(io.BytesIO(echo_bytes),
-                        resource_type="video", folder="line-bot-tts", format="mp3")
-                )
-                url = upload_result.get("secure_url")
-                if url:
-                    est = max(3000, min(30000, len(text) * 60))
-                    msgs.append(AudioMessage(original_content_url=url, duration=est))
-        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=msgs))
+        
+        # 統一使用 reply_text_with_tts_and_extras 確保 Quick Reply
+        await reply_text_with_tts_and_extras(reply_tok, f"🎧 我聽到了：\n{text}")
+        
     except Exception as e:
         logger.error(f"語音處理失敗: {e}", exc_info=True)
         await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
 
 async def handle_postback(event: PostbackEvent):
-    """處理 Postback 事件"""
+    """處理 Postback 事件（走選單回覆，確保 Quick Reply）"""
     data = event.postback.data or ""
     if data.startswith("menu:"):
         kind = data.split(":",1)[-1]
@@ -1021,7 +1008,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.8")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.9")
 router = APIRouter()
 
 @router.post("/callback")
