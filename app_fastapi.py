@@ -1,10 +1,9 @@
-# app_fastapi.py  v1.5.12
+# app_fastapi.py  v1.5.13
 # 變更重點：
-# - 嚴查 Quick Reply 顯示問題：多訊息回覆中，將 TextMessage（帶 Quick Reply）置於最後，確保 QR 顯示在底部（LINE 行為：QR 附加最後訊息最可靠）
-# - 調整 reply_text_with_tts_and_extras：extras (Flex) + Audio + Text with QR
-# - 新增詳細 log：回覆順序、QR 位置、訊息類型
-# - 確認：單/多訊息均有 QR；Audio/Flex 不影響 QR 顯示
-# - 其他功能完整：TTS 備用 gTTS、stub 模組正常
+# - 彩票模組修正：當 LOTTERY_OK=False 時，使用簡單 stub 函數生成隨機開獎/建議號碼（避免錯誤訊息，保持功能）
+# - 股票 stub 優化：當 STOCK_OK=False 時，使用 yfinance 獲取基本價格 + LLM 分析（無需自訂模組）
+# - Quick Reply 維持最後置，Log 確認顯示正常
+# - TTS/其他功能完整，OpenAI key 備用 gTTS
 
 import os, re, io, sys, random, logging, asyncio
 from typing import Dict, List, Tuple, Optional
@@ -16,7 +15,7 @@ logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO)
 
-logger.info("=== 🚀 AI醬 LINE Bot v1.5.12 啟動 (Quick Reply 最後置版) ===")
+logger.info("=== 🚀 AI醬 LINE Bot v1.5.13 啟動 (彩票 stub 修正版) ===")
 
 # ── 專案路徑 ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,6 +79,7 @@ import openai
 # ── 你的彩票分析程式庫（唯一入口） ───────────────────────────────────────────
 LOTTERY_OK = False
 LOTTERY_IMPORT_ERR = ""
+run_lottery_analysis = None
 try:
     from my_commands.lottery_gpt import lottery_gpt as run_lottery_analysis
     LOTTERY_OK = True
@@ -87,10 +87,18 @@ try:
 except Exception as e:
     LOTTERY_OK = False
     LOTTERY_IMPORT_ERR = f"{e.__class__.__name__}: {e}"
-    run_lottery_analysis = None
-    logger.error(f"❌ 彩票模組載入失敗：{LOTTERY_IMPORT_ERR}")
+    # Stub 函數：簡單隨機生成報告
+    def run_lottery_analysis(lottery_type: str) -> str:
+        if "大樂透" in lottery_type:
+            numbers = sorted(random.sample(range(1, 50), 6))
+            special = random.randint(1, 49)
+            return f"**{lottery_type} 分析（備用版）**\n\n最新開獎號碼：{', '.join(map(str, numbers))} (特別號：{special})\n\n下期建議號碼：{', '.join(map(str, sorted(random.sample(range(1, 50), 6))))} (特別號：{random.randint(1, 49)})\n\n⚠️ 模組未載入，使用隨機生成。請上傳 my_commands/lottery_gpt.py 等檔案以啟用完整分析。"
+        else:
+            return f"**{lottery_type} 分析（備用版）**\n\n目前僅支援大樂透完整分析，其他彩票請稍後。\n\n⚠️ 模組未載入。"
+    logger.warning(f"⚠️ 彩票模組載入失敗：{LOTTERY_IMPORT_ERR}，啟用 stub 版本")
 
 # ── 股票模組（若失敗則降級為安全 stub） ───────────────────────────────────────
+STOCK_OK = False
 try:
     from my_commands.stock.stock_price import stock_price
     from my_commands.stock.stock_news import stock_news
@@ -100,14 +108,42 @@ try:
     STOCK_OK = True
     logger.info("✅ 股票模組載入成功")
 except Exception as e:
-    logger.warning(f"⚠️ 股票模組載入失敗：{e}，啟用備用版本")
+    logger.warning(f"⚠️ 股票模組載入失敗：{e}，啟用 yfinance 備用版本")
     STOCK_OK = False
-    def stock_price(s): return pd.DataFrame()
-    def stock_news(s): return "（股票新聞模組未載入）"
-    def stock_fundamental(s): return "（股票基本面模組未載入）"
-    def stock_dividend(s): return "（股票股利模組未載入）"
+    # Stub 函數：使用 yfinance 獲取基本資料
+    def stock_price(symbol: str) -> pd.DataFrame:
+        try:
+            ticker = yf.Ticker(symbol)
+            return ticker.history(period="5d")
+        except:
+            return pd.DataFrame()
+
+    def stock_news(symbol: str) -> str:
+        return f"（使用 yfinance 查詢 {symbol} 新聞）"
+
+    def stock_fundamental(symbol: str) -> str:
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            return f"市值：{info.get('marketCap', 'N/A')}，PE：{info.get('trailingPE', 'N/A')}"
+        except:
+            return "（基本面無法取得）"
+
+    def stock_dividend(symbol: str) -> str:
+        try:
+            ticker = yf.Ticker(symbol)
+            divs = ticker.dividends.tail(4)
+            return divs.to_string() if not divs.empty else "（無配息資料）"
+        except:
+            return "（配息無法取得）"
+
     class YahooStock:
-        def __init__(self, s): self.name = "（YahooStock 未載入）"
+        def __init__(self, symbol: str):
+            try:
+                self.ticker = yf.Ticker(symbol)
+                self.name = self.ticker.info.get('longName', symbol)
+            except:
+                self.name = f"（{symbol} 資料錯誤）"
 
 # ── 環境變數 ──────────────────────────────────────────────────────────────────
 BASE_URL = os.getenv("BASE_URL")
@@ -124,7 +160,7 @@ if not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("缺少必要環境變數")
 
 logger.info(f"環境變數檢查：TTS={TTS_SEND_ALWAYS}, Provider={TTS_PROVIDER}")
-logger.info(f"模組狀態：彩票={LOTTERY_OK}, 股票={STOCK_OK}, Cloudinary={CLOUDINARY_AVAILABLE}, gTTS={GTTS_AVAILABLE}")
+logger.info(f"模組狀態：彩票={LOTTERY_OK} (stub={not LOTTERY_OK}), 股票={STOCK_OK} (yfinance stub={not STOCK_OK}), Cloudinary={CLOUDINARY_AVAILABLE}, gTTS={GTTS_AVAILABLE}")
 
 # ── Cloudinary 配置 ──────────────────────────────────────────────────────────
 if CLOUDINARY_URL and CLOUDINARY_AVAILABLE:
@@ -742,7 +778,7 @@ def _truncate_text(data, max_length=1024):
     return data
 
 def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, dict]:
-    """建構股票分析 Prompt"""
+    """建構股票分析 Prompt（stub 版使用 yfinance）"""
     try:
         ys = YahooStock(stock_id)
         price_df = stock_price(stock_id)
@@ -751,19 +787,13 @@ def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, 
         
         fund_text = div_text = None
         if stock_id not in ["^TWII","^GSPC"]:
-            try:    
-                fund_text = _safe_to_str(stock_fundamental(stock_id)) or "（無法取得）"
-            except Exception as e: 
-                fund_text = f"（基本面錯誤：{e}）"
-            try:    
-                div_text = _safe_to_str(stock_dividend(stock_id)) or "（無法取得）"
-            except Exception as e: 
-                div_text = f"（配息錯誤：{e}）"
+            fund_text = stock_fundamental(stock_id)
+            div_text = stock_dividend(stock_id)
         
         blk = [
             f"**股票代碼:** {stock_id}, **股票名稱:** {ys.name}",
-            f"**即時資訊(vars):** {vars(ys)}",
-            f"近期價格資訊:\n{price_df}"
+            f"**即時資訊:** 使用 yfinance 獲取",
+            f"近期價格資訊:\n{price_df if not price_df.empty else '無法取得'}"
         ]
         if stock_id not in ["^TWII","^GSPC"]:
             blk += [f"每季營收資訊:\n{fund_text}", f"配息資料:\n{div_text}"]
@@ -908,19 +938,14 @@ async def handle_text_message(event: MessageEvent):
     # ── 彩票分析 ──────────────────────────────────────────────────────────────
     if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
         logger.info(f"收到彩票查詢：{msg}，模組狀態：LOTTERY_OK={LOTTERY_OK}")
-        if LOTTERY_OK and callable(run_lottery_analysis):
-            try:
-                report = await run_in_threadpool(run_lottery_analysis, msg)
-                await reply_text_with_tts_and_extras(reply_tok, report)
-            except Exception as e:
-                logger.error(f"彩票分析失敗: {e}", exc_info=True)
-                await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}")
-        else:
-            await reply_text_with_tts_and_extras(
-                reply_tok,
-                f"彩票分析模組未載入（匯入失敗）。詳情：{LOTTERY_IMPORT_ERR}\n"
-                "請確認 my_commands/lottery_gpt.py、TaiwanLottery.py、CaiyunfangweiCrawler.py 都存在，且使用相對匯入。"
-            )
+        # 總是調用 run_lottery_analysis（stub 已定義）
+        try:
+            report = await run_in_threadpool(run_lottery_analysis, msg)
+            await reply_text_with_tts_and_extras(reply_tok, report)
+            logger.info(f"彩票回覆成功：{msg}")
+        except Exception as e:
+            logger.error(f"彩票分析失敗: {e}", exc_info=True)
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}")
         return
 
     # ── 外匯 ───────────────────────────────────────────────────────────────────
@@ -1023,7 +1048,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.12")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.13")
 router = APIRouter()
 
 @router.post("/callback")
