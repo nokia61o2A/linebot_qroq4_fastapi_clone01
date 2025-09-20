@@ -1,17 +1,16 @@
-# app_fastapi.py  v1.5.2
+# app_fastapi.py  v1.5.3
 # 變更重點：
-# - CHANGED: 直接呼叫你自家的 my_commands/lottery_gpt.py（import 並封裝）
-# - FIX: 移除殘留的調試碼（lottery_gpt(NameError)、錯誤呼叫）
-# - FIX: AsyncMessagingApi 一律 await
-# - NEW: 語音處理（STT + 回聲 + 可選 TTS + Quick Reply）
-# - INFO: 所有回覆都帶 Quick Reply；金價/外匯/股票/彩票路由齊備
+# - 使用你自己的 my_commands.lottery_gpt.lottery_gpt 作為唯一的彩票分析入口
+# - 匯入失敗時清楚回報 LOTTERY_IMPORT_ERR（不在 except 中呼叫任何函式）
+# - Quick Reply 每則訊息都帶；Flex 選單採「先文字後 Flex」策略
+# - STT/TTS、翻譯、股票/外匯/金價路由完整；所有回覆走同一出口
 
 import os, re, io, sys, random, logging
 from typing import Dict, List, Tuple, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
-# --- 專案路徑 ---
+# ── 專案路徑 ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
@@ -19,24 +18,15 @@ MC_DIR = os.path.join(BASE_DIR, "my_commands")
 if MC_DIR not in sys.path:
     sys.path.append(MC_DIR)
 
-# --- 直接使用你的程式庫 ---
-try:
-    from my_commands.lottery_gpt import lottery_gpt as run_lottery_analysis
-    LOTTERY_OK = True
-except Exception as e:
-    LOTTERY_OK = False
-    LOTTERY_IMPORT_ERR = str(e)
-    lottery_gpt(lottery_type)   
-
-# --- HTTP/解析 ---
+# ── HTTP / 解析 ───────────────────────────────────────────────────────────────
 import requests, httpx
 from bs4 import BeautifulSoup
 
-# --- 資料處理 / 金融 ---
-import pandas as pdf
+# ── 資料處理 / 金融 ───────────────────────────────────────────────────────────
+import pandas as pd
 import yfinance as yf
 
-# --- FastAPI / LINE SDK v3 ---
+# ── FastAPI / LINE SDK v3 ────────────────────────────────────────────────────
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
@@ -51,19 +41,28 @@ from linebot.v3.messaging import (
     BotInfoResponse,
 )
 
-# --- Cloudinary（可選） ---
+# ── Cloudinary（可選） ───────────────────────────────────────────────────────
 import cloudinary, cloudinary.uploader
 
-# --- TTS/STT（可選） ---
+# ── TTS/STT（可選） ─────────────────────────────────────────────────────────
 from gtts import gTTS
 
-# --- LLM ---
+# ── LLM ──────────────────────────────────────────────────────────────────────
 from groq import AsyncGroq, Groq
 import openai
 
-logger = logging.getLogger("uvicorn.error"); logger.setLevel(logging.INFO)
+# ── 你的彩票分析程式庫（唯一入口） ───────────────────────────────────────────
+LOTTERY_OK = False
+LOTTERY_IMPORT_ERR = ""
+try:
+    from my_commands.lottery_gpt import lottery_gpt as run_lottery_analysis
+    LOTTERY_OK = True
+except Exception as e:
+    LOTTERY_OK = False
+    LOTTERY_IMPORT_ERR = f"{e.__class__.__name__}: {e}"
+    run_lottery_analysis = None  # 避免名稱不存在
 
-# ====== 股票模組（沿用，若失敗則降級） ======
+# ── 股票模組（若失敗則降級為安全 stub） ───────────────────────────────────────
 try:
     from my_commands.stock.stock_price import stock_price
     from my_commands.stock.stock_news import stock_news
@@ -72,7 +71,7 @@ try:
     from my_commands.stock.YahooStock import YahooStock
     STOCK_OK = True
 except Exception as e:
-    logger.warning(f"股票模組載入失敗：{e}")
+    logging.warning(f"股票模組載入失敗：{e}")
     def stock_price(s): return pd.DataFrame()
     def stock_news(s): return "（股票新聞模組未載入）"
     def stock_fundamental(s): return "（股票基本面模組未載入）"
@@ -81,68 +80,8 @@ except Exception as e:
         def __init__(self, s): self.name = "（YahooStock 未載入）"
     STOCK_OK = False
 
-# ====== （可選）官方 TaiwanLotteryCrawler，給你保留但不強依賴 ======
-_HEADERS = {"User-Agent": "Mozilla/5.0"}
-_TL_ENDPOINTS = {
-    "威力彩": "https://www.taiwanlottery.com.tw/lotto/superlotto638/history.aspx",
-    "大樂透": "https://www.taiwanlottery.com.tw/lotto/Lotto649/history.aspx",
-    "今彩539": "https://www.taiwanlottery.com.tw/lotto/DailyCash/history.aspx",
-    "雙贏彩": "https://www.taiwanlottery.com.tw/lotto/12_24/history.aspx",
-    "3星彩": "https://www.taiwanlottery.com.tw/lotto/3D/history.aspx",
-    "三星彩": "https://www.taiwanlottery.com.tw/lotto/3D/history.aspx",
-    "4星彩": "https://www.taiwanlottery.com.tw/lotto/4D/history.aspx",
-    "38樂合彩": "https://www.taiwanlottery.com.tw/lotto/38M6/history.aspx",
-    "39樂合彩": "https://www.taiwanlottery.com.tw/lotto/39M5/history.aspx",
-    "49樂合彩": "https://www.taiwanlottery.com.tw/lotto/49M6/history.aspx",
-}
-
-def _html_fetch_numbers(url: str, limit: int = 6) -> List[Dict]:
-    """官方歷史頁簡易解析（備用），就算格式變動也盡量抓得到幾筆號碼。"""
-    out: List[Dict] = []
-    if not url:
-        return out
-    r = requests.get(url, headers=_HEADERS, timeout=10)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    rows = soup.select("table tbody tr") or soup.select("table tr")
-    for tr in rows[:max(1, limit)]:
-        txt = " ".join(tr.get_text(" ", strip=True).split())
-        if not txt:
-            continue
-        m = re.search(r"(\d{3,4}|\d{6,8})\s*期", txt)
-        period = m.group(0) if m else "未知期數"
-        nums = re.findall(r"\b\d{1,2}\b", txt)
-        bonus = []
-        if "特別" in txt and len(nums) >= 1:
-            bonus = nums[-1:]
-            nums = nums[:-1]
-        out.append({"period": period, "nums": [int(x) for x in nums], "bonus": [int(x) for x in bonus]})
-    return out
-
-def _fetch_recent_draws(lottery_type: str) -> List[Dict]:
-    """若你之後想在前置做資料，這裡保留 HTML fallback。現在主流程已改為直接 call 你的庫。"""
-    name = lottery_type
-    if "539" in lottery_type: name = "今彩539"
-    if "威力" in lottery_type: name = "威力彩"
-    if "大樂" in lottery_type: name = "大樂透"
-    url = _TL_ENDPOINTS.get(name)
-    return _html_fetch_numbers(url, 6) if url else []
-
-# ====== 財神方位（你的自訂；不可用時給預設） ======
-def _fetch_caiyunfangwei() -> Dict[str, str]:
-    try:
-        from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
-        return CaiyunfangweiCrawler().get_caiyunfangwei() or {}
-    except Exception:
-        today = datetime.today().date()
-        weekday = "一二三四五六日"[min(today.weekday(), 6)]
-        return {
-            "今天日期": f"{today.strftime('%Y/%m/%d')}（星期{weekday}）",
-            "今日歲次": "甲辰年（示意）",
-            "財神方位": "東北（示意）",
-        }
-
-# ====== LLM / 環境 ======
+# ── 環境與客戶端初始化 ───────────────────────────────────────────────────────
+logger = logging.getLogger("uvicorn.error"); logger.setLevel(logging.INFO)
 BASE_URL = os.getenv("BASE_URL")
 CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
@@ -151,6 +90,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "auto").lower()
 TTS_SEND_ALWAYS = os.getenv("TTS_SEND_ALWAYS", "true").lower() == "true"
+
 if not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("缺少必要環境變數：CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET")
 
@@ -186,7 +126,7 @@ if OPENAI_API_KEY:
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
-# ====== 會話狀態 ======
+# ── 會話狀態 / 翻譯 / 人設 ───────────────────────────────────────────────────
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 translation_states: Dict[str, str] = {}
@@ -214,9 +154,9 @@ TRANSLATE_CMD = re.compile(
 )
 INLINE_TRANSLATE = re.compile(r"^(en|eng|英文|ja|jp|日文|zh|繁中|中文)\s*[:：>]\s*(.+)$", re.IGNORECASE)
 
-# ====== 小工具 ======
+# ── 小工具 ───────────────────────────────────────────────────────────────────
 def _now() -> datetime: return datetime.utcnow()
-
+ 
 def get_chat_id(event: MessageEvent) -> str:
     """穩健取得 chat id（支援駝峰屬性與 to_dict()）"""
     source = event.source
@@ -245,15 +185,14 @@ def _tstate_set(chat_id: str, lang_display: str):
 def _tstate_get(chat_id: str) -> Optional[str]:
     exp = translation_states_ttl.get(chat_id)
     if exp and _now() > exp:
-        _tstate_clear(chat_id)
-        return None
+        _tstate_clear(chat_id); return None
     return translation_states.get(chat_id)
 
 def _tstate_clear(chat_id: str):
     translation_states.pop(chat_id, None)
     translation_states_ttl.pop(chat_id, None)
 
-# ====== Quick Reply（每則回覆都會帶） ======
+# ── Quick Reply（每則回覆都會帶） ────────────────────────────────────────────
 def build_quick_reply() -> QuickReply:
     return QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="主選單", text="選單")),
@@ -327,7 +266,7 @@ def build_submenu(kind: str) -> FlexMessage:
     )
     return FlexMessage(alt_text=title, contents=bubble)
 
-# ====== STT/TTS 與統一回覆 ======
+# ── STT/TTS 與統一回覆 ────────────────────────────────────────────────────────
 async def _stt_openai(audio_bytes: bytes, filename="audio.m4a") -> Optional[str]:
     if not openai_client: return None
     try:
@@ -349,10 +288,9 @@ async def _stt_groq(audio_bytes: bytes, filename="audio.m4a") -> Optional[str]:
         return None
 
 async def speech_to_text_async(audio_bytes: bytes) -> Optional[str]:
-    # 依序嘗試
-    text = await _stt_openai(audio_bytes)
-    if text: return text
-    return await _stt_groq(audio_bytes)
+    # 先讓事件圈跑一下
+    _ = await run_in_threadpool(lambda: None)
+    return await _stt_openai(audio_bytes) or await _stt_groq(audio_bytes)
 
 def _tts_openai(text: str) -> Optional[bytes]:
     if not openai_client: return None
@@ -377,8 +315,7 @@ def _tts_gtts(text: str) -> Optional[bytes]:
 async def text_to_speech_async(text: str) -> Optional[bytes]:
     if TTS_PROVIDER == "openai":
         b = await run_in_threadpool(_tts_openai, text)
-        if b: return b
-        return await run_in_threadpool(_tts_gtts, text)
+        return b or await run_in_threadpool(_tts_gtts, text)
     if TTS_PROVIDER == "gtts":
         return await run_in_threadpool(_tts_gtts, text)
     # auto
@@ -386,6 +323,7 @@ async def text_to_speech_async(text: str) -> Optional[bytes]:
     return b or await run_in_threadpool(_tts_gtts, text)
 
 async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
+    """所有文字回覆統一走這裡，Quick Reply 每次都會帶上。"""
     if not text: text = "（無內容）"
     messages = [TextMessage(text=text, quick_reply=build_quick_reply())]
     if extras: messages.extend(extras)
@@ -406,13 +344,13 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
     await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
 
 async def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
-    # 先送文字(帶 QuickReply)，再送 Flex，確保快速鍵一直在
+    """先送文字(含 QuickReply)再送 Flex，確保快速鍵一直在。"""
     await line_bot_api.reply_message(ReplyMessageRequest(
         reply_token=reply_token,
         messages=[TextMessage(text=hint, quick_reply=build_quick_reply()), flex]
     ))
 
-# ====== 一般聊天/翻譯 LLM ======
+# ── 一般聊天/翻譯 LLM ────────────────────────────────────────────────────────
 def get_analysis_reply(messages: List[dict]) -> str:
     if openai_client:
         try:
@@ -472,8 +410,10 @@ def build_persona_prompt(chat_id: str, sentiment: str) -> str:
             f"使用者情緒：{sentiment}。\n"
             f"回覆請精煉自然，使用繁體中文，帶少量表情 {p['emoji']}.")
 
-# ====== 金價/外匯/股票 ======
+# ── 金價 / 外匯 / 股票 ──────────────────────────────────────────────────────
 BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
+_HEADERS = {"User-Agent": "Mozilla/5.0"}
+
 def get_bot_gold_quote() -> dict:
     r = requests.get(BOT_GOLD_URL, headers=_HEADERS, timeout=10); r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -593,15 +533,7 @@ def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> s
     except Exception:
         return f"（分析模型不可用）原始資料：\n{content_block}\n\n連結：{stock_link}"
 
-# ====== 彩票主流程（直接呼叫你的庫） ======
-def get_lottery_analysis(lottery_type: str) -> str:
-    # 直接使用你寫的 my_commands.lottery_gpt.lottery_gpt
-    try:
-        return run_lottery_analysis(lottery_type)
-    except Exception as e:
-        return f"彩票分析模組執行失敗：{e}"
-
-# ====== 事件處理 ======
+# ── 事件處理 ─────────────────────────────────────────────────────────────────
 async def handle_text_message(event: MessageEvent):
     chat_id = get_chat_id(event)
     msg_raw = (event.message.text or "").strip()
@@ -618,7 +550,7 @@ async def handle_text_message(event: MessageEvent):
         msg = re.sub(f'^@{re.escape(bot_name)}\\s*','', msg_raw).strip()
     if not msg: return
 
-    # 翻譯模式啟停
+    # 翻譯模式命令
     m = TRANSLATE_CMD.match(msg)
     if m:
         lang_token = m.group(1)
@@ -643,17 +575,16 @@ async def handle_text_message(event: MessageEvent):
         out = await translate_text(text_to_translate, lang_display)
         await reply_text_with_tts_and_extras(reply_tok, out); return
 
-    # 若在翻譯模式
+    # 翻譯模式中
     current_lang = _tstate_get(chat_id)
     if current_lang:
         out = await translate_text(msg, current_lang)
         await reply_text_with_tts_and_extras(reply_tok, out); return
 
-    # 主選單/子選單
+    # 主選單 / 子選單 / 人設
     low = msg.lower()
     if low in ("menu","選單","主選單"):
         await reply_menu_with_hint(reply_tok, build_main_menu()); return
-
     if msg in PERSONA_ALIAS:
         key = set_user_persona(chat_id, msg)
         p = PERSONAS[key]
@@ -672,14 +603,21 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價。")
         return
 
-    # 彩票
+    # 彩票（直接呼叫你的庫）
     if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
-        try:
-            report = await run_in_threadpool(get_lottery_analysis, msg)
-            await reply_text_with_tts_and_extras(reply_tok, report)
-        except Exception as e:
-            logger.error(f"彩票分析失敗: {e}", exc_info=True)
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤。")
+        if LOTTERY_OK and callable(run_lottery_analysis):
+            try:
+                report = await run_in_threadpool(run_lottery_analysis, msg)
+                await reply_text_with_tts_and_extras(reply_tok, report)
+            except Exception as e:
+                logger.error(f"彩票分析失敗: {e}", exc_info=True)
+                await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}")
+        else:
+            await reply_text_with_tts_and_extras(
+                reply_tok,
+                f"彩票分析模組未載入（匯入失敗）。詳情：{LOTTERY_IMPORT_ERR}\n"
+                "請確認 my_commands/lottery_gpt.py、TaiwanLottery.py、CaiyunfangweiCrawler.py 都存在，且使用相對匯入。"
+            )
         return
 
     # 外匯
@@ -749,7 +687,17 @@ async def handle_postback(event: PostbackEvent):
         kind = data.split(":",1)[-1]
         await reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
 
-# ====== FastAPI ======
+async def handle_events(events):
+    for event in events:
+        if isinstance(event, MessageEvent):
+            if isinstance(event.message, TextMessageContent):
+                await handle_text_message(event)
+            elif isinstance(event.message, AudioMessageContent):
+                await handle_audio_message(event)
+        elif isinstance(event, PostbackEvent):
+            await handle_postback(event)
+
+# ── FastAPI ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if BASE_URL:
@@ -767,7 +715,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.2")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.3")
 router = APIRouter()
 
 @router.post("/callback")
@@ -783,16 +731,6 @@ async def callback(request: Request):
         logger.error(f"Callback 失敗：{e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
     return JSONResponse({"status":"ok"})
-
-async def handle_events(events):
-    for event in events:
-        if isinstance(event, MessageEvent):
-            if isinstance(event.message, TextMessageContent):
-                await handle_text_message(event)
-            elif isinstance(event.message, AudioMessageContent):
-                await handle_audio_message(event)
-        elif isinstance(event, PostbackEvent):
-            await handle_postback(event)
 
 @router.get("/")
 async def root(): return PlainTextResponse("LINE Bot is running.", status_code=200)
