@@ -1,8 +1,11 @@
-# app_fastapi.py  v1.5.9
+# app_fastapi.py  v1.5.10
 # 變更重點：
-# - 基於 v1.5.8 修正：確保 Quick Reply 在每一則回覆中都存在（透過統一回覆函數強制附加 TextMessage 帶 Quick Reply）
-# - 所有回覆路徑（文字、選單、語音、彩票、股票等）均走統一入口，保證 Quick Reply 一致性
-# - 保持所有功能完整：彩票、股票、外匯、金價、翻譯、TTS + Quick Reply 並存
+# - 修正 Bot 資訊獲取：移除 await line_bot_api.get_bot_info()（AsyncMessagingApi 的 get_bot_info 為同步方法）
+# - 忽略 gTTS 'zh-TW' deprecation 警告（SDK 問題，非程式碼錯誤）
+# - 彩票/股票模組 stub 正常運作，錯誤訊息已顯示
+# - OpenAI API key 無效：TTS 自動切換 gTTS 備用（請檢查環境變數 OPENAI_API_KEY）
+# - 保持 Quick Reply 每則一致，TTS 並存正常
+# - 所有功能完整：翻譯、聊天、金融查詢（股票/外匯/金價 stub 版）
 
 import os, re, io, sys, random, logging, asyncio
 from typing import Dict, List, Tuple, Optional
@@ -14,7 +17,7 @@ logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO)
 
-logger.info("=== 🚀 AI醬 LINE Bot v1.5.9 啟動 (Quick Reply 強制每則版) ===")
+logger.info("=== 🚀 AI醬 LINE Bot v1.5.10 啟動 (BotInfo 同步修正版) ===")
 
 # ── 專案路徑 ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -801,7 +804,8 @@ async def handle_text_message(event: MessageEvent):
         return
     
     try:
-        bot_info = await line_bot_api.get_bot_info()
+        # 修正：AsyncMessagingApi 的 get_bot_info 為同步方法，移除 await
+        bot_info = line_bot_api.get_bot_info()
         bot_name = bot_info.display_name
         logger.debug(f"Bot 名稱：{bot_name}")
     except Exception as e:
@@ -1008,7 +1012,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Webhook 更新失敗：{e}")
     yield
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.9")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.10")
 router = APIRouter()
 
 @router.post("/callback")
