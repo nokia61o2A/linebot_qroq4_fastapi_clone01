@@ -1,14 +1,21 @@
-# app_fastapi.py  v1.5.5
+# app_fastapi.py  v1.5.6
 # 變更重點：
-# - 修正 TTS 語音功能：確保每則回覆都有語音
-# - 改進非同步 TTS 處理邏輯
-# - 保持所有原有功能：翻譯、股票、外匯、金價
-# - Quick Reply 每則訊息都帶；Flex 選單策略不變
+# - 修正 logger 定義順序：先定義 logger，再載入模組
+# - 確保 TTS 每則回覆都有語音（正確的非同步處理）
+# - 保持所有功能：翻譯、股票、外匯、金價、彩票
+# - Quick Reply 每則訊息都帶，Flex 選單正常
 
 import os, re, io, sys, random, logging, asyncio
 from typing import Dict, List, Tuple, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+
+# ── 先定義 logger，避免 NameError ────────────────────────────────────────
+logger = logging.getLogger("uvicorn.error")
+logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO)
+
+logger.info("=== 🚀 AI醬 LINE Bot v1.5.6 啟動 ===")
 
 # ── 專案路徑 ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,24 +51,23 @@ from linebot.v3.messaging import (
 # ── Cloudinary（可選） ───────────────────────────────────────────────────────
 CLOUDINARY_AVAILABLE = False
 CLOUDINARY_CONFIGURED = False
-cloudinary = None
-cloudinary_uploader = None
 if 'CLOUDINARY_URL' in os.environ:
     try:
         import cloudinary, cloudinary.uploader
         CLOUDINARY_AVAILABLE = True
-        cloudinary = cloudinary
         cloudinary_uploader = cloudinary.uploader
-    except ImportError:
-        pass
+        logger.info("Cloudinary 模組載入成功")
+    except ImportError as e:
+        logger.warning(f"Cloudinary 模組載入失敗：{e}")
 
 # ── TTS/STT（可選） ─────────────────────────────────────────────────────────
 GTTS_AVAILABLE = False
 try:
     from gtts import gTTS
     GTTS_AVAILABLE = True
-except ImportError:
-    pass
+    logger.info("gTTS 模組載入成功")
+except ImportError as e:
+    logger.warning(f"gTTS 模組載入失敗：{e}")
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 from groq import AsyncGroq, Groq
@@ -90,7 +96,7 @@ try:
     STOCK_OK = True
     logger.info("股票模組載入成功")
 except Exception as e:
-    logging.warning(f"股票模組載入失敗：{e}")
+    logger.warning(f"股票模組載入失敗：{e}")
     def stock_price(s): return pd.DataFrame()
     def stock_news(s): return "（股票新聞模組未載入）"
     def stock_fundamental(s): return "（股票基本面模組未載入）"
@@ -100,7 +106,6 @@ except Exception as e:
     STOCK_OK = False
 
 # ── 環境與客戶端初始化 ───────────────────────────────────────────────────────
-logger = logging.getLogger("uvicorn.error"); logger.setLevel(logging.INFO)
 BASE_URL = os.getenv("BASE_URL")
 CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
@@ -113,12 +118,9 @@ TTS_SEND_ALWAYS = os.getenv("TTS_SEND_ALWAYS", "true").lower() == "true"
 if not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("缺少必要環境變數：CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET")
 
-logger.info(f"環境變數檢查：TTS={TTS_SEND_ALWAYS}, Provider={TTS_PROVIDER}, Cloudinary={CLOUDINARY_AVAILABLE}")
-
 # Cloudinary（可選）
 if CLOUDINARY_URL and CLOUDINARY_AVAILABLE:
     try:
-        import re
         cloudinary.config(
             cloud_name=re.search(r"@(.+)", CLOUDINARY_URL).group(1),
             api_key=re.search(r"//(\d+):", CLOUDINARY_URL).group(1),
@@ -128,21 +130,15 @@ if CLOUDINARY_URL and CLOUDINARY_AVAILABLE:
         CLOUDINARY_CONFIGURED = True
     except Exception as e:
         logger.error(f"Cloudinary 設定失敗: {e}")
-        CLOUDINARY_URL = None
         CLOUDINARY_CONFIGURED = False
 else:
-    logger.info("Cloudinary 未配置或不可用")
+    CLOUDINARY_CONFIGURED = False
 
 # LINE / LLM Client
-try:
-    configuration = Configuration(access_token=CHANNEL_TOKEN)
-    api_client = ApiClient(configuration=configuration)
-    line_bot_api = AsyncMessagingApi(api_client=api_client)
-    parser = WebhookParser(CHANNEL_SECRET)
-    logger.info("LINE Bot 客戶端初始化成功")
-except Exception as e:
-    logger.error(f"LINE Bot 客戶端初始化失敗：{e}")
-    raise
+configuration = Configuration(access_token=CHANNEL_TOKEN)
+api_client = ApiClient(configuration=configuration)
+line_bot_api = AsyncMessagingApi(api_client=api_client)
+parser = WebhookParser(CHANNEL_SECRET)
 
 sync_groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -151,14 +147,11 @@ openai_client = None
 if OPENAI_API_KEY:
     try:
         openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        logger.info("OpenAI 客戶端初始化成功")
     except Exception as e:
         logger.warning(f"初始化 OpenAI 失敗：{e}")
 
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
-
-logger.info(f"LLM 設定：Groq Primary={GROQ_MODEL_PRIMARY}, Fallback={GROQ_MODEL_FALLBACK}")
 
 # ── 會話狀態 / 翻譯 / 人設 ───────────────────────────────────────────────────
 conversation_history: Dict[str, List[dict]] = {}
@@ -354,64 +347,40 @@ def _tts_gtts(text: str) -> Optional[bytes]:
 
 async def text_to_speech_async(text: str) -> Optional[bytes]:
     """文字轉語音（非同步）"""
-    # 清理文字，避免特殊字符影響 TTS
     clean_text = re.sub(r"[*_`~#]", "", text).strip()
     if not clean_text:
         clean_text = "內容為空"
     
     if TTS_PROVIDER == "openai":
-        # 先試 OpenAI
+        # 強制 OpenAI，失敗後用 gTTS 備用
         try:
             result = await run_in_threadpool(_tts_openai, clean_text)
-            if result:
-                logger.debug("OpenAI TTS 成功")
-                return result
+            if result: return result
         except Exception as e:
-            logger.warning(f"OpenAI TTS 失敗，嘗試 gTTS：{e}")
+            logger.warning(f"OpenAI TTS 失敗，使用 gTTS 備用：{e}")
         
-        # OpenAI 失敗，嘗試 gTTS
-        try:
-            result = await run_in_threadpool(_tts_gtts, clean_text)
-            if result:
-                logger.debug("gTTS 成功（OpenAI 備用）")
-                return result
-        except Exception as e:
-            logger.error(f"gTTS 也失敗：{e}")
-            return None
+        return await run_in_threadpool(_tts_gtts, clean_text)
     
     elif TTS_PROVIDER == "gtts":
-        try:
-            result = await run_in_threadpool(_tts_gtts, clean_text)
-            if result:
-                logger.debug("gTTS 成功")
-                return result
-        except Exception as e:
-            logger.error(f"gTTS 失敗：{e}")
-            return None
+        # 強制 gTTS
+        return await run_in_threadpool(_tts_gtts, clean_text)
     
-    else:  # auto
-        # 自動選擇，先試 OpenAI
+    else:  # "auto"
+        # 自動選擇：OpenAI → gTTS
         try:
             result = await run_in_threadpool(_tts_openai, clean_text)
-            if result:
-                logger.debug("OpenAI TTS 成功（自動）")
+            if result: 
+                logger.debug("使用 OpenAI TTS")
                 return result
         except Exception as e:
-            logger.warning(f"OpenAI TTS 失敗，嘗試 gTTS：{e}")
+            logger.warning(f"OpenAI TTS 失敗，改用 gTTS：{e}")
         
-        try:
-            result = await run_in_threadpool(_tts_gtts, clean_text)
-            if result:
-                logger.debug("gTTS 成功（自動備用）")
-                return result
-        except Exception as e:
-            logger.error(f"gTTS 也失敗：{e}")
-            return None
+        return await run_in_threadpool(_tts_gtts, clean_text)
 
 async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
     """
     所有文字回覆統一走這裡，Quick Reply 每次都會帶上。
-    修正版：確保 TTS 語音正常工作
+    修正版：確保 TTS 語音正常工作，每則回覆都有語音
     """
     if not text: 
         text = "（無內容）"
@@ -432,29 +401,26 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
             if audio_bytes and len(audio_bytes) > 0:
                 logger.debug(f"TTS 音檔生成成功，大小：{len(audio_bytes)} bytes")
                 
-                # 上傳到 Cloudinary
-                try:
-                    upload_result = await run_in_threadpool(
-                        lambda: cloudinary_uploader.upload(
-                            io.BytesIO(audio_bytes),
-                            resource_type="video", 
-                            folder="line-bot-tts", 
-                            format="mp3"
-                        )
+                # 上傳到 Cloudinary（使用 run_in_threadpool 包裝同步調用）
+                upload_result = await run_in_threadpool(
+                    lambda: cloudinary_uploader.upload(
+                        io.BytesIO(audio_bytes),
+                        resource_type="video", 
+                        folder="line-bot-tts", 
+                        format="mp3"
                     )
+                )
+                
+                url = upload_result.get("secure_url")
+                if url:
+                    # 計算音檔持續時間（估計）
+                    est_duration = max(3000, min(30000, len(text) * 60))
+                    audio_msg = AudioMessage(original_content_url=url, duration=est_duration)
+                    messages.append(audio_msg)
+                    logger.info(f"TTS 上傳成功：{url}，持續時間：{est_duration}ms")
+                else:
+                    logger.warning("Cloudinary 上傳成功但無 secure_url")
                     
-                    url = upload_result.get("secure_url")
-                    if url:
-                        # 計算音檔持續時間（估計）
-                        est_duration = max(3000, min(30000, len(text) * 60))
-                        audio_msg = AudioMessage(original_content_url=url, duration=est_duration)
-                        messages.append(audio_msg)
-                        logger.info(f"TTS 上傳成功：{url}，持續時間：{est_duration}ms")
-                    else:
-                        logger.warning("Cloudinary 上傳成功但無 secure_url")
-                        
-                except Exception as upload_e:
-                    logger.error(f"Cloudinary 上傳失敗：{upload_e}")
             else:
                 logger.warning("TTS 生成空音檔")
                 
@@ -927,26 +893,17 @@ async def handle_text_message(event: MessageEvent):
         logger.info(f"收到彩票查詢：{msg}，模組狀態：LOTTERY_OK={LOTTERY_OK}")
         if LOTTERY_OK and callable(run_lottery_analysis):
             try:
-                logger.info(f"開始執行 {msg} 分析...")
                 report = await run_in_threadpool(run_lottery_analysis, msg)
-                logger.info(f"{msg} 分析完成，長度：{len(report)} 字元")
                 await reply_text_with_tts_and_extras(reply_tok, report)
             except Exception as e:
                 logger.error(f"彩票分析失敗: {e}", exc_info=True)
-                error_msg = f"抱歉，分析 {msg} 時發生錯誤：{str(e)[:100]}..."
-                await reply_text_with_tts_and_extras(reply_tok, error_msg)
+                await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}")
         else:
-            error_details = f"LOTTERY_OK={LOTTERY_OK}, ERR={LOTTERY_IMPORT_ERR[:50]}..."
-            logger.error(f"彩票模組未載入：{error_details}")
-            error_msg = (
-                f"🎰 彩票分析功能暫時不可用\n"
-                f"錯誤詳情：{LOTTERY_IMPORT_ERR[:100]}...\n\n"
-                f"💡 建議：\n"
-                f"• 確認 taiwanlottery 套件已安裝\n"
-                f"• 稍後再試\n"
-                f"其他功能（如股票、外匯）正常使用！"
+            await reply_text_with_tts_and_extras(
+                reply_tok,
+                f"彩票分析模組未載入（匯入失敗）。詳情：{LOTTERY_IMPORT_ERR}\n"
+                "請確認 my_commands/lottery_gpt.py、TaiwanLottery.py、CaiyunfangweiCrawler.py 都存在，且使用相對匯入。"
             )
-            await reply_text_with_tts_and_extras(reply_tok, error_msg)
         return
 
     # ── 外匯 ───────────────────────────────────────────────────────────────────
@@ -967,8 +924,6 @@ async def handle_text_message(event: MessageEvent):
         logger.info(f"股票查詢：{msg}")
         try:
             ticker, name_hint, link = _normalize_ticker_and_name(msg)
-            logger.debug(f"股票標準化：{ticker} <- {msg}")
-            
             content_block, _ = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
             report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
             await reply_text_with_tts_and_extras(reply_tok, report)
@@ -987,11 +942,9 @@ async def handle_text_message(event: MessageEvent):
         messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
         final_reply = await groq_chat_async(messages)
         
-        # 更新對話歷史
         history.extend([{"role":"user","content":msg},{"role":"assistant","content":final_reply}])
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
         
-        logger.debug(f"聊天回應長度：{len(final_reply)}")
         await reply_text_with_tts_and_extras(reply_tok, final_reply)
     except Exception as e:
         logger.error(f"一般聊天失敗：{e}")
@@ -1005,41 +958,23 @@ async def handle_audio_message(event: MessageEvent):
     try:
         content_stream = await line_bot_api.get_message_content(event.message.id)
         audio_in = await content_stream.read()
-        logger.debug(f"語音檔案大小：{len(audio_in)} bytes")
-        
         text = await speech_to_text_async(audio_in)
         if not text:
             await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
-            logger.warning("語音轉文字失敗")
             return
-        
-        logger.info(f"語音轉文字結果：{text[:50]}...")
         msgs = [TextMessage(text=f"🎧 我聽到了：\n{text}", quick_reply=build_quick_reply())]
-        
-        # 語音回音（如果啟用）
         if TTS_SEND_ALWAYS and CLOUDINARY_CONFIGURED:
-            try:
-                echo_bytes = await text_to_speech_async(f"你說了：{text}")
-                if echo_bytes and len(echo_bytes) > 0:
-                    upload_result = await run_in_threadpool(
-                        lambda: cloudinary_uploader.upload(
-                            io.BytesIO(echo_bytes),
-                            resource_type="video", 
-                            folder="line-bot-tts", 
-                            format="mp3"
-                        )
-                    )
-                    url = upload_result.get("secure_url")
-                    if url:
-                        est = max(3000, min(30000, len(text) * 60))
-                        msgs.append(AudioMessage(original_content_url=url, duration=est))
-                        logger.info(f"語音回音上傳成功：{url}")
-            except Exception as e:
-                logger.warning(f"語音回音失敗：{e}")
-        
+            echo_bytes = await text_to_speech_async(f"你說了：{text}")
+            if echo_bytes:
+                upload_result = await run_in_threadpool(
+                    lambda: cloudinary_uploader.upload(io.BytesIO(echo_bytes),
+                        resource_type="video", folder="line-bot-tts", format="mp3")
+                )
+                url = upload_result.get("secure_url")
+                if url:
+                    est = max(3000, min(30000, len(text) * 60))
+                    msgs.append(AudioMessage(original_content_url=url, duration=est))
         line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=msgs))
-        logger.info("語音處理完成")
-        
     except Exception as e:
         logger.error(f"語音處理失敗: {e}", exc_info=True)
         await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
@@ -1047,41 +982,24 @@ async def handle_audio_message(event: MessageEvent):
 async def handle_postback(event: PostbackEvent):
     """處理 Postback 事件"""
     data = event.postback.data or ""
-    logger.info(f"收到 Postback：{data}")
-    
     if data.startswith("menu:"):
         kind = data.split(":",1)[-1]
-        logger.info(f"顯示子選單：{kind}")
         await reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
-    else:
-        logger.warning(f"未知 Postback 資料：{data}")
-        await reply_text_with_tts_and_extras(event.reply_token, "收到你的選擇，正在處理中...")
 
 async def handle_events(events):
     """處理事件列表"""
-    logger.info(f"處理 {len(events)} 個事件")
     for event in events:
-        try:
-            if isinstance(event, MessageEvent):
-                if isinstance(event.message, TextMessageContent):
-                    await handle_text_message(event)
-                elif isinstance(event.message, AudioMessageContent):
-                    await handle_audio_message(event)
-                else:
-                    logger.debug(f"忽略未知訊息類型：{type(event.message)}")
-            elif isinstance(event, PostbackEvent):
-                await handle_postback(event)
-            else:
-                logger.debug(f"忽略未知事件類型：{type(event)}")
-        except Exception as e:
-            logger.error(f"事件處理失敗：{e}", exc_info=True)
+        if isinstance(event, MessageEvent):
+            if isinstance(event.message, TextMessageContent):
+                await handle_text_message(event)
+            elif isinstance(event.message, AudioMessageContent):
+                await handle_audio_message(event)
+        elif isinstance(event, PostbackEvent):
+            await handle_postback(event)
 
 # ── FastAPI ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """應用程式生命週期管理"""
-    logger.info("🚀 LINE Bot 啟動中...")
-    
     if BASE_URL:
         async with httpx.AsyncClient() as c:
             for endpoint in ("https://api-data.line.me/v2/bot/channel/webhook/endpoint",
@@ -1091,74 +1009,38 @@ async def lifespan(app: FastAPI):
                     payload={"endpoint":f"{BASE_URL}/callback"}
                     r = await c.put(endpoint, headers=headers, json=payload, timeout=10.0)
                     r.raise_for_status()
-                    logger.info(f"✅ Webhook 更新成功: {r.status_code}")
+                    logger.info(f"Webhook 更新成功: {endpoint} {r.status_code}")
                     break
                 except Exception as e:
-                    logger.warning(f"⚠️ Webhook 更新失敗：{e}")
-    
-    logger.info("✅ 應用程式啟動完成")
+                    logger.warning(f"Webhook 更新失敗：{e}")
     yield
-    logger.info("👋 應用程式關閉")
 
-app = FastAPI(lifespan=lifespan, title="AI醬 LINE Bot", version="1.5.5", description="全方位 AI 助理：彩票分析、股票、外匯、翻譯")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.6")
 router = APIRouter()
 
 @router.post("/callback")
 async def callback(request: Request):
-    """LINE Webhook 回調"""
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
-    
-    logger.info(f"📨 收到 Webhook，簽名長度：{len(signature)}")
-    
     try:
         events = parser.parse(body.decode("utf-8"), signature)
         await handle_events(events)
-        logger.debug("✅ Webhook 處理完成")
-        return JSONResponse({"status":"ok"})
     except InvalidSignatureError:
-        logger.warning("❌ 無效簽名")
         raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
-        logger.error(f"💥 Callback 失敗：{e}", exc_info=True)
+        logger.error(f"Callback 失敗：{e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
+    return JSONResponse({"status":"ok"})
 
 @router.get("/")
-async def root(): 
-    """根路徑 - 歡迎訊息"""
-    return PlainTextResponse(
-        "🤖 AI醬 LINE Bot v1.5.5 運行中！\n"
-        "功能：彩票分析 💰 | 股票查詢 📈 | 外匯匯率 💱 | 即時翻譯 🌐 | 語音互動 🎤\n"
-        "健康檢查：/healthz"
-    )
+async def root(): return PlainTextResponse("LINE Bot is running.", status_code=200)
 
 @router.get("/healthz")
-async def healthz(): 
-    """健康檢查端點"""
-    status = {
-        "status": "ok",
-        "version": "1.5.5",
-        "timestamp": datetime.utcnow().isoformat(),
-        "services": {
-            "line_bot": "active",
-            "lottery_module": LOTTERY_OK,
-            "stock_module": STOCK_OK,
-            "cloudinary": CLOUDINARY_CONFIGURED,
-            "tts_enabled": TTS_SEND_ALWAYS,
-            "gtts_available": GTTS_AVAILABLE,
-            "openai_available": openai_client is not None,
-            "groq_available": sync_groq_client is not None,
-            "active_conversations": len(conversation_history),
-            "tts_provider": TTS_PROVIDER
-        }
-    }
-    logger.debug(f"🩺 健康檢查：{status}")
-    return JSONResponse(status)
+async def healthz(): return PlainTextResponse("ok", status_code=200)
 
 app.include_router(router)
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    logger.info(f"🎬 啟動開發伺服器，端口：{port}，TTS：{TTS_SEND_ALWAYS}")
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
