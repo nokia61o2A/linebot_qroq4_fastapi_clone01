@@ -843,7 +843,7 @@ async def handle_text_message(event: MessageEvent):
         return
 
     # ── 彩票分析 ──────────────────────────────────────────────────────────────
-    if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
+    if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","四星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
         logger.info(f"收到彩票查詢：{msg}，模組狀態：LOTTERY_OK={LOTTERY_OK}")
         if LOTTERY_OK and callable(run_lottery_analysis):
             try:
