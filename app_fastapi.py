@@ -429,6 +429,85 @@ async def text_to_speech_async(text: str) -> Optional[bytes]:
 
 async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
     """
+    所有文字回覆統一走這裡，調整順序：Text 先 → Audio 中 → Text with QR 最後（QR Button 置底）。
+    新順序：純 Text → TTS Audio → 提示 Text with QR（確保 QR 在底部顯示）。
+    """
+    if not text: 
+        text = "（無內容）"
+    
+    logger.debug(f"準備回覆：{text[:50]}...，TTS={TTS_SEND_ALWAYS}, Cloudinary={CLOUDINARY_CONFIGURED}")
+    
+    # 建構訊息順序：Text 先、Audio 中、QR Text 最後
+    messages = []
+    
+    # 第一步：純文字訊息（無 QR）
+    text_message = TextMessage(text=text)
+    messages.append(text_message)
+    logger.debug("附加純文字（第一條）")
+    
+    # 第二步：TTS Audio（如果啟用）
+    audio_msg = None
+    if TTS_SEND_ALWAYS and CLOUDINARY_CONFIGURED and cloudinary_uploader:
+        try:
+            logger.debug("開始 TTS 處理...")
+            audio_bytes = await text_to_speech_async(text)
+            
+            if audio_bytes and len(audio_bytes) > 0:
+                logger.debug(f"TTS 音檔生成成功，大小：{len(audio_bytes)} bytes")
+                
+                # 上傳到 Cloudinary
+                upload_result = await run_in_threadpool(
+                    lambda: cloudinary_uploader.upload(
+                        io.BytesIO(audio_bytes),
+                        resource_type="video", 
+                        folder="line-bot-tts", 
+                        format="mp3"
+                    )
+                )
+                
+                url = upload_result.get("secure_url")
+                if url:
+                    est_duration = max(3000, min(30000, len(text) * 60))
+                    audio_msg = AudioMessage(original_content_url=url, duration=est_duration)
+                    messages.append(audio_msg)  # 插入第二條
+                    logger.debug("附加 Audio 到第二位置")
+                    logger.info(f"TTS 上傳成功：{url}，持續時間：{est_duration}ms")
+                else:
+                    logger.warning("Cloudinary 上傳成功但無 secure_url")
+            else:
+                logger.warning("TTS 生成空音檔")
+        except Exception as tts_e:
+            logger.error(f"TTS 處理失敗：{tts_e}")
+    
+    # 第三步：提示文字 + Quick Reply（總在最後，確保 QR 底部）
+    qr_hint_text = "👇 使用 Quick Reply 繼續..."  # 可自訂提示文字
+    qr_text_message = TextMessage(text=qr_hint_text, quick_reply=build_quick_reply())
+    messages.append(qr_text_message)
+    
+    # 如果有 extras，插入到最前面（選單等）
+    if extras: 
+        messages = extras + messages  # extras 先發
+        logger.debug(f"附加 extras 到最前：{len(extras)} 項 (e.g., Flex)")
+    
+    # LINE API 調用（同步）
+    try:
+        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+        has_qr = any(hasattr(m, 'quick_reply') and m.quick_reply for m in messages)
+        msg_types = [m.__class__.__name__ for m in messages]
+        logger.info(f"LINE 回覆成功：{reply_token[:20]}...，訊息數：{len(messages)}，類型：{msg_types}，Quick Reply 附加（最後）：{has_qr}")
+    except Exception as line_e:
+        logger.error(f"LINE 回覆失敗：{line_e}")
+        # 備用方案：純文字 + QR 提示（順序：Text → QR Text）
+        try:
+            backup_messages = [
+                TextMessage(text=text[:100] + "..." if len(text) > 100 else text),
+                TextMessage(text=qr_hint_text, quick_reply=build_quick_reply())
+            ]
+            line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=backup_messages))
+            logger.info("LINE 備用回覆成功（文字 → QR 提示）")
+        except Exception as backup_e:
+            logger.error(f"LINE 備用回覆也失敗：{backup_e}")
+    """
     所有文字回覆統一走這裡，強制 Quick Reply 附加在最後一個 TextMessage 上（確保 QR 在底部顯示）。
     修正版：多訊息順序 = extras (Flex) + Audio + Text with QR（QR 置最後，LINE 顯示底部）
     """
@@ -499,6 +578,26 @@ async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Op
             logger.error(f"LINE 備用回覆也失敗：{backup_e}")
 
 async def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
+    """選單回覆：Flex 先 → 提示 Text with QR 最後，確保 Quick Reply 底部顯示"""
+    # 建構訊息順序：Flex 第一 → QR 提示 Text 最後
+    qr_hint_text = f"{hint}\n👇 使用 Quick Reply 繼續..."  # 合併提示
+    text_msg = TextMessage(text=qr_hint_text, quick_reply=build_quick_reply())
+    messages = [flex, text_msg]  # Flex 先，QR Text 最後
+    
+    try:
+        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+        has_qr = any(hasattr(m, 'quick_reply') and m.quick_reply for m in messages)
+        msg_types = [m.__class__.__name__ for m in messages]
+        logger.info(f"LINE 選單回覆成功：{reply_token[:20]}...，訊息數：{len(messages)}，類型：{msg_types}，Quick Reply 附加（最後）：{has_qr}")
+    except Exception as e:
+        logger.error(f"LINE 選單回覆失敗：{e}")
+        # 備用方案：僅 QR 提示 Text
+        try:
+            simple_msg = TextMessage(text=qr_hint_text, quick_reply=build_quick_reply())
+            line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[simple_msg]))
+            logger.info("LINE 選單備用回覆成功（僅 QR 提示）")
+        except Exception as backup_e:
+            logger.error(f"LINE 選單備用回覆也失敗：{backup_e}")
     """選單回覆：Flex 先 + 文字 with QR 最後，確保 Quick Reply 底部顯示"""
     # 強制附加 Quick Reply 在文字訊息上（置最後）
     text_msg = TextMessage(text=hint, quick_reply=build_quick_reply())
