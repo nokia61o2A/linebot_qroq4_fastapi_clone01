@@ -28,4 +28,4 @@ mplfinance>=0.12.10b0
 python-dotenv>=1.0.1
 
 # --- lottery / parsing ---
-TaiwanLotteryCrawler>=0.1.6
+taiwanlottery>=0.0.2

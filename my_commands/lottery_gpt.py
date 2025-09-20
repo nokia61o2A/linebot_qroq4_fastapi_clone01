@@ -7,16 +7,14 @@ from typing import Any, Dict, List
 # --- Groq LLM ---
 from groq import Groq
 
-# --- TaiwanLotteryCrawler：雙路匯入 ---
-# 1) 官方套件名稱：TaiwanLotteryCrawler（pip 安裝）
-# 2) 如果你本地真的有 TaiwanLottery.py，則退回本地
+# --- TaiwanLotteryCrawler：外部庫（修正為正確套件名 taiwanlottery） ---
 TL_IMPORT_ERROR = None
 try:
-    from TaiwanLotteryCrawler import TaiwanLotteryCrawler  # 正確套件名
+    from TaiwanLotteryCrawler import TaiwanLotteryCrawler  # 先試官方套件名
 except Exception as e:
     TL_IMPORT_ERROR = e
     try:
-        from TaiwanLottery import TaiwanLotteryCrawler  # 你的本地命名
+        from TaiwanLottery import TaiwanLotteryCrawler  # 後備：taiwanlottery 套件的匯入
     except Exception as e2:
         TL_IMPORT_ERROR = (TL_IMPORT_ERROR, e2)
         TaiwanLotteryCrawler = None  # type: ignore
