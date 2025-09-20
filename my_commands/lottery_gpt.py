@@ -10,18 +10,14 @@ from groq import Groq
 # --- TaiwanLotteryCrawler：外部庫（修正為正確套件名 taiwanlottery） ---
 TL_IMPORT_ERROR = None
 try:
-    from TaiwanLotteryCrawler import TaiwanLotteryCrawler  # 先試官方套件名
+    from taiwanlottery import TaiwanLotteryCrawler  # 正確匯入：taiwanlottery 套件
 except Exception as e:
     TL_IMPORT_ERROR = e
-    try:
-        from TaiwanLottery import TaiwanLotteryCrawler  # 後備：taiwanlottery 套件的匯入
-    except Exception as e2:
-        TL_IMPORT_ERROR = (TL_IMPORT_ERROR, e2)
-        TaiwanLotteryCrawler = None  # type: ignore
+    TaiwanLotteryCrawler = None  # type: ignore
 
 # --- 你已存在的方位爬蟲 ---
 try:
-    from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
+    from .CaiyunfangweiCrawler import CaiyunfangweiCrawler  # 相對匯入：同包檔案
 except Exception:
     # 後備：回基本欄位，避免主程式崩潰
     class CaiyunfangweiCrawler:

@@ -616,7 +616,7 @@ async def handle_text_message(event: MessageEvent):
             await reply_text_with_tts_and_extras(
                 reply_tok,
                 f"彩票分析模組未載入（匯入失敗）。詳情：{LOTTERY_IMPORT_ERR}\n"
-                "請確認 my_commands/lottery_gpt.py、TaiwanLottery.py、CaiyunfangweiCrawler.py 都存在，且使用相對匯入。"
+                "請確認 my_commands/lottery_gpt.py、taiwanlottery 套件安裝正常。"
             )
         return
 
