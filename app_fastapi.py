@@ -109,8 +109,8 @@ if CLOUDINARY_URL:
 
 # LINE / LLM Client
 configuration = Configuration(access_token=CHANNEL_TOKEN)
-async_api_client = ApiClient(configuration=configuration)
-line_bot_api = AsyncMessagingApi(api_client=async_api_client)
+api_client = ApiClient(configuration=configuration)
+line_bot_api = AsyncMessagingApi(api_client=api_client)
 parser = WebhookParser(CHANNEL_SECRET)
 
 sync_groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -322,30 +322,28 @@ async def text_to_speech_async(text: str) -> Optional[bytes]:
     b = await run_in_threadpool(_tts_openai, text)
     return b or await run_in_threadpool(_tts_gtts, text)
 
-async def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
+def reply_text_with_tts_and_extras(reply_token: str, text: str, extras: Optional[List]=None):
     """所有文字回覆統一走這裡，Quick Reply 每次都會帶上。"""
     if not text: text = "（無內容）"
     messages = [TextMessage(text=text, quick_reply=build_quick_reply())]
     if extras: messages.extend(extras)
     if TTS_SEND_ALWAYS and CLOUDINARY_URL:
         try:
-            audio_bytes = await text_to_speech_async(text)
+            audio_bytes = text_to_speech_async(text)
             if audio_bytes:
-                def _upload():
-                    return cloudinary.uploader.upload(io.BytesIO(audio_bytes),
-                        resource_type="video", folder="line-bot-tts", format="mp3")
-                res = await run_in_threadpool(_upload)
-                url = res.get("secure_url")
+                upload_res = run_in_threadpool(lambda: cloudinary.uploader.upload(io.BytesIO(audio_bytes),
+                    resource_type="video", folder="line-bot-tts", format="mp3"))
+                url = upload_res.get("secure_url")
                 if url:
                     est = max(3000, min(30000, len(text) * 60))
                     messages.append(AudioMessage(original_content_url=url, duration=est))
         except Exception as e:
             logger.warning(f"TTS 附加失敗：{e}")
-    await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+    line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
 
-async def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
+def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單"):
     """先送文字(含 QuickReply)再送 Flex，確保快速鍵一直在。"""
-    await line_bot_api.reply_message(ReplyMessageRequest(
+    line_bot_api.reply_message(ReplyMessageRequest(
         reply_token=reply_token,
         messages=[TextMessage(text=hint, quick_reply=build_quick_reply()), flex]
     ))
@@ -557,38 +555,38 @@ async def handle_text_message(event: MessageEvent):
         rev = {"english":"英文","japanese":"日文","korean":"韓文","vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
         lang_display = rev.get(lang_token.lower(), lang_token)
         _tstate_set(chat_id, lang_display)
-        await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。")
+        reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。")
         return
     if msg.startswith("翻譯->"):
         lang = msg.split("->",1)[1].strip()
         if lang=="結束":
             _tstate_clear(chat_id)
-            await reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式")
+            reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式")
         else:
             _tstate_set(chat_id, lang)
-            await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
+            reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
         return
     im = INLINE_TRANSLATE.match(msg)
     if im:
         lang_key, text_to_translate = im.group(1).lower(), im.group(2)
         lang_display = {"en":"英文","eng":"英文","英文":"英文","ja":"日文","jp":"日文","日文":"日文","zh":"繁體中文","繁中":"繁體中文","中文":"繁體中文"}.get(lang_key,"英文")
         out = await translate_text(text_to_translate, lang_display)
-        await reply_text_with_tts_and_extras(reply_tok, out); return
+        reply_text_with_tts_and_extras(reply_tok, out); return
 
     # 翻譯模式中
     current_lang = _tstate_get(chat_id)
     if current_lang:
         out = await translate_text(msg, current_lang)
-        await reply_text_with_tts_and_extras(reply_tok, out); return
+        reply_text_with_tts_and_extras(reply_tok, out); return
 
     # 主選單 / 子選單 / 人設
     low = msg.lower()
     if low in ("menu","選單","主選單"):
-        await reply_menu_with_hint(reply_tok, build_main_menu()); return
+        reply_menu_with_hint(reply_tok, build_main_menu()); return
     if msg in PERSONA_ALIAS:
         key = set_user_persona(chat_id, msg)
         p = PERSONAS[key]
-        await reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}"); return
+        reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}"); return
 
     # 金價
     if msg in ("金價","黃金"):
@@ -598,9 +596,9 @@ async def handle_text_message(event: MessageEvent):
             spread = sell - buy
             txt = (f"**金價（台灣銀行）**\n- 掛牌時間：{ts}\n- 賣出(1g)：{sell:,.0f} 元\n- 買進(1g)：{buy:,.0f} 元\n"
                    f"- 價差：{spread:,.0f} 元\n來源：{BOT_GOLD_URL}")
-            await reply_text_with_tts_and_extras(reply_tok, txt)
+            reply_text_with_tts_and_extras(reply_tok, txt)
         except Exception:
-            await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價。")
+            reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價。")
         return
 
     # 彩票（直接呼叫你的庫）
@@ -608,12 +606,12 @@ async def handle_text_message(event: MessageEvent):
         if LOTTERY_OK and callable(run_lottery_analysis):
             try:
                 report = await run_in_threadpool(run_lottery_analysis, msg)
-                await reply_text_with_tts_and_extras(reply_tok, report)
+                reply_text_with_tts_and_extras(reply_tok, report)
             except Exception as e:
                 logger.error(f"彩票分析失敗: {e}", exc_info=True)
-                await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}")
+                reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}")
         else:
-            await reply_text_with_tts_and_extras(
+            reply_text_with_tts_and_extras(
                 reply_tok,
                 f"彩票分析模組未載入（匯入失敗）。詳情：{LOTTERY_IMPORT_ERR}\n"
                 "請確認 my_commands/lottery_gpt.py、taiwanlottery 套件安裝正常。"
@@ -626,9 +624,9 @@ async def handle_text_message(event: MessageEvent):
             base, quote, link = parse_fx_pair(msg)
             last, chg, ts, df = fetch_fx_quote_yf(f"{base}{quote}=X")
             report = render_fx_report(base, quote, link, last, chg, ts, df)
-            await reply_text_with_tts_and_extras(reply_tok, report)
+            reply_text_with_tts_and_extras(reply_tok, report)
         except Exception as e:
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}")
+            reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}")
         return
 
     # 股票
@@ -637,9 +635,9 @@ async def handle_text_message(event: MessageEvent):
             ticker, name_hint, link = _normalize_ticker_and_name(msg)
             content_block, _ = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
             report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
-            await reply_text_with_tts_and_extras(reply_tok, report)
+            reply_text_with_tts_and_extras(reply_tok, report)
         except Exception as e:
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。")
+            reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。")
         return
 
     # 一般聊天
@@ -651,9 +649,9 @@ async def handle_text_message(event: MessageEvent):
         final_reply = await groq_chat_async(messages)
         history.extend([{"role":"user","content":msg},{"role":"assistant","content":final_reply}])
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
-        await reply_text_with_tts_and_extras(reply_tok, final_reply)
+        reply_text_with_tts_and_extras(reply_tok, final_reply)
     except Exception:
-        await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
+        reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
 
 async def handle_audio_message(event: MessageEvent):
     reply_tok = event.reply_token
@@ -662,7 +660,7 @@ async def handle_audio_message(event: MessageEvent):
         audio_in = await content_stream.read()
         text = await speech_to_text_async(audio_in)
         if not text:
-            await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
+            reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
             return
         msgs = [TextMessage(text=f"🎧 我聽到了：\n{text}", quick_reply=build_quick_reply())]
         if TTS_SEND_ALWAYS and CLOUDINARY_URL:
@@ -676,16 +674,16 @@ async def handle_audio_message(event: MessageEvent):
                 if url:
                     est = max(3000, min(30000, len(text) * 60))
                     msgs.append(AudioMessage(original_content_url=url, duration=est))
-        await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=msgs))
+        line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=msgs))
     except Exception as e:
         logger.error(f"語音處理失敗: {e}", exc_info=True)
-        await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
+        reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
 
 async def handle_postback(event: PostbackEvent):
     data = event.postback.data or ""
     if data.startswith("menu:"):
         kind = data.split(":",1)[-1]
-        await reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
+        reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單")
 
 async def handle_events(events):
     for event in events:
