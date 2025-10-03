@@ -1,3 +1,29 @@
+import os
+import re
+import random
+import logging
+import asyncio
+import requests
+from datetime import datetime
+from typing import Tuple
+from bs4 import BeautifulSoup
+import yfinance as yf
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.routing import APIRouter
+from contextlib import asynccontextmanager
+import uvicorn
+from linebot import LineBotApi, WebhookParser
+from linebot.models import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent
+from linebot.exceptions import InvalidSignatureError
+import openai
+from groq import AsyncGroq
+import httpx
+
+# 假設其他必要的 imports 和 globals 已在原始代碼中定義
+# 例如：PERSONA_ALIAS, PERSONAS, user_persona, logger, etc.
+# 為了完整性，這裡假設它們已定義；實際上需根據原始檔案補齊
+
 def set_user_persona(chat_id: str, key: str):
     """設定使用者人設"""
     key_mapped = PERSONA_ALIAS.get(key, key)
