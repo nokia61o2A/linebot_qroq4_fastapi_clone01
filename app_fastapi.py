@@ -14,7 +14,7 @@ from fastapi.routing import APIRouter
 from contextlib import asynccontextmanager
 import uvicorn
 from linebot import LineBotApi, WebhookParser
-from linebot.models import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent
 from linebot.exceptions import InvalidSignatureError
 import openai
 from groq import AsyncGroq
