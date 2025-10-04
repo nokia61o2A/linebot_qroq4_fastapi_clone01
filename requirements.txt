@@ -3,7 +3,7 @@ fastapi>=0.115.0
 uvicorn>=0.30.6
 
 # --- LINE Bot SDK ---
-line-bot-sdk>=3,<4
+line-bot-sdk==3.10.0
 
 # --- AI 模型服務 ---
 groq>=0.11.0
