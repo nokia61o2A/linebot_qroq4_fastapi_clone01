@@ -19,11 +19,119 @@ from linebot.exceptions import InvalidSignatureError
 import openai
 from groq import AsyncGroq
 import httpx
+from concurrent.futures import ThreadPoolExecutor
+import pandas as pd
 
-# 假設其他必要的 imports 和 globals 已在原始代碼中定義
-# 例如：PERSONA_ALIAS, PERSONAS, user_persona, logger, etc.
-# 為了完整性，這裡假設它們已定義；實際上需根據原始檔案補齊
+# ── 全域變數與 Mock 定義 ────────────────────────────────────────────────────
+PERSONA_ALIAS = {"sweet": "sweet", "random": "random"}  # 人設別名
+PERSONAS = {
+    "sweet": {"title": "甜美助手", "style": "溫柔親切", "emoji": "😊"}
+}  # 預設人設
+user_persona = {}  # 每個聊天的人設字典
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+TRANSLATE_CMD = re.compile(r'^翻譯\s*(.*)$')  # 翻譯指令正則
+INLINE_TRANSLATE = re.compile(r'^(en|ja|zh|英文|日文|中文)\s+(.+)$')  # 內聯翻譯正則
+LOTTERY_OK = True  # 彩票模組旗標
+conversation_history = {}  # 聊天歷史字典
+MAX_HISTORY_LEN = 10  # 歷史長度限制
+OPENAI_OK = False  # 全域旗標（在 lifespan 中設定）
+GROQ_OK = False
+OPENAI_LAST_REASON = "uninitialized"
+GROQ_LAST_REASON = "uninitialized"
+DISABLE_GROQ = os.getenv("DISABLE_GROQ", "false").lower() == "true"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CHANNEL_TOKEN = os.getenv("CHANNEL_TOKEN", "dummy")
+CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "dummy")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
+# LINE Bot 客戶端（mock 若無 token）
+line_bot_api = LineBotApi(CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
+parser = WebhookParser(CHANNEL_TOKEN, CHANNEL_SECRET) if CHANNEL_TOKEN != "dummy" else None
+
+# Mock 客戶端
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+GROQ_MODEL_FALLBACK = "llama3-8b-8192"  # 或你偏好的模型
+
+# Mock 函數（之後替換為真實實作）
+def get_chat_id(event): 
+    return str(event.source.user_id) if hasattr(event.source, 'user_id') else "test_chat"
+
+async def _tstate_set(chat_id, lang): 
+    pass  # 翻譯狀態
+
+def _tstate_get(chat_id): 
+    return None
+
+def _tstate_clear(chat_id): 
+    pass
+
+async def reply_text_with_tts_and_extras(reply_tok, text): 
+    print(f"回覆：{text}")  # 真實：line_bot_api.reply_message(reply_tok, TextSendMessage(text=text))
+
+async def reply_menu_with_hint(reply_tok, menu, hint=""): 
+    print("已發送選單")
+
+def build_main_menu(): 
+    return []  # 真實：QuickReply 按鈕列表
+
+def build_submenu(kind): 
+    return []
+
+async def translate_text(text, lang): 
+    return f"翻譯結果：{text} → {lang}"
+
+async def analyze_sentiment(msg): 
+    return "neutral"
+
+async def groq_chat_async(messages):
+    if async_groq_client and GROQ_OK:
+        try:
+            resp = await async_groq_client.chat.completions.create(
+                model=GROQ_MODEL_FALLBACK, messages=messages, max_tokens=500
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Groq 呼叫失敗：{e}")
+            return "AI 分析服務暫時不可用，請稍後再試。"
+    return "模擬 LLM：你好！這是自由回應模式～（設定 GROQ_API_KEY 以使用真實 LLM）"
+
+async def speech_to_text_async(audio): 
+    return "模擬轉錄文字：這是語音內容"
+
+def run_in_threadpool(func, *args):
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as executor:
+        return loop.run_in_executor(executor, lambda: func(*args))
+
+def run_lottery_analysis(msg): 
+    return f"彩票分析：{msg} 建議號碼 1-2-3-4-5-6（模擬資料）"
+
+class YahooStock: 
+    def __init__(self, id): 
+        self.name = f"股票 {id}（模擬名稱）"
+
+def stock_price(id): 
+    return pd.DataFrame({"Close": [100.0, 101.0, 99.0]})
+
+def stock_news(hint): 
+    return ["模擬新聞：股票上漲中"]
+
+def stock_fundamental(id): 
+    return "模擬基本面：EPS 5.0，營收成長 10%"
+
+def stock_dividend(id): 
+    return "模擬配息：2.5%"
+
+def get_analysis_reply(messages): 
+    return "模擬分析：建議買進，目標價 110 元"
+
+def log_provider_status(): 
+    logger.info(f"供應商狀態：OpenAI={OPENAI_OK}, Groq={GROQ_OK}")
+
+# ── 人設與 Prompt 建構 ──────────────────────────────────────────────────────
 def set_user_persona(chat_id: str, key: str):
     """設定使用者人設"""
     key_mapped = PERSONA_ALIAS.get(key, key)
@@ -524,10 +632,12 @@ async def callback(request: Request):
     return JSONResponse({"status":"ok"})
 
 @router.get("/")
-async def root(): return PlainTextResponse("LINE Bot is running.", status_code=200)
+async def root(): 
+    return PlainTextResponse("LINE Bot is running.", status_code=200)
 
 @router.get("/healthz")
-async def healthz(): return PlainTextResponse("ok", status_code=200)
+async def healthz(): 
+    return PlainTextResponse("ok", status_code=200)
 
 # === [ADDED] 供應商健康檢視 API ===
 @router.get("/health/providers")
@@ -541,6 +651,5 @@ async def providers_health():
 app.include_router(router)
 
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
