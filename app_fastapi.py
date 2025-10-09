@@ -13,9 +13,11 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.routing import APIRouter
 from contextlib import asynccontextmanager
 import uvicorn
-from linebot import LineBotApi, WebhookParser
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent
+from linebot import LineBotApi
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent
+from linebot.models.events import PostbackEvent  # PostbackEvent 從舊路徑
 from linebot.exceptions import InvalidSignatureError
+from linebot.v3.WebhookParser import WebhookParser  # v3 Parser
 import openai
 from groq import AsyncGroq
 import httpx
@@ -48,12 +50,12 @@ BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
 # LINE Bot 客戶端（mock 若無 token）
 line_bot_api = LineBotApi(CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
-parser = WebhookParser(CHANNEL_TOKEN, CHANNEL_SECRET) if CHANNEL_TOKEN != "dummy" else None
+parser = WebhookParser(CHANNEL_SECRET) if CHANNEL_SECRET != "dummy" else None  # v3 Parser，僅需 secret
 
 # Mock 客戶端
 openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-GROQ_MODEL_FALLBACK = "llama3-8b-8192"  # 或你偏好的模型
+GROQ_MODEL_FALLBACK = "llama-3.1-8b-instant"  # 修正：使用可用模型
 
 # Mock 函數（之後替換為真實實作）
 def get_chat_id(event): 
@@ -556,7 +558,7 @@ async def lifespan(app: FastAPI):
     global OPENAI_OK, GROQ_OK, OPENAI_LAST_REASON, GROQ_LAST_REASON
 
     # 1) LINE Webhook（官方域名）
-    if BASE_URL:
+    if BASE_URL and CHANNEL_TOKEN != "dummy":
         try:
             async with httpx.AsyncClient(timeout=10.0) as c:
                 headers={"Authorization":f"Bearer {CHANNEL_TOKEN}","Content-Type":"application/json"}
@@ -622,6 +624,9 @@ async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
+        if parser is None:
+            logger.error("Parser 未初始化（無 CHANNEL_SECRET），忽略 webhook")
+            raise HTTPException(status_code=400, detail="Parser not initialized")
         events = parser.parse(body.decode("utf-8"), signature)
         await handle_events(events)
     except InvalidSignatureError:
