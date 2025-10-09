@@ -14,7 +14,7 @@ from fastapi.routing import APIRouter
 from contextlib import asynccontextmanager
 import uvicorn
 from linebot.exceptions import InvalidSignatureError
-from linebot.v3.messaging import MessagingApi, ReplyMessageRequest, TextMessage  # v3 Messaging
+from linebot.v3.messaging import MessagingApi, ReplyMessageRequest, TextMessage, PushMessageRequest  # v3 Messaging, #-- 新增 PushMessageRequest：用於回覆 token 失效時的備援推播 -- 
 from linebot.v3.webhook import WebhookParser  # v3 Parser
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent  # v3 Events
 import openai
@@ -54,7 +54,7 @@ parser = WebhookParser(CHANNEL_TOKEN, CHANNEL_SECRET) if CHANNEL_TOKEN != "dummy
 # Mock 客戶端
 openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-GROQ_MODEL_FALLBACK = "llama3-8b-8192"  # 或你偏好的模型
+GROQ_MODEL_FALLBACK = "llama-3.1-8b-instant"  #-- 更新模型：取代停用版本 llama3-8b-8192，解決 startup_check_failed 錯誤 -- 
 
 # Mock 函數（之後替換為真實實作）
 def get_chat_id(event): 
@@ -69,7 +69,7 @@ def _tstate_get(chat_id):
 def _tstate_clear(chat_id): 
     pass
 
-async def reply_text_with_tts_and_extras(reply_tok, text): 
+async def reply_text_with_tts_and_extras(reply_tok, text, event=None):  #-- 新增 event 參數：用於推播備援時取得 chat_id --
     if line_bot_api is not None:
         try:
             # v3 回覆：使用 ReplyMessageRequest
@@ -77,7 +77,12 @@ async def reply_text_with_tts_and_extras(reply_tok, text):
             await line_bot_api.reply_message(request)
             logger.debug(f"已回覆文字：{text[:50]}...")
         except Exception as e:
-            logger.error(f"回覆訊息失敗：{e}")
+            logger.error(f"回覆訊息失敗，使用 push：{e}")  #-- 新增推播備援邏輯：reply_token 失效時自動推播，避免 silent fail --
+            if event:  # 用 push 備援
+                chat_id = get_chat_id(event)
+                push_request = PushMessageRequest(to=chat_id, messages=[TextMessage(text=text)])
+                await line_bot_api.push_message(push_request)
+                logger.info(f"推播備援成功至 {chat_id[:20]}...")
     else:
         print(f"[MOCK] 回覆：{text}")
 
@@ -416,7 +421,7 @@ async def handle_text_message(event: MessageEvent):
         rev = {"english":"英文","japanese":"日文","korean":"韓文","vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
         lang_display = rev.get(lang_token.lower(), lang_token)
         _tstate_set(chat_id, lang_display)
-        await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。")
+        await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。", event=event)  #-- 新增 event=event：傳遞給回覆函數以支援推播備援 --
         logger.info(f"開啟翻譯模式：{lang_display}")
         return
     
@@ -424,11 +429,11 @@ async def handle_text_message(event: MessageEvent):
         lang = msg.split("->",1)[1].strip()
         if lang=="結束":
             _tstate_clear(chat_id)
-            await reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式")
+            await reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式", event=event)  #-- 新增 event=event --
             logger.info(f"結束翻譯模式：{chat_id}")
         else:
             _tstate_set(chat_id, lang)
-            await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。")
+            await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。", event=event)  #-- 新增 event=event --
             logger.info(f"開啟翻譯模式：{lang}")
         return
     
@@ -438,14 +443,14 @@ async def handle_text_message(event: MessageEvent):
         lang_display = {"en":"英文","eng":"英文","英文":"英文","ja":"日文","jp":"日文","日文":"日文","zh":"繁體中文","繁中":"繁體中文","中文":"繁體中文"}.get(lang_key,"英文")
         logger.info(f"內聯翻譯：{lang_display} <- {text_to_translate[:30]}...")
         out = await translate_text(text_to_translate, lang_display)
-        await reply_text_with_tts_and_extras(reply_tok, out)
+        await reply_text_with_tts_and_extras(reply_tok, out, event=event)  #-- 新增 event=event --
         return
 
     current_lang = _tstate_get(chat_id)
     if current_lang:
         logger.debug(f"翻譯模式中：{current_lang}")
         out = await translate_text(msg, current_lang)
-        await reply_text_with_tts_and_extras(reply_tok, out)
+        await reply_text_with_tts_and_extras(reply_tok, out, event=event)  #-- 新增 event=event --
         return
 
     low = msg.lower()
@@ -457,7 +462,7 @@ async def handle_text_message(event: MessageEvent):
     if msg in PERSONA_ALIAS:
         key = set_user_persona(chat_id, msg)
         p = PERSONAS[key]
-        await reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}")
+        await reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}", event=event)  #-- 新增 event=event --
         return
 
     if msg in ("金價","黃金"):
@@ -472,21 +477,21 @@ async def handle_text_message(event: MessageEvent):
                    f"- 買進(1g)：{buy:,.0f} 元\n"
                    f"- 價差：{spread:,.0f} 元\n"
                    f"來源：{BOT_GOLD_URL}")
-            await reply_text_with_tts_and_extras(reply_tok, txt)
+            await reply_text_with_tts_and_extras(reply_tok, txt, event=event)  #-- 新增 event=event --
         except Exception as e:
             logger.error(f"金價查詢失敗：{e}")
-            await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價，請稍後再試。")
+            await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價，請稍後再試。", event=event)  #-- 新增 event=event --
         return
 
     if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
         logger.info(f"收到彩票查詢：{msg}，模組狀態：LOTTERY_OK={LOTTERY_OK}")
         try:
             report = await run_in_threadpool(run_lottery_analysis, msg)
-            await reply_text_with_tts_and_extras(reply_tok, report)
+            await reply_text_with_tts_and_extras(reply_tok, report, event=event)  #-- 新增 event=event --
             logger.info(f"彩票回覆成功：{msg}")
         except Exception as e:
             logger.error(f"彩票分析失敗: {e}", exc_info=True)
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}")
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}", event=event)  #-- 新增 event=event --
         return
 
     if _is_fx_query(msg):
@@ -495,10 +500,10 @@ async def handle_text_message(event: MessageEvent):
             base, quote, link = parse_fx_pair(msg)
             last, chg, ts, df = fetch_fx_quote_yf(f"{base}{quote}=X")
             report = render_fx_report(base, quote, link, last, chg, ts, df)
-            await reply_text_with_tts_and_extras(reply_tok, report)
+            await reply_text_with_tts_and_extras(reply_tok, report, event=event)  #-- 新增 event=event --
         except Exception as e:
             logger.error(f"外匯查詢失敗：{e}")
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}")
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}", event=event)  #-- 新增 event=event --
         return
 
     if _is_stock_query(msg):
@@ -507,10 +512,10 @@ async def handle_text_message(event: MessageEvent):
             ticker, name_hint, link = _normalize_ticker_and_name(msg)
             content_block, _ = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
             report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
-            await reply_text_with_tts_and_extras(reply_tok, report)
+            await reply_text_with_tts_and_extras(reply_tok, report, event=event)  #-- 新增 event=event --
         except Exception as e:
             logger.error(f"股票查詢失敗：{e}")
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。")
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。", event=event)  #-- 新增 event=event --
         return
 
     logger.info(f"一般聊天：{msg[:30]}...")
@@ -525,10 +530,10 @@ async def handle_text_message(event: MessageEvent):
         history.extend([{"role":"user","content":msg},{"role":"assistant","content":final_reply}])
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
         
-        await reply_text_with_tts_and_extras(reply_tok, final_reply)
+        await reply_text_with_tts_and_extras(reply_tok, final_reply, event=event)  #-- 新增 event=event --
     except Exception as e:
         logger.error(f"一般聊天失敗：{e}")
-        await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！")
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！", event=event)  #-- 新增 event=event --
 
 async def handle_audio_message(event: MessageEvent):
     """處理語音訊息（統一走帶 Quick Reply 的回覆，底部顯示）"""
@@ -537,18 +542,18 @@ async def handle_audio_message(event: MessageEvent):
     
     try:
         if line_bot_api is None:
-            await reply_text_with_tts_and_extras(reply_tok, "🎧 [MOCK] 語音收到！目前語音轉文字失敗，請稍後再試。")
+            await reply_text_with_tts_and_extras(reply_tok, "🎧 [MOCK] 語音收到！目前語音轉文字失敗，請稍後再試。", event=event)  #-- 新增 event=event --
             return
         response = await line_bot_api.get_message_content(event.message.id)
         audio_in = await response.content.read()
         text = await speech_to_text_async(audio_in)
         if not text:
-            await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
+            await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。", event=event)  #-- 新增 event=event --
             return
-        await reply_text_with_tts_and_extras(reply_tok, f"🎧 我聽到了：\n{text}")
+        await reply_text_with_tts_and_extras(reply_tok, f"🎧 我聽到了：\n{text}", event=event)  #-- 新增 event=event --
     except Exception as e:
         logger.error(f"語音處理失敗: {e}", exc_info=True)
-        await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。")
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。", event=event)  #-- 新增 event=event --
 
 async def handle_postback(event: PostbackEvent):
     """處理 Postback 事件（走選單回覆，確保 Quick Reply 底部）"""
