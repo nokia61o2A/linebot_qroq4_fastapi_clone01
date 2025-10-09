@@ -7,17 +7,16 @@ import requests
 from datetime import datetime
 from typing import Tuple
 from bs4 import BeautifulSoup
-import yfinance as yf
+import yfinance as yf  # 依賴：pip install yfinance websockets
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.routing import APIRouter
 from contextlib import asynccontextmanager
 import uvicorn
-from linebot import LineBotApi
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent
-from linebot.models.events import PostbackEvent  # PostbackEvent 從舊路徑
 from linebot.exceptions import InvalidSignatureError
-from linebot.v3.WebhookParser import WebhookParser  # v3 Parser
+from linebot.v3.messaging import MessagingApi, ReplyMessageRequest, TextMessage  # v3 Messaging
+from linebot.v3.webhook import WebhookParser  # v3 Parser
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent  # v3 Events
 import openai
 from groq import AsyncGroq
 import httpx
@@ -48,14 +47,14 @@ CHANNEL_TOKEN = os.getenv("CHANNEL_TOKEN", "dummy")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "dummy")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
-# LINE Bot 客戶端（mock 若無 token）
-line_bot_api = LineBotApi(CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
-parser = WebhookParser(CHANNEL_SECRET) if CHANNEL_SECRET != "dummy" else None  # v3 Parser，僅需 secret
+# LINE Bot 客戶端（v3，mock 若無 token）
+line_bot_api = MessagingApi(CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
+parser = WebhookParser(CHANNEL_TOKEN, CHANNEL_SECRET) if CHANNEL_TOKEN != "dummy" else None
 
 # Mock 客戶端
 openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-GROQ_MODEL_FALLBACK = "llama-3.1-8b-instant"  # 修正：使用可用模型
+GROQ_MODEL_FALLBACK = "llama3-8b-8192"  # 或你偏好的模型
 
 # Mock 函數（之後替換為真實實作）
 def get_chat_id(event): 
@@ -71,13 +70,26 @@ def _tstate_clear(chat_id):
     pass
 
 async def reply_text_with_tts_and_extras(reply_tok, text): 
-    print(f"回覆：{text}")  # 真實：line_bot_api.reply_message(reply_tok, TextSendMessage(text=text))
+    if line_bot_api is not None:
+        try:
+            # v3 回覆：使用 ReplyMessageRequest
+            request = ReplyMessageRequest(reply_token=reply_tok, messages=[TextMessage(text=text)])
+            await line_bot_api.reply_message(request)
+            logger.debug(f"已回覆文字：{text[:50]}...")
+        except Exception as e:
+            logger.error(f"回覆訊息失敗：{e}")
+    else:
+        print(f"[MOCK] 回覆：{text}")
 
 async def reply_menu_with_hint(reply_tok, menu, hint=""): 
-    print("已發送選單")
+    if line_bot_api is not None:
+        # 選單需自訂（QuickReply 在 v3 為 FlexMessage 或其他）
+        print("已發送選單（v3 需調整）")
+    else:
+        print("[MOCK] 已發送選單")
 
 def build_main_menu(): 
-    return []  # 真實：QuickReply 按鈕列表
+    return []  # 真實：v3 QuickReply 或 FlexMessage
 
 def build_submenu(kind): 
     return []
@@ -212,7 +224,7 @@ def parse_fx_pair(user_text: str) -> Tuple[str,str,str]:
             base, quote = "USD", "JPY"
     elif len(toks) == 1: 
         base, quote = toks[0], "TWD"
-    else: 
+    else:
         base, quote = toks[0], toks[1]
     
     symbol = f"{base}{quote}=X"
@@ -233,7 +245,10 @@ def fetch_fx_quote_yf(symbol: str):
         change_pct = None if prev_row is None else (last_price/float(prev_row["Close"]) - 1.0)*100.0
         
         ts = last_row.name
-        ts_iso = ts.tz_convert("Asia/Taipei").strftime("%Y-%m-%d %H:%M %Z") if hasattr(ts, "tz_convert") else str(ts)
+        if hasattr(ts, "tz_convert"):
+            ts_iso = ts.tz_convert("Asia/Taipei").strftime("%Y-%m-%d %H:%M %Z")
+        else:
+            ts_iso = str(ts)
         
         logger.debug(f"外匯 {symbol}：價格={last_price}, 變動={change_pct}")
         return last_price, change_pct, ts_iso, df
@@ -376,8 +391,11 @@ async def handle_text_message(event: MessageEvent):
         return
     
     try:
-        bot_info = line_bot_api.get_bot_info()
-        bot_name = bot_info.display_name
+        if line_bot_api is not None:
+            bot_info = line_bot_api.get_bot_info()
+            bot_name = bot_info.display_name
+        else:
+            bot_name = "AI 助手 (MOCK)"
         logger.debug(f"Bot 名稱：{bot_name}")
     except Exception as e:
         logger.warning(f"獲取 Bot 資訊失敗：{e}")
@@ -518,8 +536,11 @@ async def handle_audio_message(event: MessageEvent):
     logger.info(f"收到語音訊息：{event.message.id}")
     
     try:
-        content_stream = await line_bot_api.get_message_content(event.message.id)
-        audio_in = await content_stream.read()
+        if line_bot_api is None:
+            await reply_text_with_tts_and_extras(reply_tok, "🎧 [MOCK] 語音收到！目前語音轉文字失敗，請稍後再試。")
+            return
+        response = await line_bot_api.get_message_content(event.message.id)
+        audio_in = await response.content.read()
         text = await speech_to_text_async(audio_in)
         if not text:
             await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。")
@@ -558,7 +579,7 @@ async def lifespan(app: FastAPI):
     global OPENAI_OK, GROQ_OK, OPENAI_LAST_REASON, GROQ_LAST_REASON
 
     # 1) LINE Webhook（官方域名）
-    if BASE_URL and CHANNEL_TOKEN != "dummy":
+    if BASE_URL and line_bot_api is not None:
         try:
             async with httpx.AsyncClient(timeout=10.0) as c:
                 headers={"Authorization":f"Bearer {CHANNEL_TOKEN}","Content-Type":"application/json"}
@@ -621,12 +642,11 @@ router = APIRouter()
 
 @router.post("/callback")
 async def callback(request: Request):
+    if parser is None:
+        return JSONResponse({"status": "mock mode, no parser"}, status_code=200)
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     try:
-        if parser is None:
-            logger.error("Parser 未初始化（無 CHANNEL_SECRET），忽略 webhook")
-            raise HTTPException(status_code=400, detail="Parser not initialized")
         events = parser.parse(body.decode("utf-8"), signature)
         await handle_events(events)
     except InvalidSignatureError:
