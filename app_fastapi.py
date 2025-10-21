@@ -1,4 +1,4 @@
-# app_fastapi.py (Version 2.0.8 - Uncompress load_stock_data)
+# app_fastapi.py (Version 2.0.8 - Final Final Syntax Fix)
 # ========== 1) Imports ==========
 import os
 import re
@@ -127,7 +127,7 @@ async def lifespan(app: FastAPI):
     else: logger.warning("⚠️ Webhook 未更新：未設定 BASE_URL 或 CHANNEL_ACCESS_TOKEN (Mock 模式)")
     logger.info("Lifespan 啟動程序完成。"); yield; logger.info("應用程式關閉 (lifespan)...")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.8-uncompress-load-stock") # --- 繁體中文解：更新版本號 ---
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.8-final-final-syntax-fix") # --- 繁體中文解：更新版本號 ---
 router = APIRouter()
 
 # ========== 4) Helpers (V2 SDK Style) ==========
@@ -186,7 +186,7 @@ def translate_text(text: str, target_lang_display: str) -> str:
 
 
 # ========== 6) 金融工具 ==========
-# ... (get_gold_analysis, get_currency_analysis 與 v2.0.7 相同) ...
+# ... (與 v2.0.7 相同) ...
 def get_gold_analysis() -> str:
     logger.info("呼叫：get_gold_analysis()")
     try: r = requests.get(BOT_GOLD_URL, headers=DEFAULT_HEADERS, timeout=10); r.raise_for_status(); data = _parse_bot_gold_text(r.text); logger.debug(f"金價: {data}"); ts = data.get("listed_at") or "N/A"; sell, buy = data["sell_twd_per_g"], data["buy_twd_per_g"]; spread = sell - buy; bias = "盤整" if spread <= 30 else ("偏寬" if spread <= 60 else "價差大"); now = datetime.now().strftime("%H:%M"); report = (f"**金價({now})**\n賣: **{sell:,.0f}** | 買: **{buy:,.0f}** | 價差: {spread:,.0f} ({bias})\n掛牌: {ts}\n來源:台灣銀行"); logger.info("金價分析成功"); return report
@@ -206,7 +206,16 @@ def get_currency_analysis(target_currency: str):
 # --- 股票相關函數 ---
 _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
-def normalize_ticker(t: str) -> Tuple[str, str, str, bool]: t = t.strip().upper(); logger.debug(f"正規化 ticker: {t}"); if t in ["台股大盤", "大盤"]: return "^TWII", "^TWII", "^TWII", True; if t in ["美股大盤", "美盤", "美股"]: return "^GSPC", "^GSPC", "^GSPC", True; if _TW_CODE_RE.match(t): return f"{t}.TW", t, t, False; if _US_CODE_RE.match(t) and t != "JPY": return t, t, t, False; logger.warning(f"無法識別 ticker: {t}"); return t, t, t, False
+def normalize_ticker(t: str) -> Tuple[str, str, str, bool]:
+    # ... (與 v2.0.7 相同，已是多行) ...
+    t = t.strip().upper()
+    logger.debug(f"正規化 ticker: {t}")
+    if t in ["台股大盤", "大盤"]: return "^TWII", "^TWII", "^TWII", True
+    if t in ["美股大盤", "美盤", "美股"]: return "^GSPC", "^GSPC", "^GSPC", True
+    if _TW_CODE_RE.match(t): return f"{t}.TW", t, t, False
+    if _US_CODE_RE.match(t) and t != "JPY": return t, t, t, False
+    logger.warning(f"無法明確識別 ticker: {t}"); return t, t, t, False
+
 def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
     # ... (與 v2.0.7 相同) ...
     logger.debug(f"抓取快照 (yf: {yf_symbol}, slug: {yahoo_slug})")
@@ -235,7 +244,7 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
     logger.debug(f"快照結果: {snap}"); return snap
 
 stock_data_df: Optional[pd.DataFrame] = None
-# --- 繁體中文解：[修正] 將 load_stock_data 恢復多行格式 ---
+# --- 繁體中文解：[修正] 恢復 load_stock_data 的正確多行格式 ---
 def load_stock_data() -> pd.DataFrame:
     global stock_data_df
     if stock_data_df is None:
@@ -244,9 +253,7 @@ def load_stock_data() -> pd.DataFrame:
             logger.info("✅ loaded name_df.csv")
         except FileNotFoundError:
             logger.error("❌ `name_df.csv` not found.")
-            # --- 繁體中文解：[修正] 確保在 except 後仍然返回 DataFrame ---
             stock_data_df = pd.DataFrame(columns=['股號', '股名'])
-    # --- 繁體中文解：[修正] 確保函數總是有返回值 ---
     return stock_data_df
 
 # ... (get_stock_name, get_stock_report 與 v2.0.7 相同) ...
