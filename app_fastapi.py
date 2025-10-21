@@ -33,8 +33,6 @@ from linebot.models import (
 
 from groq import AsyncGroq, Groq
 import openai
-
-# [ADD] 補上 uvicorn 匯入，避免 NameError
 import uvicorn  # [ADD]
 
 # ========== 2) Setup ==========
@@ -174,12 +172,12 @@ if not STOCK_ENABLED:
             self.close_time = None
 
 # --- [ADD] 通用 HTTP Headers 與金價來源常數，並提供解析函式 ---
-DEFAULT_HEADERS = {  # [ADD]
+DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
-BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"  # 台灣銀行黃金牌價頁  # [ADD]
+BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"  # 台灣銀行黃金牌價頁
 
-def _parse_bot_gold_text(html: str) -> dict:  # [ADD]
+def _parse_bot_gold_text(html: str) -> dict:
     """
     簡易擷取台銀黃金牌價（賣出/買入/掛牌時間）。如頁面改版，請更新選擇器或正則。
     回傳: {"sell_twd_per_g": float, "buy_twd_per_g": float, "listed_at": "YYYY/MM/DD HH:MM"}
@@ -191,7 +189,6 @@ def _parse_bot_gold_text(html: str) -> dict:  # [ADD]
     buy = None
     listed_at = None
 
-    # 注意：此為示意正則，實務上建議以表格 DOM 抓取（以免文案變動）
     m_sell = re.search(r"賣出價.*?([\d,]+\.?\d*)", text)
     m_buy = re.search(r"買入價.*?([\d,]+\.?\d*)", text)
     m_time = re.search(r"(?:掛牌時間|最後更新)[：:]\s*([0-9\/\-\s:]+)", text)
@@ -257,7 +254,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("應用程式關閉 (lifespan)...")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.9-uncompress-get-stock-name")  # [CHANGE] 版本號標註
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.9-uncompress-get-stock-name")
 router = APIRouter()
 
 # ========== 4) Helpers (V2 SDK Style) ==========
@@ -391,7 +388,7 @@ def get_analysis_reply(messages: List[dict]) -> str:
 
     if not sync_groq_client:
         logger.error("❌ Groq Client 未初始化")
-        return "抱歉，AI 分析引擎無法連線。」
+        return "抱歉，AI 分析引擎無法連線。"  # [FIX] 修正全形引號為半形
 
     try:
         logger.debug(f"嘗試 Groq Primary: {GROQ_MODEL_PRIMARY}")
@@ -460,10 +457,6 @@ _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
 
 def normalize_ticker(t: str) -> Tuple[str, str, str, bool]:
-    """
-    將輸入轉為 yfinance 符號與 Yahoo 台股 slug。
-    回傳：(yf_symbol, yahoo_slug, display_code, is_index)
-    """
     t = t.strip().upper()
     logger.debug(f"正規化 ticker: {t}")
     if t in ["台股大盤", "大盤"]:
@@ -478,9 +471,6 @@ def normalize_ticker(t: str) -> Tuple[str, str, str, bool]:
     return t, t, t, False
 
 def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
-    """
-    以 yfinance 抓取快照（名稱/價格/漲跌/幣別/時間），失敗則嘗試 YahooStock 備援。
-    """
     logger.debug(f"抓取快照 (yf: {yf_symbol}, slug: {yahoo_slug})")
     snap: dict = {"name": None, "now_price": None, "change": None, "currency": None, "close_time": None}
     try:
@@ -550,9 +540,6 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
 stock_data_df: Optional[pd.DataFrame] = None
 
 def load_stock_data() -> pd.DataFrame:
-    """
-    載入 name_df.csv，若不存在則回傳空 DataFrame（含欄位『股號』『股名』）。
-    """
     global stock_data_df
     if stock_data_df is None:
         try:
@@ -561,12 +548,9 @@ def load_stock_data() -> pd.DataFrame:
         except FileNotFoundError:
             logger.error("❌ `name_df.csv` not found.")
             stock_data_df = pd.DataFrame(columns=['股號', '股名'])
-    return stock_data_df  # 確保總是有返回值
+    return stock_data_df
 
 def get_stock_name(stock_id: str) -> Optional[str]:
-    """
-    從 name_df.csv 依『股號』查『股名』
-    """
     df = load_stock_data()
     res = df[df['股號'].astype(str).str.strip().str.upper() == str(stock_id).strip().upper()]
     if not res.empty:
@@ -654,9 +638,6 @@ def get_stock_report(user_input: str) -> str:
 
 # ========== 7) 彩票分析 ==========
 def _lotto_fallback_scrape(kind: str) -> str:
-    """
-    後備：直接扒台彩官網公開頁面文字。
-    """
     logger.warning(f"使用後備彩票爬蟲 for {kind}")
     try:
         if kind == "威力彩":
@@ -881,7 +862,6 @@ def on_message_text(event: MessageEvent):
             reply_with_quick_bar(reply_token, out)
             return
 
-        # 一般聊天
         logger.info("Route: General Chat")
         history = conversation_history.get(chat_id, [])
         logger.debug("Analyze sentiment...")
@@ -897,13 +877,13 @@ def on_message_text(event: MessageEvent):
         reply_with_quick_bar(reply_token, final_reply)
         return
 
-    except LineBotApiError as lbe:  # [FIX] 改為多行 try/except，避免 SyntaxError
+    except LineBotApiError as lbe:
         logger.error(f"❌ LINE API Error: {lbe.status_code} {lbe.error.message}", exc_info=False)
         try:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="😥 LINE communication error."))
         except Exception:
             pass
-    except Exception as e:  # [FIX] 改為多行 try/except，避免 SyntaxError
+    except Exception as e:
         logger.error(f"❌ Handler internal error: {e}", exc_info=True)
         try:
             reply_with_quick_bar(reply_token, "😵‍💫 Unexpected error processing request.")
