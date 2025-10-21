@@ -30,6 +30,7 @@ PERSONAS = {
 }  # 預設人設
 user_persona = {}  # 每個聊天的人設字典
 logger = logging.getLogger(__name__)
+# --- 繁體中文解：設定日誌等級為 INFO，這樣 logger.info() 和 logger.error() 才會顯示在 Render.com 的日誌中 ---
 logging.basicConfig(level=logging.INFO)
 TRANSLATE_CMD = re.compile(r'^翻譯\s*(.*)$')  # 翻譯指令正則
 INLINE_TRANSLATE = re.compile(r'^(en|ja|zh|英文|日文|中文)\s+(.+)$')  # 內聯翻譯正則
@@ -41,13 +42,21 @@ GROQ_OK = False
 OPENAI_LAST_REASON = "uninitialized"
 GROQ_LAST_REASON = "uninitialized"
 DISABLE_GROQ = os.getenv("DISABLE_GROQ", "false").lower() == "true"
+
+# --- 繁體中文解：請檢查 Render.com 上的 GROQ_API_KEY 是否已正確設定 ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# --- 繁體中文解：請檢查 Render.com 上的 OPENAI_API_KEY 是否正確。之前的日誌顯示 401 錯誤，表示金鑰無效。 ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# --- 繁體中文解：**關鍵修正點**：Render.com 上的環境變數名稱 (KEY) 必須是「CHANNEL_TOKEN」，而不是「CHANNEL_ACCESS_TOKEN」，才能被這行程式碼正確讀取。 ---
 CHANNEL_TOKEN = os.getenv("CHANNEL_TOKEN", "dummy")
+# --- 繁體中文解：請檢查 Render.com 上的 CHANNEL_SECRET 是否已正確設定 ---
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "dummy")
+# --- 繁體中文解：請檢查 Render.com 上的 BASE_URL 是否已正確設定 (例如: https://linebot-qroq4-fastapi-di-pei-aijiang.onrender.com) ---
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
 # LINE Bot 客戶端（v3，mock 若無 token）
+# --- 繁體中文解：如果 CHANNEL_TOKEN 保持 "dummy" (因為環境變數名稱錯誤)，line_bot_api 會是 None，導致 Mock 模式 ---
 line_bot_api = MessagingApi(CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
 parser = WebhookParser(CHANNEL_TOKEN, CHANNEL_SECRET) if CHANNEL_TOKEN != "dummy" else None
 
@@ -76,11 +85,13 @@ async def reply_text_with_tts_and_extras(reply_tok, text, event=None):  #-- 新�
     if line_bot_api is not None:
         try:
             # v3 回覆：使用 ReplyMessageRequest
+            # --- 繁體中文解：這是在 Render.com 日誌中顯示「準備回覆」的訊息 ---
             logger.debug(f"準備回覆 (reply_token: {reply_tok[:10]}...): {text[:50]}...")
             request = ReplyMessageRequest(reply_token=reply_tok, messages=[TextMessage(text=text)])
             await line_bot_api.reply_message(request)
             logger.debug(f"已成功回覆文字：{text[:50]}...")
         except Exception as e:
+            # --- 繁體中文解：這是在 Render.com 日誌中顯示「回覆失敗」的錯誤訊息 ---
             logger.error(f"回覆訊息失敗 (Token: {reply_tok[:10]}...)，嘗試使用 push：{e}")  #-- 新增推播備援邏輯：reply_token 失效時自動推播，避免 silent fail --
             if event:  # 用 push 備援
                 chat_id = get_chat_id(event)
@@ -91,11 +102,12 @@ async def reply_text_with_tts_and_extras(reply_tok, text, event=None):  #-- 新�
             else:
                 logger.error("推播備援失敗：缺少 event 參數")
     else:
+        # --- 繁體中文解：如果 line_bot_api 是 None (Mock 模式)，日誌會印在這裡 (通常是本地端) ---
         print(f"[MOCK] 回覆：{text}")
 
 async def reply_menu_with_hint(reply_tok, menu, hint=""): 
     if line_bot_api is not None:
-        # 選單需自訂（QuickReply 在 v3 為 FlexMessage 或其他）
+        # 選單需自訂（QuickReply 在 v3 為 FlexMessage 或 other）
         logger.info(f"準備回覆選單 (Token: {reply_tok[:10]}...)")
         print("已發送選單（v3 需調整）")
     else:
@@ -172,6 +184,7 @@ def get_analysis_reply(messages):
     return "模擬分析：建議買進，目標價 110 元"
 
 def log_provider_status(): 
+    # --- 繁體中文解：這是在 Render.com 日誌中顯示 AI 供應商狀態的訊息 ---
     logger.info(f"供應商狀態：OpenAI={OPENAI_OK}, Groq={GROQ_OK}")
 
 # ── 人設與 Prompt 建構 ──────────────────────────────────────────────────────
@@ -183,6 +196,7 @@ def set_user_persona(chat_id: str, key: str):
     if key_mapped not in PERSONAS: 
         key_mapped = "sweet"
     user_persona[chat_id] = key_mapped
+    # --- 繁體中文解：這是在 Render.com 日誌中顯示「人設切換」的訊息 ---
     logger.info(f"人設切換：{chat_id[:20]}... -> {PERSONAS[key_mapped]['title']}") # (原為 debug，提升為 info)
     return key_mapped
 
@@ -428,6 +442,7 @@ async def handle_text_message(event: MessageEvent):
     msg_raw = (event.message.text or "").strip()
     reply_tok = event.reply_token
     
+    # --- 繁體中文解：這是在 Render.com 日誌中顯示「收到文字訊息」的紀錄 ---
     logger.info(f"收到文字訊息：{msg_raw[:50]}... (chat_id: {chat_id[:20]}..., reply_token: {reply_tok[:10]}...)")
     
     if not msg_raw: 
@@ -457,6 +472,7 @@ async def handle_text_message(event: MessageEvent):
     m = TRANSLATE_CMD.match(msg)
     if m:
         lang_token = m.group(1)
+        # --- 繁體中文解：這是在 Render.com 日誌中顯示進入哪一個「if 分支」---
         logger.info(f"分支：匹配到翻譯指令 (TRANSLATE_CMD): {lang_token}")
         rev = {"english":"英文","japanese":"日文","korean":"韓文","vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
         lang_display = rev.get(lang_token.lower(), lang_token)
@@ -593,6 +609,7 @@ async def handle_text_message(event: MessageEvent):
 async def handle_audio_message(event: MessageEvent):
     """處理語音訊息（統一走帶 Quick Reply 的回覆，底部顯示）"""
     reply_tok = event.reply_token
+    # --- 繁體中文解：這是在 Render.com 日誌中顯示「收到語音訊息」的紀錄 ---
     logger.info(f"收到語音訊息：{event.message.id} (reply_token: {reply_tok[:10]}...)")
     
     try:
@@ -624,6 +641,7 @@ async def handle_postback(event: PostbackEvent):
     """處理 Postback 事件（走選單回覆，確保 Quick Reply 底部）"""
     data = event.postback.data or ""
     reply_tok = event.reply_token
+    # --- 繁體中文解：這是在 Render.com 日誌中顯示「收到 Postback」的紀錄 ---
     logger.info(f"收到 Postback 事件：{data} (reply_token: {reply_tok[:10]}...)")
     
     if data.startswith("menu:"):
@@ -671,9 +689,11 @@ async def lifespan(app: FastAPI):
     2) 啟動健康檢查：OpenAI / Groq
     """
     global OPENAI_OK, GROQ_OK, OPENAI_LAST_REASON, GROQ_LAST_REASON
+    # --- 繁體中文解：這是在 Render.com 日誌中顯示「應用程式啟動」的訊息 ---
     logger.info("應用程式啟動 (lifespan)...")
 
     # 1) LINE Webhook（官方域名）
+    # --- 繁體中文解：檢查 line_bot_api 是否為 None (Mock 模式) ---
     if BASE_URL and line_bot_api is not None:
         logger.info(f"準備更新 Webhook 至：{BASE_URL}/callback")
         try:
@@ -682,10 +702,12 @@ async def lifespan(app: FastAPI):
                 payload={"endpoint":f"{BASE_URL}/callback"}
                 r = await c.put("https://api.line.me/v2/bot/channel/webhook/endpoint", headers=headers, json=payload)
                 r.raise_for_status()
+                # --- 繁體中文解：若成功，日誌會顯示這個 ---
                 logger.info("✅ Webhook 更新成功（api.line.me=%s）", r.status_code)
         except Exception as e:
             logger.warning(f"⚠️ Webhook 更新失敗（api.line.me）：{e}")
     else:
+        # --- 繁體中文解：若失敗 (例如 CHANNEL_TOKEN 設錯)，日誌會顯示這個 ---
         logger.warning("Webhook 未更新：未設定 BASE_URL 或 line_bot_api (Mock 模式)")
 
 
@@ -700,6 +722,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             OPENAI_OK = False
             OPENAI_LAST_REASON = f"startup_check_failed: {e}"
+            # --- 繁體中文解：這就是你日誌中看到的 OpenAI 401 錯誤訊息來源 ---
             logger.error("❌ OpenAI 健檢失敗：%s", e)
     else:
         OPENAI_OK = False
@@ -751,6 +774,7 @@ router = APIRouter()
 
 @router.post("/callback")
 async def callback(request: Request):
+    # --- 繁體中文解：這是在 Render.com 日誌中顯示「LINE 伺服器來敲門」的紀錄 ---
     logger.info("收到 /callback 請求")
     if parser is None:
         logger.debug("Callback：處於 Mock 模式，無 parser")
@@ -768,6 +792,7 @@ async def callback(request: Request):
         await handle_events(events)
         logger.info(f"成功處理完 {len(events)} 個事件")
     except InvalidSignatureError:
+        # --- 繁體中文解：如果 CHANNEL_SECRET 設錯，日誌會顯示這個 ---
         logger.error(f"Invalid signature 驗證失敗 (Signature: {signature})")
         raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
@@ -783,7 +808,7 @@ async def root():
 
 @router.get("/healthz")
 async def healthz(): 
-    # (此日誌過於頻繁，通常保持安靜)
+    # (此日誌過於頻繁，通常保持安靜，Render 會自己打)
     # logger.debug("收到 /healthz 請求")
     return PlainTextResponse("ok", status_code=200)
 
