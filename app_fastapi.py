@@ -7,26 +7,13 @@ import requests
 from datetime import datetime
 from typing import Tuple
 from bs4 import BeautifulSoup
-import yfinance as yf
+import yfinance as yf  # 依賴：pip install yfinance websockets
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.routing import APIRouter
 from contextlib import asynccontextmanager
 import uvicorn
 from linebot.exceptions import InvalidSignatureError
-from linebot.v3.messaging import (
-    MessagingApi, ReplyMessageRequest, TextMessage, PushMessageRequest,
-    Configuration, ApiClient
-)
-from linebot.v3.webhook import WebhookParser
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent
-import openai
-from groq import AsyncGroq
-import httpx
-from concurrent.futures import ThreadPoolExecutor
-import pandas as pd
-import mplfinance as mpf # --- 繁體中文解：加回 mplfinance，真實的股票分析可能需要它 ---
-
 # --- 繁體中文解：[V3] 匯入 V3 所需的 Configuration 和 ApiClient ---
 from linebot.v3.messaging import (
     MessagingApi, ReplyMessageRequest, TextMessage, PushMessageRequest,
@@ -34,42 +21,11 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhook import WebhookParser  # v3 Parser
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent  # v3 Events
-
-# --- 繁體中文解：[V3 恢復真實功能] 匯入你自訂的真實模組 ---
-try:
-    from my_commands.lottery_gpt import lottery_gpt as run_lottery_analysis
-    from my_commands.stock.stock_utils import YahooStock
-    from my_commands.stock.stock_price import stock_price
-    from my_commands.stock.stock_news import stock_news
-    from my_commands.stock.stock_fundamental import stock_fundamental
-    from my_commands.stock.stock_dividend import stock_dividend
-    from my_commands.stock.stock_analysis import get_analysis_reply
-    logger.info("✅ 成功匯入 'my_commands' (股票/樂透) 真實模組")
-except ImportError as e:
-    logger.error(f"❌ 匯入 'my_commands' 失敗：{e}。將退回使用模擬函數。")
-    # --- 繁體中文解：如果匯入失敗，定義模擬函數作為備援，避免程式崩潰 ---
-    def run_lottery_analysis(msg): 
-        logger.warning("使用模擬 (Mock) 樂透函數")
-        return f"彩票分析：{msg} 建議號碼 1-2-3-4-5-6（模擬資料）"
-    class YahooStock: 
-        def __init__(self, id): 
-            logger.warning("使用模擬 (Mock) YahooStock")
-            self.name = f"股票 {id}（模擬名稱）"
-    def stock_price(id): 
-        logger.warning("使用模擬 (Mock) 股票價格函數")
-        return pd.DataFrame({"Close": [100.0, 101.0, 99.0]})
-    def stock_news(hint): 
-        logger.warning("使用模擬 (Mock) 股票新聞函數")
-        return ["模擬新聞：股票上漲中"]
-    def stock_fundamental(id): 
-        logger.warning("使用模擬 (Mock) 股票基本面函數")
-        return "模擬基本面：EPS 5.0，營收成長 10%"
-    def stock_dividend(id): 
-        logger.warning("使用模擬 (Mock) 股票配息函數")
-        return "模擬配息：2.5%"
-    def get_analysis_reply(messages): 
-        logger.warning("使用模擬 (Mock) 股票分析函數")
-        return "模擬分析：建議買進，目標價 110 元"
+import openai
+from groq import AsyncGroq
+import httpx
+from concurrent.futures import ThreadPoolExecutor
+import pandas as pd
 
 # ── 全域變數與 Mock 定義 ────────────────────────────────────────────────────
 PERSONA_ALIAS = {"sweet": "sweet", "random": "random"}  # 人設別名
@@ -157,29 +113,25 @@ async def reply_text_with_tts_and_extras(reply_tok, text, event=None):
 async def reply_menu_with_hint(reply_tok, menu, hint=""): 
     if configuration is not None:
         logger.info(f"準備回覆選單 (Token: {reply_tok[:10]}...)")
-        # --- 繁體中文解：你需要在此處填入你真實的 V3 選單回覆邏輯 ---
+        # --- 繁體中文解：未來實作選單時，也需要使用 'with ApiClient(...)' 的同步方式 ---
         print("已發送選單（v3 需調整）")
     else:
         print("[MOCK] 已發送選單")
 
 def build_main_menu(): 
-    # --- 繁體中文解：你需要在此處填入你真實的 V3 (FlexMessage/QuickReply) 選單 JSON ---
-    logger.debug("呼叫：build_main_menu() (模擬)")
+    logger.debug("呼叫：build_main_menu()")
     return []  # 真實：v3 QuickReply 或 FlexMessage
 
 def build_submenu(kind): 
-    # --- 繁體中文解：你需要在此處填入你真實的 V3 (FlexMessage/QuickReply) 子選單 JSON ---
-    logger.debug(f"呼叫：build_submenu(kind={kind}) (模擬)")
+    logger.debug(f"呼叫：build_submenu(kind={kind})")
     return []
 
-# --- 繁體中文解：保留翻譯、情緒分析、語音轉文字的模擬函數 ---
-# --- 繁體中文解：如果你有這些的真實程式碼，也需要像股票/樂透一樣匯入 ---
 async def translate_text(text, lang): 
-    logger.debug(f"呼叫：translate_text(text={text[:20]}..., lang={lang}) (模擬)")
+    logger.debug(f"呼叫：translate_text(text={text[:20]}..., lang={lang})")
     return f"翻譯結果：{text} → {lang}"
 
 async def analyze_sentiment(msg): 
-    logger.debug(f"呼叫：analyze_sentiment(msg={msg[:20]}...) (模擬)")
+    logger.debug(f"呼叫：analyze_sentiment(msg={msg[:20]}...)")
     return "neutral"
 
 async def groq_chat_async(messages):
@@ -198,7 +150,7 @@ async def groq_chat_async(messages):
     return "模擬 LLM：你好！這是自由回應模式～（設定 GROQ_API_KEY 以使用真實 LLM）"
 
 async def speech_to_text_async(audio): 
-    logger.debug(f"呼叫：speech_to_text_async() (audio len: {len(audio)}) (模擬)")
+    logger.debug(f"呼叫：speech_to_text_async() (audio len: {len(audio)})")
     return "模擬轉錄文字：這是語音內容"
 
 def run_in_threadpool(func, *args):
@@ -207,15 +159,34 @@ def run_in_threadpool(func, *args):
     with ThreadPoolExecutor() as executor:
         return loop.run_in_executor(executor, lambda: func(*args))
 
-# --- 繁體中文解：[V3 恢復真實功能] 以下模擬函數已被 'my_commands' 的真實版本取代 ---
-# def run_lottery_analysis(msg): ...
-# class YahooStock: ...
-# def stock_price(id): ...
-# def stock_news(hint): ...
-# def stock_fundamental(id): ...
-# def stock_dividend(id): ...
-# def get_analysis_reply(messages): ...
-# --- 
+def run_lottery_analysis(msg): 
+    logger.debug(f"呼叫：run_lottery_analysis(msg={msg})")
+    return f"彩票分析：{msg} 建議號碼 1-2-3-4-5-6（模擬資料）"
+
+class YahooStock: 
+    def __init__(self, id): 
+        logger.debug(f"呼叫：YahooStock(id={id})")
+        self.name = f"股票 {id}（模擬名稱）"
+
+def stock_price(id): 
+    logger.debug(f"呼叫：stock_price(id={id})")
+    return pd.DataFrame({"Close": [100.0, 101.0, 99.0]})
+
+def stock_news(hint): 
+    logger.debug(f"呼叫：stock_news(hint={hint})")
+    return ["模擬新聞：股票上漲中"]
+
+def stock_fundamental(id): 
+    logger.debug(f"呼叫：stock_fundamental(id={id})")
+    return "模擬基本面：EPS 5.0，營收成長 10%"
+
+def stock_dividend(id): 
+    logger.debug(f"呼叫：stock_dividend(id={id})")
+    return "模擬配息：2.5%"
+
+def get_analysis_reply(messages): 
+    logger.debug(f"呼叫：get_analysis_reply() (messages len: {len(messages)})")
+    return "模擬分析：建議買進，目標價 110 元"
 
 def log_provider_status(): 
     logger.info(f"供應商狀態：OpenAI={OPENAI_OK}, Groq={GROQ_OK}")
@@ -416,7 +387,6 @@ def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, 
     """建構股票分析 Prompt（stub 版使用 yfinance）"""
     logger.debug(f"呼叫：build_stock_prompt_block(stock_id={stock_id})")
     try:
-        # --- 繁體中文解：[V3 恢復真實功能] 這些函數現在是從 'my_commands' 匯入的 ---
         ys = YahooStock(stock_id)
         price_df = stock_price(stock_id)
         news = _remove_full_width_spaces(stock_news(stock_name_hint))
@@ -461,7 +431,6 @@ def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> s
                   f"最後附上正確連結：[股票資訊連結]({stock_link})。\n"
                   "使用台灣繁體中文，回覆精簡有力。")
     try:
-        # --- 繁體中文解：[V3 恢復真實功能] 這裡會呼叫 'my_commands' 的 get_analysis_reply ---
         result = get_analysis_reply([{"role":"system","content":sys_prompt},{"role":"user","content":content_block}])
         logger.debug(f"股票分析完成，長度：{len(result)}")
         return result
@@ -582,7 +551,6 @@ async def handle_text_message(event: MessageEvent):
     if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
         logger.info(f"分支：匹配到彩票查詢 ({msg})，模組狀態：LOTTERY_OK={LOTTERY_OK}")
         try:
-            # --- 繁體中文解：[V3 恢復真實功能] 這裡會呼叫 'my_commands' 的 run_lottery_analysis ---
             logger.debug(f"呼叫：run_in_threadpool(run_lottery_analysis, {msg})")
             report = await run_in_threadpool(run_lottery_analysis, msg)
             await reply_text_with_tts_and_extras(reply_tok, report, event=event)
@@ -611,7 +579,6 @@ async def handle_text_message(event: MessageEvent):
     if _is_stock_query(msg):
         logger.info(f"分支：匹配到股票查詢 (_is_stock_query): {msg}")
         try:
-            # --- 繁體中文解：[V3 恢復真實功能] 這裡會呼叫 'my_commands' 的真實股票函數 ---
             logger.debug(f"呼叫：_normalize_ticker_and_name({msg})")
             ticker, name_hint, link = _normalize_ticker_and_name(msg)
             logger.debug(f"呼叫：run_in_threadpool(build_stock_prompt_block, {ticker}, ...)")
@@ -661,7 +628,7 @@ async def handle_audio_message(event: MessageEvent):
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             logger.debug(f"呼叫：line_bot_api.get_message_content({event.message.id})")
-            # --- 繁體中文解：[V3 修正] API 呼叫是同步的 ---
+            # --- 繁體中文解：[V3 修正] API 呼叫是同步的，返回的直接是 bytes (或 file-like object) ---
             audio_in = line_bot_api.get_message_content(event.message.id)
             logger.debug(f"取得語音資料，長度：{len(audio_in)}")
         
@@ -697,7 +664,7 @@ async def handle_events(events):
     """處理事件列表"""
     logger.info(f"準備處理 {len(events)} 個事件...")
     for i, event in enumerate(events):
-        logger.debug(f"---  đang xử lý sự kiện {i+1}/{len(events)} (loại: {type(event)}) ---") # 這裡的越南文是故意的嗎? 還是保留
+        logger.debug(f"--- 正在處理事件 {i+1}/{len(events)} (類型: {type(event)}) ---")
         try:
             if isinstance(event, MessageEvent):
                 if isinstance(event.message, TextMessageContent):
@@ -803,7 +770,7 @@ async def lifespan(app: FastAPI):
     # (關閉時執行的程式碼)
     logger.info("應用程式關閉 (lifespan)...")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.17-restore-modules") # --- 繁體中文解：更新版本號 ---
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.16-v3-sync-fix") # --- 繁體中文解：更新版本號 ---
 router = APIRouter()
 
 @router.post("/callback")
