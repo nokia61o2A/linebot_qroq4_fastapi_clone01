@@ -1,948 +1,1027 @@
-# app_fastapi.py (Version 2.0.10 - Translate-mode sender override)
-# ========== 1) Imports ==========
-import os
-import re
-import random
-import logging
-import asyncio
+# app_fastapi.py  v1.6.0
+# 變更重點：
+# - [ADD] TTS 個別聊天室開關（Quick Reply：「🔊 開啟語音 / 🔈 關閉語音」）
+# - [CHANGE] 僅用 gTTS 做 TTS（不使用 OpenAI TTS），每則回覆預設附語音（可 per-chat 關閉）
+# - [ADD] 翻譯模式回覆時，顯示名稱覆寫為「from 翻譯模式」（LINE v3 TextMessage.sender）
+# - 其他功能保留：翻譯、股票、外匯、金價、彩票；Quick Reply 持續附帶
+
+import os, re, io, sys, random, logging, asyncio
 from typing import Dict, List, Tuple, Optional
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
-import requests
+# ── 專案路徑 ──────────────────────────────────────────────────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+MC_DIR = os.path.join(BASE_DIR, "my_commands")
+if MC_DIR not in sys.path:
+    sys.path.append(MC_DIR)
+
+# ── HTTP / 解析 ───────────────────────────────────────────────────────────────
+import requests, httpx
 from bs4 import BeautifulSoup
-import httpx
+
+# ── 資料處理 / 金融 ───────────────────────────────────────────────────────────
 import pandas as pd
 import yfinance as yf
-import mplfinance as mpf  # 目前未用到，保留以便未來走勢圖需求
 
+# ── FastAPI / LINE SDK v3 ────────────────────────────────────────────────────
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
-    SourceUser, SourceGroup, SourceRoom,
-    QuickReply, QuickReplyButton, MessageAction,
-    PostbackAction, PostbackEvent,
-    FlexSendMessage, BubbleContainer, BoxComponent,
-    TextComponent, ButtonComponent, SeparatorComponent,
-    Sender  # [ADD] 允許覆蓋訊息的顯示名稱/頭像
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent
+from linebot.v3.webhook import WebhookParser
+from linebot.v3.messaging import (
+    Configuration, ApiClient, AsyncMessagingApi, ReplyMessageRequest,
+    TextMessage, AudioMessage, FlexMessage, FlexBubble, FlexBox,
+    FlexText, FlexButton, QuickReply, QuickReplyItem, MessageAction, PostbackAction,
+    BotInfoResponse,
 )
 
+# ── Cloudinary（可選） ───────────────────────────────────────────────────────
+CLOUDINARY_AVAILABLE = False
+CLOUDINARY_CONFIGURED = False
+cloudinary = None
+cloudinary_uploader = None
+if 'CLOUDINARY_URL' in os.environ:
+    try:
+        import cloudinary, cloudinary.uploader
+        CLOUDINARY_AVAILABLE = True
+        cloudinary = cloudinary
+        cloudinary_uploader = cloudinary.uploader
+    except ImportError:
+        pass
+
+# ── gTTS（本版唯一的 TTS 引擎） ─────────────────────────────────────────────
+GTTS_AVAILABLE = False
+try:
+    from gtts import gTTS
+    GTTS_AVAILABLE = True
+except ImportError:
+    pass
+
+# ── LLM ──────────────────────────────────────────────────────────────────────
 from groq import AsyncGroq, Groq
 import openai
-import uvicorn  # [ADD]
 
-# ========== 2) Setup ==========
-logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(asctime)s:%(message)s')
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.info("日誌系統初始化完成")
+# ── 日誌 ─────────────────────────────────────────────────────────────────────
+logger = logging.getLogger("uvicorn.error"); logger.setLevel(logging.INFO)
 
-# --- 環境變數 ---
-logger.info("開始讀取環境變數...")
-BASE_URL = os.getenv("BASE_URL")
-logger.info(f"BASE_URL: {'已設定' if BASE_URL else '未設定'}")
-CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
-logger.info(f"CHANNEL_ACCESS_TOKEN: {'已設定' if CHANNEL_TOKEN else '未設定'}")
-CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
-logger.info(f"CHANNEL_SECRET: {'已設定' if CHANNEL_SECRET else '未設定'}")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-logger.info(f"GROQ_API_KEY: {'已設定' if GROQ_API_KEY else '未設定'}")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-logger.info(f"OPENAI_API_KEY: {'已設定' if OPENAI_API_KEY else '未設定'}")
-
-required_vars = {
-    "BASE_URL": BASE_URL,
-    "CHANNEL_ACCESS_TOKEN": CHANNEL_TOKEN,
-    "CHANNEL_SECRET": CHANNEL_SECRET,
-    "GROQ_API_KEY": GROQ_API_KEY
-}
-missing_vars = [name for name, value in required_vars.items() if not value]
-if missing_vars:
-    error_message = f"❌ 缺少必要環境變數: {', '.join(missing_vars)}"
-    logger.critical(error_message)
-    raise RuntimeError(error_message)
-else:
-    logger.info("✅ 所有必要環境變數均已設定")
-
-# --- API 用戶端初始化 (V2 SDK) ---
+# ── 你的彩票分析程式庫（唯一入口） ───────────────────────────────────────────
+LOTTERY_OK = False
+LOTTERY_IMPORT_ERR = ""
 try:
-    line_bot_api = LineBotApi(CHANNEL_TOKEN)
-    handler = WebhookHandler(CHANNEL_SECRET)
-    logger.info("✅ LINE Bot API (V2) 初始化成功")
+    from my_commands.lottery_gpt import lottery_gpt as run_lottery_analysis
+    LOTTERY_OK = True
+    logger.info("彩票模組載入成功")
 except Exception as e:
-    logger.critical(f"❌ LINE Bot API 初始化失敗: {e}", exc_info=True)
-    line_bot_api = None
-    handler = None
-    raise RuntimeError(f"LINE Bot API 初始化失敗: {e}")
+    LOTTERY_OK = False
+    LOTTERY_IMPORT_ERR = f"{e.__class__.__name__}: {e}"
+    run_lottery_analysis = None
+    logger.error(f"彩票模組載入失敗：{LOTTERY_IMPORT_ERR}")
 
-# --- AI Client 初始化 ---
-async_groq_client, sync_groq_client = None, None
-if GROQ_API_KEY:
-    try:
-        async_groq_client = AsyncGroq(api_key=GROQ_API_KEY)
-        sync_groq_client = Groq(api_key=GROQ_API_KEY)
-        logger.info("✅ Groq API Client 初始化成功 (Sync & Async)")
-    except Exception as e:
-        logger.error(f"❌ Groq API Client 初始化失敗: {e}")
-else:
-    logger.warning("⚠️ 未設定 GROQ_API_KEY")
-
-openai_client = None
-if OPENAI_API_KEY:
-    try:
-        openai_base_url = os.getenv("OPENAI_API_BASE")
-        if openai_base_url:
-            openai_client = openai.OpenAI(api_key=OPENAI_API_KEY, base_url=openai_base_url)
-            logger.info(f"✅ OpenAI Client (自訂 URL: {openai_base_url})")
-        else:
-            openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-            logger.info("✅ OpenAI Client (官方 URL)")
-    except Exception as e:
-        logger.warning(f"⚠️ 初始化 OpenAI 失敗：{e}")
-else:
-    logger.info("ℹ️ 未設定 OPENAI_API_KEY")
-
-# --- Groq 模型 ---
-GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
-logger.info(f"Groq 模型: Primary={GROQ_MODEL_PRIMARY}, Fallback={GROQ_MODEL_FALLBACK}")
-
-# --- 【靈活載入】自訂模組 ---
-LOTTERY_ENABLED = True
-try:
-    from TaiwanLottery import TaiwanLotteryCrawler
-    from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
-    lottery_crawler = TaiwanLotteryCrawler()
-    caiyunfangwei_crawler = CaiyunfangweiCrawler()
-    logger.info("✅ 已載入彩票模組")
-except ModuleNotFoundError:
-    logger.error("❌ 找不到 'taiwanlottery' 模組。請檢查 requirements.txt。")
-    LOTTERY_ENABLED = False
-    lottery_crawler = None
-    caiyunfangwei_crawler = None
-except Exception as e:
-    logger.warning(f"⚠️ 無法載入彩票模組：{e}。")
-    LOTTERY_ENABLED = False
-    lottery_crawler = None
-    caiyunfangwei_crawler = None
-
-STOCK_ENABLED = True
+# ── 股票模組（若失敗則降級為安全 stub） ───────────────────────────────────────
 try:
     from my_commands.stock.stock_price import stock_price
     from my_commands.stock.stock_news import stock_news
     from my_commands.stock.stock_value import stock_fundamental
     from my_commands.stock.stock_rate import stock_dividend
     from my_commands.stock.YahooStock import YahooStock
-    logger.info("✅ 已載入股票模組")
-except ModuleNotFoundError as e:
-    logger.error(f"❌ 股票模組載入失敗 (ModuleNotFoundError): {e.name} 未找到", exc_info=False)  # [CHANGE] 更精準的錯誤訊息
-    STOCK_ENABLED = False
-except ImportError as e:
-    logger.error(f"❌ 股票模組載入失敗 (ImportError): {e}", exc_info=False)
-    STOCK_ENABLED = False
+    STOCK_OK = True
+    logger.info("股票模組載入成功")
 except Exception as e:
-    logger.warning(f"⚠️ 無法載入股票模組：{e}", exc_info=True)
-    STOCK_ENABLED = False
-
-if not STOCK_ENABLED:
-    def stock_price(id):
-        logger.error("股票(備援): stock_price")
-        return pd.DataFrame()
-
-    def stock_news(hint):
-        logger.error("股票(備援): stock_news")
-        return ["股票模組未載入"]
-
-    def stock_fundamental(id):
-        logger.error("股票(備援): stock_fundamental")
-        return "股票模組未載入"
-
-    def stock_dividend(id):
-        logger.error("股票(備援): stock_dividend")
-        return "股票模組未載入"
-
+    logging.warning(f"股票模組載入失敗：{e}")
+    def stock_price(s): return pd.DataFrame()
+    def stock_news(s): return "（股票新聞模組未載入）"
+    def stock_fundamental(s): return "（股票基本面模組未載入）"
+    def stock_dividend(s): return "（股票股利模組未載入）"
     class YahooStock:
-        def __init__(self, id):
-            logger.error(f"股票(備援): YahooStock({id})")
-            self.name = id
-            self.now_price = None
-            self.change = None
-            self.currency = None
-            self.close_time = None
+        def __init__(self, s): self.name = "（YahooStock 未載入）"
+    STOCK_OK = False
 
-# --- 通用 HTTP Headers 與金價來源常數 ---
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-}
-BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"  # 台灣銀行黃金牌價頁
+# ── 環境與客戶端初始化 ───────────────────────────────────────────────────────
+BASE_URL = os.getenv("BASE_URL")
+CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
+CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 
-def _parse_bot_gold_text(html: str) -> dict:
-    """
-    簡易擷取台銀黃金牌價（賣出/買入/掛牌時間）。如頁面改版，請更新選擇器或正則。
-    回傳: {"sell_twd_per_g": float, "buy_twd_per_g": float, "listed_at": "YYYY/MM/DD HH:MM"}
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    text = " ".join(soup.stripped_strings)
-    sell = buy = None
-    listed_at = None
-    m_sell = re.search(r"賣出價.*?([\d,]+\.?\d*)", text)
-    m_buy = re.search(r"買入價.*?([\d,]+\.?\d*)", text)
-    m_time = re.search(r"(?:掛牌時間|最後更新)[：:]\s*([0-9\/\-\s:]+)", text)
-    if m_sell:
-        try: sell = float(m_sell.group(1).replace(",", ""))
-        except Exception: pass
-    if m_buy:
-        try: buy = float(m_buy.group(1).replace(",", ""))
-        except Exception: pass
-    if m_time: listed_at = m_time.group(1).strip()
-    data = {}
-    if sell is not None: data["sell_twd_per_g"] = sell
-    if buy is not None:  data["buy_twd_per_g"] = buy
-    if listed_at:        data["listed_at"] = listed_at
-    return data
+if not CHANNEL_TOKEN or not CHANNEL_SECRET:
+    raise RuntimeError("缺少必要環境變數：CHANNEL_ACCESS_TOKEN / CHANNEL_SECRET")
 
-# --- 狀態字典與常數 ---
+# 本版不使用 OpenAI TTS；僅保留 OpenAI 作為 LLM 或 STT（如你需要）
+openai_client = None
+if OPENAI_API_KEY:
+    try:
+        openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        logger.info("OpenAI 客戶端初始化成功（僅 LLM/STT 可用，不用於 TTS）")
+    except Exception as e:
+        logger.warning(f"初始化 OpenAI 失敗：{e}")
+
+sync_groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+logger.info(f"LLM 設定：Groq Primary/Async 啟用={bool(async_groq_client)}")
+
+# Cloudinary（可選）
+if CLOUDINARY_URL and CLOUDINARY_AVAILABLE:
+    try:
+        import re
+        cloudinary.config(
+            cloud_name=re.search(r"@(.+)", CLOUDINARY_URL).group(1),
+            api_key=re.search(r"//(\d+):", CLOUDINARY_URL).group(1),
+            api_secret=re.search(r":([A-Za-z0-9_-]+)@", CLOUDINARY_URL).group(1),
+        )
+        logger.info("Cloudinary 配置成功")
+        CLOUDINARY_CONFIGURED = True
+    except Exception as e:
+        logger.error(f"Cloudinary 設定失敗: {e}")
+        CLOUDINARY_URL = None
+        CLOUDINARY_CONFIGURED = False
+else:
+    logger.info("Cloudinary 未配置或不可用")
+
+# LINE / LLM Client
+try:
+    configuration = Configuration(access_token=CHANNEL_TOKEN)
+    api_client = ApiClient(configuration=configuration)
+    line_bot_api = AsyncMessagingApi(api_client=api_client)
+    parser = WebhookParser(CHANNEL_SECRET)
+    logger.info("LINE Bot 客戶端初始化成功")
+except Exception as e:
+    logger.error(f"LINE Bot 客戶端初始化失敗：{e}")
+    raise
+
+# ── 會話狀態 / 翻譯 / 人設 / TTS per-chat 偏好 ──────────────────────────────
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
-user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
+translation_states_ttl: Dict[str, datetime] = {}
+TRANSLATE_TTL_SECONDS = int(os.getenv("TRANSLATE_TTL_SECONDS", "7200"))
 auto_reply_status: Dict[str, bool] = {}
+user_persona: Dict[str, str] = {}
+tts_user_pref: Dict[str, bool] = {}  # [ADD] per chat 的 TTS 開關（預設 True）
+
 PERSONAS = {
-    "sweet": {"title": "甜美女友", "style": "溫柔體貼", "greetings": "親愛的～我在這🌸", "emoji":"🌸💕😊"},
-    "salty": {"title": "傲嬌女友", "style": "機智吐槽", "greetings": "你又來啦？說吧😏", "emoji":"😏🙄"},
-    "moe":   {"title": "萌系女友", "style": "動漫語氣", "greetings": "呀呼～(ﾉ>ω<)ﾉ", "emoji":"✨🎀"},
-    "cool":  {"title": "酷系御姐", "style": "冷靜精煉", "greetings": "我在。說重點。", "emoji":"🧊⚡️"}
+    "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰", "greetings": "親愛的～我在這裡聽你說 🌸", "emoji": "🌸💕😊"},
+    "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度", "greetings": "你又來啦？說吧，哪裡卡住了。😏", "emoji": "😏🙄"},
+    "moe":   {"title": "萌系女友", "style": "動漫語氣＋可愛顏文字", "greetings": "呀呼～今天也被我治癒一下嗎？(ﾉ>ω<)ﾉ", "emoji": "✨🎀"},
+    "cool":  {"title": "酷系御姐", "style": "冷靜精煉，關鍵建議", "greetings": "我在。說重點。", "emoji": "🧊⚡️"},
 }
-LANGUAGE_MAP = {"英文": "English", "日文": "Japanese", "韓文": "Korean", "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"}
-PERSONA_ALIAS = {"甜":"sweet", "鹹":"salty", "萌":"moe", "酷":"cool", "random":"random"}
+LANGUAGE_MAP = {
+    "英文": "English","日文": "Japanese","韓文": "Korean","越南文":"Vietnamese",
+    "繁體中文":"Traditional Chinese","中文":"Traditional Chinese",
+    "en":"English","ja":"Japanese","jp":"Japanese","ko":"Korean","vi":"Vietnamese","zh":"Traditional Chinese"
+}
+PERSONA_ALIAS = {"甜":"sweet","鹹":"salty","萌":"moe","酷":"cool","random":"random"}
 
-# ========== 3) FastAPI ==========
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("應用程式啟動 (lifespan)...")
-    if BASE_URL and CHANNEL_TOKEN and CHANNEL_TOKEN != "dummy":
-        try:
-            async with httpx.AsyncClient() as c:
-                headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
-                payload = {"endpoint": f"{BASE_URL}/callback"}
-                logger.info(f"準備更新 Webhook 至: {payload['endpoint']}")
-                r = await c.put(
-                    "https://api.line.me/v2/bot/channel/webhook/endpoint",
-                    headers=headers, json=payload, timeout=10.0
-                )
-                r.raise_for_status()
-                logger.info(f"✅ Webhook 更新成功: {r.status_code}")
-        except Exception as e:
-            logger.error(f"⚠️ Webhook 更新失敗: {e}", exc_info=True)
-    else:
-        logger.warning("⚠️ Webhook 未更新：未設定 BASE_URL 或 CHANNEL_ACCESS_TOKEN (Mock 模式)")
-    logger.info("Lifespan 啟動程序完成。")
-    yield
-    logger.info("應用程式關閉 (lifespan)...")
+TRANSLATE_CMD = re.compile(
+    r"^(?:翻譯|翻成)\s*(?:->|→|>)?\s*(英文|English|日文|Japanese|韓文|Korean|越南文|Vietnamese|繁體中文|中文)\s*$",
+    re.IGNORECASE
+)
+INLINE_TRANSLATE = re.compile(r"^(en|eng|英文|ja|jp|日文|zh|繁中|中文)\s*[:：>]\s*(.+)$", re.IGNORECASE)
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.10-translate-sender")
-router = APIRouter()
+# ── 小工具 ───────────────────────────────────────────────────────────────────
+def _now() -> datetime: return datetime.utcnow()
 
-# ========== 4) Helpers (V2 SDK Style) ==========
 def get_chat_id(event: MessageEvent) -> str:
-    if isinstance(event.source, SourceGroup): return event.source.group_id
-    if isinstance(event.source, SourceRoom):  return event.source.room_id
-    if isinstance(event.source, SourceUser):  return event.source.user_id
-    logger.warning(f"未知的 event source type: {type(event.source)}"); return "unknown_source"
+    """穩健取得 chat id（支援駝峰屬性與 to_dict()）"""
+    source = event.source
+    stype = getattr(source, "type", None) or getattr(source, "_type", None)
+    uid = getattr(source, "userId", None) or getattr(source, "user_id", None)
+    gid = getattr(source, "groupId", None) or getattr(source, "group_id", None)
+    rid = getattr(source, "roomId", None) or getattr(source, "room_id", None)
+    try:
+        if hasattr(source, "to_dict"):
+            d = source.to_dict() or {}
+            stype = stype or d.get("type")
+            uid = uid or d.get("userId") or d.get("user_id")
+            gid = gid or d.get("groupId") or d.get("group_id")
+            rid = rid or d.get("roomId") or d.get("room_id")
+    except Exception:
+        pass
+    if gid: return f"group:{gid}"
+    if rid: return f"room:{rid}"
+    if uid: return f"user:{uid}"
+    return f"{stype or 'unknown'}:{abs(hash(str(source))) % 10_000_000}"
 
-def build_quick_reply() -> QuickReply:
-    logger.debug("建立 QuickReply")
+def _tstate_set(chat_id: str, lang_display: str):
+    translation_states[chat_id] = lang_display
+    translation_states_ttl[chat_id] = _now() + timedelta(seconds=TRANSLATE_TTL_SECONDS)
+
+def _tstate_get(chat_id: str) -> Optional[str]:
+    exp = translation_states_ttl.get(chat_id)
+    if exp and _now() > exp:
+        _tstate_clear(chat_id); return None
+    return translation_states.get(chat_id)
+
+def _tstate_clear(chat_id: str):
+    translation_states.pop(chat_id, None)
+    translation_states_ttl.pop(chat_id, None)
+
+def _ensure_tts_pref(chat_id: str) -> bool:
+    """若該聊天室未設定過 TTS 偏好，預設 True。"""
+    if chat_id not in tts_user_pref:
+        tts_user_pref[chat_id] = True
+    return tts_user_pref[chat_id]
+
+# ── Quick Reply（每則回覆都會帶，含 TTS 開關） ─────────────────────────────
+def build_quick_reply(chat_id: Optional[str] = None) -> QuickReply:
+    tts_on = True if chat_id is None else _ensure_tts_pref(chat_id)
+    tts_label = "🔈 關閉語音" if tts_on else "🔊 開啟語音"
+    tts_cmd   = "TTS:OFF" if tts_on else "TTS:ON"
+
     return QuickReply(items=[
-        QuickReplyButton(action=MessageAction(label="主選單", text="選單")),
-        QuickReplyButton(action=MessageAction(label="台股大盤", text="台股大盤")),
-        QuickReplyButton(action=MessageAction(label="美股大盤", text="美股大盤")),
-        QuickReplyButton(action=MessageAction(label="黃金價格", text="金價")),
-        QuickReplyButton(action=MessageAction(label="查台積電", text="2330")),
-        QuickReplyButton(action=MessageAction(label="查輝達", text="NVDA")),
-        QuickReplyButton(action=MessageAction(label="查日圓", text="JPY")),
-        QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
-        QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
+        QuickReplyItem(action=MessageAction(label="主選單", text="選單")),
+        QuickReplyItem(action=MessageAction(label="台股大盤", text="大盤")),
+        QuickReplyItem(action=MessageAction(label="美股大盤", text="美盤")),
+        QuickReplyItem(action=MessageAction(label="黃金價格", text="金價")),
+        QuickReplyItem(action=MessageAction(label="查 2330", text="2330")),
+        QuickReplyItem(action=MessageAction(label="查 NVDA", text="NVDA")),
+        QuickReplyItem(action=MessageAction(label="日圓匯率", text="JPY")),
+        QuickReplyItem(action=MessageAction(label="大樂透", text="大樂透")),
+        QuickReplyItem(action=MessageAction(label="威力彩", text="威力彩")),
+        QuickReplyItem(action=MessageAction(label="今彩539", text="今彩539")),
+        QuickReplyItem(action=MessageAction(label="結束翻譯", text="翻譯->結束")),
+        QuickReplyItem(action=MessageAction(label=tts_label, text=tts_cmd)),  # [ADD] TTS 開關
     ])
 
-def reply_with_quick_bar(reply_token: str, text: str, *, sender_name: Optional[str] = None):
-    """
-    [CHANGE] 支援覆蓋訊息顯示名稱（翻譯模式會傳入 sender_name="from 翻譯模式"）
-    參考：LINE 指定發送者名稱/圖示 https://developers.line.biz/en/docs/messaging-api/icon-nickname/
-    """
-    if not line_bot_api:
-        logger.error("LINE API 未初始化")
-        print(f"[MOCK] 回覆：{text}")
-        return
+def build_main_menu() -> FlexMessage:
+    items = [
+        ("💹 金融查詢", PostbackAction(label="💹 金融查詢", data="menu:finance")),
+        ("🎰 彩票分析", PostbackAction(label="🎰 彩票分析", data="menu:lottery")),
+        ("💖 AI 角色扮演", PostbackAction(label="💖 AI 角色扮演", data="menu:persona")),
+        ("🌐 翻譯工具", PostbackAction(label="🌐 翻譯工具", data="menu:translate")),
+    ]
+    buttons = [FlexButton(action=i[1], style="primary" if idx < 2 else "secondary") for idx, i in enumerate(items)]
+    bubble = FlexBubble(
+        header=FlexBox(layout="vertical", contents=[FlexText(text="AI 助理主選單", weight="bold", size="lg")]),
+        body=FlexBox(layout="vertical", spacing="md", contents=buttons),
+    )
+    return FlexMessage(alt_text="主選單", contents=bubble)
+
+def build_submenu(kind: str) -> FlexMessage:
+    menus = {
+        "finance": ("💹 金融查詢", [
+            ("台股大盤", MessageAction(label="台股大盤", text="大盤")),
+            ("美股大盤", MessageAction(label="美股大盤", text="美盤")),
+            ("黃金價格", MessageAction(label="黃金價格", text="金價")),
+            ("日圓匯率", MessageAction(label="日圓匯率", text="JPY")),
+            ("查 2330 台積電", MessageAction(label="查 2330 台積電", text="2330")),
+            ("查 NVDA 輝達", MessageAction(label="查 NVDA 輝達", text="NVDA")),
+        ]),
+        "lottery": ("🎰 彩票分析", [
+            ("大樂透", MessageAction(label="大樂透", text="大樂透")),
+            ("威力彩", MessageAction(label="威力彩", text="威力彩")),
+            ("今彩539", MessageAction(label="今彩539", text="今彩539")),
+        ]),
+        "persona": ("💖 AI 角色扮演", [
+            ("甜美女友", MessageAction(label="甜美女友", text="甜")),
+            ("傲嬌女友", MessageAction(label="傲嬌女友", text="鹹")),
+            ("萌系女友", MessageAction(label="萌系女友", text="萌")),
+            ("酷系御姐", MessageAction(label="酷系御姐", text="酷")),
+            ("隨機切換", MessageAction(label="隨機切換", text="random")),
+        ]),
+        "translate": ("🌐 翻譯工具", [
+            ("翻成英文", MessageAction(label="翻成英文", text="翻譯->英文")),
+            ("翻成日文", MessageAction(label="翻成日文", text="翻譯->日文")),
+            ("翻成繁中", MessageAction(label="翻成繁中", text="翻譯->繁體中文")),
+            ("結束翻譯模式", MessageAction(label="結束翻譯模式", text="翻譯->結束")),
+        ]),
+    }
+    title, items = menus.get(kind, ("無效選單", []))
+    rows, row = [], []
+    for _, action in items:
+        row.append(FlexButton(action=action, style="primary"))
+        if len(row) == 2:
+            rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row)); row = []
+    if row: rows.append(FlexBox(layout="horizontal", spacing="sm", contents=row))
+    bubble = FlexBubble(
+        header=FlexBox(layout="vertical", contents=[FlexText(text=title, weight="bold", size="lg")]),
+        body=FlexBox(layout="vertical", spacing="md", contents=rows or [FlexText(text="（尚無項目）")]),
+    )
+    return FlexMessage(alt_text=title, contents=bubble)
+
+# ── STT（可選）/ TTS（gTTS only）與統一回覆 ────────────────────────────────
+async def speech_to_text_async(audio_bytes: bytes) -> Optional[str]:
+    """語音轉文字（若你有 OpenAI/Groq key 可用；否則回 None）"""
+    if not openai_client:
+        return None
     try:
-        logger.debug(f"回覆 (QR): {text[:50]}... sender_name={sender_name!r}")
-        msg = TextSendMessage(
-            text=text,
-            quick_reply=build_quick_reply(),
-            sender=Sender(name=sender_name) if sender_name else None  # [ADD]
-        )
-        line_bot_api.reply_message(reply_token, msg)
-        logger.debug("回覆 (QR) 成功")
-    except LineBotApiError as lbe:
-        logger.error(f"❌ 回覆 (QR) 失敗: {lbe.status_code} {lbe.error.message}", exc_info=False)
+        f = io.BytesIO(audio_bytes); f.name = "audio.m4a"
+        resp = openai_client.audio.transcriptions.create(model="whisper-1", file=f)
+        return (resp.text or "").strip() or None
     except Exception as e:
-        logger.error(f"❌ 回覆 (QR) 未知錯誤: {e}", exc_info=True)
+        logger.warning(f"STT 失敗：{e}")
+        return None
 
-def build_main_menu_flex() -> FlexSendMessage:
-    logger.debug("建主選單 Flex")
-    bubble = BubbleContainer(
-        direction="ltr",
-        header=BoxComponent(layout="vertical", contents=[TextComponent(text="AI 助理選單", weight="bold", size="lg")]),
-        body=BoxComponent(
-            layout="vertical", spacing="md",
-            contents=[
-                TextComponent(text="選擇功能：", size="sm"),
-                SeparatorComponent(margin="md"),
-                ButtonComponent(action=PostbackAction(label="💹 金融查詢", data="menu:finance"), style="primary", color="#5E86C1"),
-                ButtonComponent(action=PostbackAction(label="🎰 彩票分析", data="menu:lottery"), style="primary", color="#5EC186"),
-                ButtonComponent(action=PostbackAction(label="💖 AI 角色", data="menu:persona"), style="secondary"),
-                ButtonComponent(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate"), style="secondary"),
-                ButtonComponent(action=PostbackAction(label="⚙️ 系統設定", data="menu:settings"), style="secondary"),
-            ]
-        )
-    )
-    return FlexSendMessage(alt_text="主選單", contents=bubble)
+def _tts_gtts(text: str) -> Optional[bytes]:
+    """gTTS（同步）——本版唯一 TTS 引擎"""
+    if not GTTS_AVAILABLE:
+        logger.error("gTTS 套件未安裝")
+        return None
+    try:
+        clean = re.sub(r"[*_`~#]", "", text).strip()
+        if not clean:
+            clean = "內容為空"
+        tts = gTTS(text=clean, lang="zh-TW", tld="com.tw", slow=False)
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.error(f"gTTS 失敗: {e}")
+        return None
 
-def build_submenu_flex(kind: str) -> FlexSendMessage:
-    logger.debug(f"建子選單 Flex ({kind})")
-    title, buttons = "子選單", []
-    if kind == "finance":
-        title, buttons = "💹 金融查詢", [
-            ButtonComponent(action=MessageAction(label="台股", text="台股大盤")),
-            ButtonComponent(action=MessageAction(label="美股", text="美股大盤")),
-            ButtonComponent(action=MessageAction(label="黃金", text="金價")),
-            ButtonComponent(action=MessageAction(label="日圓", text="JPY")),
-            ButtonComponent(action=MessageAction(label="2330", text="2330")),
-            ButtonComponent(action=MessageAction(label="NVDA", text="NVDA")),
-        ]
-    elif kind == "lottery":
-        title, buttons = "🎰 彩票分析", [
-            ButtonComponent(action=MessageAction(label="大樂透", text="大樂透")),
-            ButtonComponent(action=MessageAction(label="威力彩", text="威力彩")),
-            ButtonComponent(action=MessageAction(label="今彩539", text="539")),
-        ]
-    elif kind == "persona":
-        title, buttons = "💖 AI 角色", [
-            ButtonComponent(action=MessageAction(label="甜美女友", text="甜")),
-            ButtonComponent(action=MessageAction(label="傲嬌女友", text="鹹")),
-            ButtonComponent(action=MessageAction(label="萌系女友", text="萌")),
-            ButtonComponent(action=MessageAction(label="酷系御姐", text="酷")),
-            ButtonComponent(action=MessageAction(label="隨機", text="random")),
-        ]
-    elif kind == "translate":
-        title, buttons = "🌐 翻譯工具", [
-            ButtonComponent(action=MessageAction(label="翻英文", text="翻譯->英文")),
-            ButtonComponent(action=MessageAction(label="翻日文", text="翻譯->日文")),
-            ButtonComponent(action=MessageAction(label="翻繁中", text="翻譯->繁體中文")),
-            ButtonComponent(action=MessageAction(label="結束", text="翻譯->結束")),
-        ]
-    elif kind == "settings":
-        title, buttons = "⚙️ 系統設定", [
-            ButtonComponent(action=MessageAction(label="開啟自動回答", text="開啟自動回答")),
-            ButtonComponent(action=MessageAction(label="關閉自動回答", text="關閉自動回答")),
-        ]
-    bubble = BubbleContainer(
-        direction="ltr",
-        header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="lg")]),
-        body=BoxComponent(layout="vertical", contents=buttons, spacing="sm")
-    )
-    return FlexSendMessage(alt_text=title, contents=bubble)
+async def text_to_speech_async(text: str) -> Optional[bytes]:
+    """文字轉語音（非同步，gTTS only）"""
+    try:
+        return await run_in_threadpool(_tts_gtts, text)
+    except Exception as e:
+        logger.error(f"TTS 轉檔失敗：{e}")
+        return None
 
-# ========== 5) AI & 分析 ==========
+async def reply_text_with_tts_and_extras(
+    reply_token: str,
+    text: str,
+    *,
+    chat_id: Optional[str] = None,
+    sender_name: Optional[str] = None,   # [ADD] 覆寫顯示名稱（翻譯模式用）
+    extras: Optional[List] = None
+):
+    """
+    所有文字回覆統一走這裡，Quick Reply 每次都會帶上，並依 per-chat 偏好決定是否附語音。
+    """
+    if not text:
+        text = "（無內容）"
+
+    # Quick Reply 需根據 chat_id 動態顯示 TTS 開關按鈕
+    qr = build_quick_reply(chat_id)
+
+    # [ADD] LINE v3 的 TextMessage 支援 sender 欄位，覆寫顯示名稱
+    text_msg_payload = {"text": text, "quickReply": qr}
+    if sender_name:
+        text_msg_payload["sender"] = {"name": sender_name}  # 顯示「from 翻譯模式」
+
+    messages = [TextMessage(**text_msg_payload)]
+    if extras:
+        messages.extend(extras)
+
+    # TTS：依聊天室偏好 + Cloudinary + gTTS 可用性
+    use_tts = _ensure_tts_pref(chat_id or "global")
+    if use_tts and CLOUDINARY_CONFIGURED and GTTS_AVAILABLE:
+        try:
+            audio_bytes = await text_to_speech_async(text)
+            if audio_bytes:
+                upload_result = await run_in_threadpool(
+                    lambda: cloudinary_uploader.upload(
+                        io.BytesIO(audio_bytes),
+                        resource_type="video",  # LINE 音訊需可直連；用 video 類型可放 mp3
+                        folder="line-bot-tts",
+                        format="mp3"
+                    )
+                )
+                url = upload_result.get("secure_url")
+                if url:
+                    # 粗估語音時長（ms）：每字 ~60ms，夾在 3~30 秒之間
+                    est_duration = max(3000, min(30000, len(text) * 60))
+                    messages.append(AudioMessage(original_content_url=url, duration=est_duration))
+                    logger.info(f"TTS 上傳成功：{url}（{est_duration}ms）")
+                else:
+                    logger.warning("Cloudinary 上傳成功但無 secure_url；略過音訊訊息")
+        except Exception as e:
+            logger.error(f"TTS/Cloudinary 流程失敗：{e}")
+
+    # 寄出
+    try:
+        await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+        logger.debug(f"LINE 回覆成功（訊息數：{len(messages)}）")
+    except Exception as line_e:
+        logger.error(f"LINE 回覆失敗：{line_e}")
+        # 備用方案：只發送文字訊息
+        try:
+            fallback = TextMessage(text=text[:100] + "..." if len(text) > 100 else text, quick_reply=qr)
+            await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[fallback]))
+            logger.info("LINE 備用回覆成功（僅文字）")
+        except Exception as backup_e:
+            logger.error(f"LINE 備用回覆也失敗：{backup_e}")
+            raise line_e
+
+async def reply_menu_with_hint(reply_token: str, flex: FlexMessage, hint: str="👇 功能選單", *, chat_id: Optional[str] = None):
+    """先送文字(含 QuickReply)再送 Flex，確保快速鍵一直在，且含 per-chat TTS 切換鍵。"""
+    qr = build_quick_reply(chat_id)
+    messages = [TextMessage(text=hint, quick_reply=qr), flex]
+    try:
+        await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=messages))
+        logger.debug("LINE 選單回覆成功")
+    except Exception as e:
+        logger.error(f"LINE 選單回覆失敗：{e}")
+        try:
+            simple_msg = TextMessage(text=hint, quick_reply=qr)
+            await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_token, messages=[simple_msg]))
+            logger.info("LINE 選單備用回覆成功")
+        except Exception as backup_e:
+            logger.error(f"LINE 選單備用回覆也失敗：{backup_e}")
+            raise e
+
+# ── 一般聊天/翻譯 LLM ────────────────────────────────────────────────────────
 def get_analysis_reply(messages: List[dict]) -> str:
-    logger.debug(f"呼叫 get_analysis_reply (OpenAI優先), messages count: {len(messages)}")
+    """同步 LLM 分析（備用方法）"""
     if openai_client:
         try:
-            logger.debug("嘗試 OpenAI...")
             resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1500,
+                model="gpt-4o-mini", messages=messages, temperature=0.7, max_tokens=1500
             )
-            reply = resp.choices[0].message.content
-            logger.debug(f"OpenAI 成功, len: {len(reply)}")
-            return reply
+            content = resp.choices[0].message.content or ""
+            return content
         except Exception as e:
-            logger.warning(f"⚠️ OpenAI 失敗：{e}")
+            logger.warning(f"OpenAI 失敗：{e}")
 
     if not sync_groq_client:
-        logger.error("❌ Groq Client 未初始化")
-        return "抱歉，AI 分析引擎無法連線。"  # [FIX] 半形引號
+        return "抱歉，AI 服務目前無法連線。"
 
     try:
-        logger.debug(f"嘗試 Groq Primary: {GROQ_MODEL_PRIMARY}")
         resp = sync_groq_client.chat.completions.create(
-            model=GROQ_MODEL_PRIMARY, messages=messages, temperature=0.7, max_tokens=2000,
+            model="llama-3.1-8b-instant", messages=messages, temperature=0.7, max_tokens=2000
         )
-        reply = resp.choices[0].message.content
-        logger.debug(f"Groq Primary 成功, len: {len(reply)}")
-        return reply
+        content = resp.choices[0].message.content or ""
+        return content
     except Exception as e:
-        logger.warning(f"⚠️ Groq Primary 失敗：{e}")
-        try:
-            logger.debug(f"嘗試 Groq Fallback: {GROQ_MODEL_FALLBACK}")
-            resp = sync_groq_client.chat.completions.create(
-                model=GROQ_MODEL_FALLBACK, messages=messages, temperature=0.9, max_tokens=1500,
-            )
-            reply = resp.choices[0].message.content
-            logger.debug(f"Groq Fallback 成功, len: {len(reply)}")
-            return reply
-        except Exception as ee:
-            logger.error(f"❌ 所有 AI API 都失敗：{ee}", exc_info=True)
-            return "抱歉，AI 分析師目前連線不穩定，請稍後再試。"
+        logger.error(f"Groq 失敗：{e}")
+        return "AI 分析服務暫時不可用，請稍後再試。"
 
-def analyze_sentiment(text: str) -> str:
-    logger.debug(f"分析情緒: {text[:30]}...")
+async def groq_chat_async(messages, max_tokens=600, temperature=0.7):
+    """非同步 Groq 聊天（主要方法）"""
+    if not async_groq_client:
+        return await run_in_threadpool(lambda: get_analysis_reply(messages))
+    try:
+        resp = await async_groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant", messages=messages, max_tokens=max_tokens, temperature=temperature
+        )
+        content = resp.choices[0].message.content.strip() or ""
+        return content
+    except Exception as e:
+        logger.error(f"Groq 異步調用失敗：{e}")
+        return await run_in_threadpool(lambda: get_analysis_reply(messages))
+
+async def analyze_sentiment(text: str) -> str:
+    """情緒分析"""
     msgs = [{"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."},
             {"role":"user","content":text}]
-    if not sync_groq_client:
-        logger.error("❌ Groq Client 未初始化")
-        return "neutral"
     try:
-        resp = sync_groq_client.chat.completions.create(
-            model=GROQ_MODEL_FALLBACK, messages=msgs, max_tokens=10, temperature=0
-        )
-        result = (resp.choices[0].message.content or "neutral").strip().lower()
-        logger.debug(f"情緒結果: {result}")
-        return result if result in ["positive", "neutral", "negative", "angry"] else "neutral"
+        out = await groq_chat_async(msgs, max_tokens=10, temperature=0)
+        sentiment = (out or "neutral").strip().lower()
+        return sentiment if sentiment in ("positive","neutral","negative","angry") else "neutral"
     except Exception as e:
-        logger.error(f"❌ Groq 情緒分析失敗: {e}", exc_info=False)
+        logger.warning(f"情緒分析失敗：{e}")
         return "neutral"
 
-def translate_text(text: str, target_lang_display: str) -> str:
-    logger.debug(f"翻譯 to {target_lang_display}: {text[:30]}...")
-    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
-    sys = "You are a precise translation engine. Output ONLY the translated text, without intro."
-    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
-    if not sync_groq_client:
-        logger.error("❌ Groq Client 未初始化")
-        return "抱歉，翻譯引擎無法連線。"
+async def translate_text(text: str, target_lang_display: str) -> str:
+    """翻譯文字"""
+    target = LANGUAGE_MAP.get(target_lang_display.lower(), target_lang_display)
+    sys_prompt = "You are a precise translation engine. Output ONLY the translated text with no extra words."
+    clean = re.sub(r"[\u200B-\u200D\uFEFF]", "", text).strip()
+    if not clean:
+        return "無內容可翻譯"
+    usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{clean}"}}'
     try:
-        resp = sync_groq_client.chat.completions.create(
-            model=GROQ_MODEL_FALLBACK,
-            messages=[{"role":"system","content":sys},{"role":"user","content":usr}],
-            max_tokens=len(text)*3 + 50,
-            temperature=0.2
-        )
-        translated_text = (resp.choices[0].message.content or "").strip()
-        logger.debug(f"翻譯結果: {translated_text[:50]}...")
-        return translated_text
+        result = await groq_chat_async([{"role":"system","content":sys_prompt},{"role":"user","content":usr}], 800, 0.2)
+        return result if result.strip() else f"翻譯失敗：{text[:20]}..."
     except Exception as e:
-        logger.error(f"❌ Groq 翻譯失敗: {e}", exc_info=False)
-        return "抱歉，翻譯功能暫時出錯。"
+        logger.error(f"翻譯失敗：{e}")
+        return f"翻譯服務暫時不可用：{text[:20]}..."
 
-# ========== 6) 金融工具 ==========
-_TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
-_US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
-
-def normalize_ticker(t: str) -> Tuple[str, str, str, bool]:
-    t = t.strip().upper()
-    logger.debug(f"正規化 ticker: {t}")
-    if t in ["台股大盤", "大盤"]: return "^TWII", "^TWII", "^TWII", True
-    if t in ["美股大盤", "美盤", "美股"]: return "^GSPC", "^GSPC", "^GSPC", True
-    if _TW_CODE_RE.match(t): return f"{t}.TW", t, t, False
-    if _US_CODE_RE.match(t) and t != "JPY": return t, t, t, False
-    logger.warning(f"無法明確識別 ticker: {t}"); return t, t, t, False
-
-def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
-    logger.debug(f"抓取快照 (yf: {yf_symbol}, slug: {yahoo_slug})")
-    snap: dict = {"name": None, "now_price": None, "change": None, "currency": None, "close_time": None}
-    try:
-        tk = yf.Ticker(yf_symbol)
-        info = {}
-        hist = pd.DataFrame()
-        try: info = tk.info or {}
-        except Exception as info_e: logger.warning(f"yf tk.info fail: {info_e}")
-        try: hist = tk.history(period="2d", interval="1d")
-        except Exception as hist_e: logger.warning(f"yf tk.history fail: {hist_e}")
-
-        name = info.get("shortName") or info.get("longName")
-        snap["name"] = name or yf_symbol
-
-        price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-        ccy = info.get("currency")
-        if price:
-            snap["now_price"] = f"{price:.2f}"
-            snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
-        elif not hist.empty:
-            price = float(hist["Close"].iloc[-1])
-            snap["now_price"] = f"{price:.2f}"
-            snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
-
-        if not hist.empty and len(hist) >= 2 and float(hist["Close"].iloc[-2]) != 0:
-            chg = float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2])
-            pct = chg / float(hist["Close"].iloc[-2]) * 100
-            sign = "+" if chg >= 0 else ""
-            snap["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
-        elif info.get('regularMarketChange') is not None and info.get('regularMarketChangePercent') is not None:
-            chg = float(info['regularMarketChange'])
-            pct = float(info['regularMarketChangePercent']) * 100
-            sign = "+" if chg >= 0 else ""
-            snap["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
-
-        if not hist.empty:
-            ts = hist.index[-1]
-            snap["close_time"] = ts.strftime("%Y-%m-%d %H:%M")
-        elif info.get("regularMarketTime"):
-            try:
-                snap["close_time"] = datetime.fromtimestamp(info["regularMarketTime"]).strftime("%Y-%m-%d %H:%M")
-            except Exception as ts_e:
-                logger.warning(f"解析 timestamp {info.get('regularMarketTime')} 失敗: {ts_e}")
-    except Exception as e:
-        logger.warning(f"⚠️ yfinance fail: {e}")
-
-    if (not snap["now_price"] or not snap["name"]) and STOCK_ENABLED and 'YahooStock' in globals():
-        logger.debug(f"嘗試 YahooStock fallback for {yahoo_slug}")
-        try:
-            ys = YahooStock(yahoo_slug)
-            snap["name"] = ys.name or snap["name"] or yahoo_slug
-            snap["now_price"] = ys.now_price or snap["now_price"]
-            snap["change"] = ys.change or snap["change"]
-            snap["currency"] = ys.currency or ("TWD" if yf_symbol.endswith(".TW") else snap["currency"])
-            snap["close_time"] = ys.close_time or snap["close_time"]
-            logger.debug("YahooStock fallback success")
-        except Exception as e:
-            logger.error(f"❌ YahooStock fallback fail: {e}")
-
-    logger.debug(f"快照結果: {snap}")
-    return snap
-
-stock_data_df: Optional[pd.DataFrame] = None
-
-def load_stock_data() -> pd.DataFrame:
-    global stock_data_df
-    if stock_data_df is None:
-        try:
-            stock_data_df = pd.read_csv('name_df.csv')
-            logger.info("✅ loaded name_df.csv")
-        except FileNotFoundError:
-            logger.error("❌ `name_df.csv` not found.")
-            stock_data_df = pd.DataFrame(columns=['股號', '股名'])
-    return stock_data_df
-
-def get_stock_name(stock_id: str) -> Optional[str]:
-    df = load_stock_data()
-    res = df[df['股號'].astype(str).str.strip().str.upper() == str(stock_id).strip().upper()]
-    if not res.empty:
-        name = res.iloc[0]['股名']
-        logger.debug(f"name_df lookup: {stock_id} -> {name}")
-        return name
-    logger.debug(f"name_df not found: {stock_id}")
-    return None
-
-def get_stock_report(user_input: str) -> str:
-    logger.info(f"呼叫：get_stock_report({user_input})")
-    yf_symbol, yahoo_slug, display_code, is_index = normalize_ticker(user_input)
-    snapshot = fetch_realtime_snapshot(yf_symbol, yahoo_slug)
-
-    price_data, news_data, value_part, dividend_part = "", "", "", ""
-    if STOCK_ENABLED:
-        logger.debug("股票模組啟用，抓詳細資料...")
-        try:
-            input_code = yahoo_slug if _TW_CODE_RE.match(yahoo_slug) else yf_symbol
-            logger.debug(f"call stock_price({input_code})")
-            price_df = stock_price(input_code)
-            price_data = str(price_df) if not price_df.empty else "N/A"
-        except Exception as e:
-            logger.warning(f"⚠️ stock_price fail: {e}")
-            price_data = f"Err: {e}"
-        try:
-            nm = get_stock_name(yahoo_slug) or snapshot.get("name") or yahoo_slug
-            logger.debug(f"call stock_news({nm})")
-            news_list = stock_news(nm)
-            news_data = "\n".join(news_list).replace("\u3000", " ")[:1024]
-        except Exception as e:
-            logger.warning(f"⚠️ stock_news fail: {e}")
-            news_data = f"Err: {e}"
-
-        if not is_index:
-            try:
-                input_code = yahoo_slug if _TW_CODE_RE.match(yahoo_slug) else yf_symbol
-                logger.debug(f"call stock_fundamental({input_code})")
-                val = stock_fundamental(input_code)
-                value_part = f"{val}\n" if val else ""
-            except Exception as e:
-                logger.warning(f"⚠️ stock_fundamental fail: {e}")
-                value_part = f"Err: {e}\n"
-            try:
-                input_code = yahoo_slug if _TW_CODE_RE.match(yahoo_slug) else yf_symbol
-                logger.debug(f"call stock_dividend({input_code})")
-                dvd = stock_dividend(input_code)
-                dividend_part = f"{dvd}\n" if dvd else ""
-            except Exception as e:
-                logger.warning(f"⚠️ stock_dividend fail: {e}")
-                dividend_part = f"Err: {e}\n"
-    else:
-        logger.warning("⚠️ 股票模組未啟用")
-
-    stock_link = (
-        f"https://finance.yahoo.com/quote/{yf_symbol}"
-        if yf_symbol.startswith("^") or not yf_symbol.endswith(".TW")
-        else f"https://tw.stock.yahoo.com/quote/{yahoo_slug}"
-    )
-    content_msg = (
-        f"分析報告:\n**代碼:** {display_code}, **名稱:** {snapshot.get('name')}\n"
-        f"**價格:** {snapshot.get('now_price')} {snapshot.get('currency')}\n"
-        f"**漲跌:** {snapshot.get('change')}\n"
-        f"**時間:** {snapshot.get('close_time')}\n"
-        f"**近期價:**\n{price_data}\n"
-    )
-    if value_part:    content_msg += f"**基本面:**\n{value_part}"
-    if dividend_part: content_msg += f"**配息:**\n{dividend_part}"
-    if news_data:     content_msg += f"**新聞:**\n{news_data}\n"
-
-    content_msg += f"請寫出 {snapshot.get('name') or display_code} 近期趨勢分析，用繁體中文 Markdown，附連結：{stock_link}"
-    system_prompt = ("你是專業分析師。開頭列出股名(股號)/現價/漲跌/時間；分段說明走勢/基本面/技術面/消息面/風險/建議區間/停利目標/結論。資料不完整請保守說明。")
-    msgs = [{"role":"system","content":system_prompt}, {"role":"user","content":content_msg}]
-    logger.info("呼叫 AI 股票分析...")
-    analysis_result = get_analysis_reply(msgs)
-    logger.info("股票分析完成")
-    return analysis_result
-
-# ========== 7) 彩票分析 ==========
-def _lotto_fallback_scrape(kind: str) -> str:
-    logger.warning(f"使用後備彩票爬蟲 for {kind}")
-    try:
-        if kind == "威力彩":
-            url, pat = ("https://www.taiwanlottery.com/lotto/superlotto638/index.html",
-                        r"第\s*\d+\s*期.*?第一區.*?[:：\s]*([\d\s,]+?)\s*第二區.*?[:：\s]*(\d+)")
-        elif kind == "大樂透":
-            url, pat = ("https://www.taiwanlottery.com/lotto/lotto649/index.html",
-                        r"第\s*\d+\s*期.*?(?:號碼|獎號).*?[:：\s]*([\d\s,]+?)(?:\s*特別號[:：\s]*(\d+))?")
-        elif kind == "539":
-            url, pat = ("https://www.taiwanlottery.com/lotto/dailycash/index.html",
-                        r"第\s*\d+\s*期.*?(?:號碼|獎號).*?[:：\s]*([\d\s,]+)")
-        else:
-            return f"不支援: {kind}"
-        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=10)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.content, "html.parser")
-        text = ' '.join(soup.stripped_strings)
-        m = re.search(pat, text, re.DOTALL)
-        if not m: return f"抱歉，找不到 {kind} 號碼 (Fallback regex failed)。"
-        if kind == "威力彩":
-            first, second = re.sub(r'[,\s]+', ' ', m.group(1)).strip(), m.group(2)
-            return f"{kind}: 一區 {first}；二區 {second}"
-        elif kind == "大樂透":
-            nums, special = re.sub(r'[,\s]+', ' ', m.group(1)).strip(), m.group(2)
-            return f"{kind}: {nums}{'；特 ' + special if special else ''}"
-        elif kind == "539":
-            nums = re.sub(r'[,\s]+', ' ', m.group(1)).strip()
-            return f"{kind}: {nums}"
-    except Exception as e:
-        logger.error(f"❌ Fallback scrape fail: {e}", exc_info=False)
-        return f"抱歉，{kind} 號碼取不到 (Fallback exception)。"
-
-def get_lottery_analysis(lottery_type_input: str) -> str:
-    logger.info(f"呼叫：get_lottery_analysis({lottery_type_input})")
-    kind = "威力彩" if "威力" in lottery_type_input else ("大樂透" if "大樂" in lottery_type_input else ("539" if "539" in lottery_type_input else lottery_type_input))
-    latest_data_str = ""
-    if LOTTERY_ENABLED and lottery_crawler:
-        try:
-            logger.debug(f"嘗試自訂爬蟲 for {kind}...")
-            if kind == "威力彩":   latest_data_str = str(lottery_crawler.super_lotto())
-            elif kind == "大樂透": latest_data_str = str(lottery_crawler.lotto649())
-            elif kind == "539":    latest_data_str = str(lottery_crawler.daily_cash())
-            else: return f"不支援 {kind}。"
-            logger.info("自訂爬蟲成功")
-        except Exception as e:
-            logger.warning(f"⚠️ 自訂爬蟲失敗，改用後備：{e}")
-            latest_data_str = _lotto_fallback_scrape(kind)
-    else:
-        logger.warning("彩票模組未啟用/載入，用後備")
-        latest_data_str = _lotto_fallback_scrape(kind)
-
-    cai_part = ""
-    if 'caiyunfangwei_crawler' in globals() and caiyunfangwei_crawler:
-        try:
-            logger.debug("嘗試財運方位...")
-            cai = caiyunfangwei_crawler.get_caiyunfangwei()
-            cai_part = f"日期：{cai.get('今天日期','')}\n歲次：{cai.get('今日歲次','')}\n財位：{cai.get('財神方位','')}\n"
-            logger.info("財運方位成功")
-        except Exception as e:
-            logger.warning(f"⚠️ 財運方位失敗: {e}")
-            cai_part = ""
-
-    prompt = (f"{kind} 近況/號碼：\n{latest_data_str}\n\n{cai_part}"
-              "請用繁體中文寫出：\n1) 走勢重點(熱冷號)\n2) 選號建議(風險聲明)\n3) 三組推薦號碼\n分點條列精煉。")
-    messages = [{"role":"system","content":"你是資深彩券分析師。"},{"role":"user","content":prompt}]
-    logger.info("呼叫 AI 彩票分析...")
-    analysis_result = get_analysis_reply(messages)
-    logger.info("彩票分析完成")
-    return analysis_result
-
-# ========== 8) 對話與翻譯 ==========
 def set_user_persona(chat_id: str, key: str):
-    logger.debug(f"Set persona: {chat_id[:10]} -> {key}")
-    key = random.choice(list(PERSONAS.keys())) if key == "random" else key
-    key = "sweet" if key not in PERSONAS else key
-    user_persona[chat_id] = key
-    logger.info(f"Persona set: {chat_id[:10]} -> {key}")
-    return key
+    """設定使用者人設"""
+    key_mapped = PERSONA_ALIAS.get(key, key)
+    if key_mapped == "random":
+        key_mapped = random.choice(list(PERSONAS.keys()))
+    if key_mapped not in PERSONAS:
+        key_mapped = "sweet"
+    user_persona[chat_id] = key_mapped
+    return key_mapped
 
 def build_persona_prompt(chat_id: str, sentiment: str) -> str:
+    """建構人設 Prompt"""
     key = user_persona.get(chat_id, "sweet")
     p = PERSONAS[key]
-    prompt = (f"你是「{p['title']}」。風格：{p['style']}\n"
-              f"情緒：{sentiment}；調整語氣（開心→同樂；難過/生氣→共情安撫；中性→自然）。\n"
-              f"用繁體中文，精煉自然，帶少量表情 {p['emoji']}。")
-    logger.debug(f"Persona prompt (key={key}, sent={sentiment}): {prompt[:50]}...")
-    return prompt
+    return (f"你是一位「{p['title']}」。風格：{p['style']}。\n"
+            f"使用者情緒：{sentiment}。\n"
+            f"回覆請精煉自然，使用繁體中文，帶少量表情 {p['emoji']}。")
 
-# ========== 9) LINE Handlers (V2 SDK Style) ==========
-@handler.add(MessageEvent, message=TextMessage)
-def on_message_text(event: MessageEvent):
+# ── 金價 / 外匯 / 股票 ──────────────────────────────────────────────────────
+BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
+_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+def get_bot_gold_quote() -> dict:
+    """獲取台灣銀行金價"""
+    try:
+        r = requests.get(BOT_GOLD_URL, headers=_HEADERS, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        m_time = re.search(r"掛牌時間[:：]\s*([0-9]{4}/[0-9]{2}/[0-9]{2}\s+[0-9]{2}:[0-9]{2})", text)
+        listed_at = m_time.group(1) if m_time else "未知"
+
+        m_sell = re.search(r"本行賣出\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        m_buy  = re.search(r"本行買進\s*([0-9,]+(?:\.[0-9]+)?)", text)
+
+        if not (m_sell and m_buy):
+            raise RuntimeError("找不到『本行賣出/本行買進』欄位")
+
+        sell = float(m_sell.group(1).replace(",", ""))
+        buy  = float(m_buy.group(1).replace(",", ""))
+
+        return {"listed_at": listed_at, "sell_twd_per_g": sell, "buy_twd_per_g": buy}
+    except Exception as e:
+        logger.error(f"金價獲取失敗：{e}")
+        return {"listed_at": "錯誤", "sell_twd_per_g": 0, "buy_twd_per_g": 0}
+
+FX_CODES = {"USD","TWD","JPY","EUR","GBP","CNY","HKD","AUD","CAD","CHF","SGD","KRW","NZD","THB","MYR","IDR","PHP","INR","ZAR"}
+FX_ALIAS = {"日圓":"JPY","日元":"JPY","美元":"USD","台幣":"TWD","新台幣":"TWD","人民幣":"CNY","港幣":"HKD","韓元":"KRW","歐元":"EUR","英鎊":"GBP"}
+
+def _is_fx_query(text: str) -> bool:
+    """判斷是否為外匯查詢"""
+    t = text.strip().upper()
+    if t in FX_CODES or t in set(FX_ALIAS.values()):
+        return True
+    return bool(re.match(r"^[A-Za-z]{3}[\s/\-_]?([A-Za-z]{3})?$", t))
+
+def _normalize_fx_token(tok: str) -> str:
+    """標準化外匯代碼"""
+    return FX_ALIAS.get(tok.strip().upper(), tok.strip().upper())
+
+def parse_fx_pair(user_text: str) -> Tuple[str,str,str]:
+    """解析外匯貨幣對"""
+    raw = user_text.strip()
+    m = re.findall(r"[A-Za-z\u4e00-\u9fa5]{2,5}", raw)
+    toks = [_normalize_fx_token(x) for x in m]
+    toks = [x for x in toks if x in FX_CODES]
+
+    if not toks:
+        t = _normalize_fx_token(raw)
+        if len(t) == 3 and t in FX_CODES:
+            base, quote = t, "TWD"
+        else:
+            base, quote = "USD", "JPY"
+    elif len(toks) == 1:
+        base, quote = toks[0], "TWD"
+    else:
+        base, quote = toks[0], toks[1]
+
+    symbol = f"{base}{quote}=X"
+    link = f"https://finance.yahoo.com/quote/{symbol}/"
+    return base, quote, link
+
+def fetch_fx_quote_yf(symbol: str):
+    """從 Yahoo Finance 獲取外匯報價"""
+    try:
+        tk = yf.Ticker(symbol)
+        df = tk.history(period="5d", interval="1d")
+        if df is None or df.empty:
+            return None, None, None, None
+
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2] if len(df)>=2 else None
+        last_price = float(last_row["Close"])
+        change_pct = None if prev_row is None else (last_price/float(prev_row["Close"]) - 1.0)*100.0
+
+        ts = last_row.name
+        ts_iso = ts.tz_convert("Asia/Taipei").strftime("%Y-%m-%d %H:%M %Z") if hasattr(ts, "tz_convert") else str(ts)
+
+        return last_price, change_pct, ts_iso, df
+    except Exception as e:
+        logger.error(f"fetch_fx_quote_yf error for {symbol}: {e}")
+        return None, None, None, None
+
+def render_fx_report(base, quote, link, last, chg, ts, df) -> str:
+    """渲染外匯報表"""
+    trend = ""
+    if df is not None and not df.empty:
+        diff = float(df["Close"].iloc[-1]) - float(df["Close"].iloc[0])
+        trend = "上升" if diff>0 else ("下跌" if diff<0 else "持平")
+
+    lines = [f"#### 外匯報告（查匯優先）\n- 幣別對：**{base}/{quote}**\n- 來源：Yahoo Finance\n- 連結：{link}"]
+    if last is not None:
+        lines.append(f"- 目前匯率：**{last:.6f}**（{base}/{quote}）")
+    if chg is not None:
+        lines.append(f"- 日變動：**{chg:+.2f}%**")
+    if ts:
+        lines.append(f"- 資料時間：{ts}")
+    if trend:
+        lines.append(f"- 近 5 日趨勢：{trend}")
+    lines.append(f"\n[外匯連結（Yahoo）]({link})")
+    return "\n".join(lines)
+
+TW_TICKER_RE = re.compile(r"^\d{4,6}[A-Za-z]?$")
+US_TICKER_RE = re.compile(r"^[A-Za-z]{1,5}$")
+
+def _is_stock_query(text: str) -> bool:
+    """判斷是否為股票查詢"""
+    t = text.strip()
+    if t in ("大盤","台股大盤","台灣大盤","美盤","美股大盤","美股"):
+        return True
+    if TW_TICKER_RE.match(t):
+        return True
+    if US_TICKER_RE.match(t) and t.upper() in {"NVDA","AAPL","TSLA","MSFT"}:
+        return True
+    return False
+
+def _normalize_ticker_and_name(user_text: str) -> Tuple[str,str,str]:
+    """標準化股票代碼和名稱"""
+    raw = user_text.strip()
+    if raw in ("大盤","台股大盤","台灣大盤"):
+        return "^TWII","台灣大盤","https://tw.finance.yahoo.com/quote/%5ETWII/"
+    if raw in ("美盤","美股大盤","美股"):
+        return "^GSPC","美國大盤","https://tw.finance.yahoo.com/quote/%5EGSPC/"
+
+    ticker = raw.upper()
+    link = f"https://tw.stock.yahoo.com/quote/{ticker}" if TW_TICKER_RE.match(ticker) else f"https://tw.finance.yahoo.com/quote/{ticker}"
+    return ticker, ticker, link
+
+def _safe_to_str(x) -> str:
+    """安全轉換為字串"""
+    try:
+        return str(x)
+    except Exception:
+        return repr(x)
+
+def _remove_full_width_spaces(data):
+    """移除全形空格"""
+    if isinstance(data, list):
+        return [_remove_full_width_spaces(i) for i in data]
+    if isinstance(data, str):
+        return data.replace('\u3000',' ')
+    return data
+
+def _truncate_text(data, max_length=1024):
+    """截斷文字"""
+    if isinstance(data, list):
+        return [_truncate_text(i, max_length) for i in data]
+    if isinstance(data, str):
+        return data[:max_length]
+    return data
+
+def build_stock_prompt_block(stock_id: str, stock_name_hint: str) -> Tuple[str, dict]:
+    """建構股票分析 Prompt"""
+    try:
+        ys = YahooStock(stock_id)
+        price_df = stock_price(stock_id)
+        news = _remove_full_width_spaces(stock_news(stock_name_hint))
+        news = _truncate_text(news, 1024)
+
+        fund_text = div_text = None
+        if stock_id not in ["^TWII","^GSPC"]:
+            try:
+                fund_text = _safe_to_str(stock_fundamental(stock_id)) or "（無法取得）"
+            except Exception as e:
+                fund_text = f"（基本面錯誤：{e}）"
+            try:
+                div_text = _safe_to_str(stock_dividend(stock_id)) or "（無法取得）"
+            except Exception as e:
+                div_text = f"（配息錯誤：{e}）"
+
+        blk = [
+            f"**股票代碼:** {stock_id}, **股票名稱:** {getattr(ys,'name',stock_id)}",
+            f"近期價格資訊:\n{price_df}"
+        ]
+        if stock_id not in ["^TWII","^GSPC"]:
+            blk += [f"每季營收資訊:\n{fund_text}", f"配息資料:\n{div_text}"]
+        blk.append(f"近期新聞資訊:\n{news}")
+
+        result = "\n".join(_safe_to_str(x) for x in blk)
+        return result, {}
+    except Exception as e:
+        logger.error(f"股票資料建構失敗：{e}")
+        return f"股票資料獲取錯誤：{e}", {}
+
+def render_stock_report(stock_id: str, stock_link: str, content_block: str) -> str:
+    """渲染股票分析報告"""
+    sys_prompt = ("你現在是一位專業的證券分析師。請基於近期走勢、基本面、新聞與籌碼概念進行綜合分析，"
+                  "條列清楚、數字精確、可讀性高。\n"
+                  "- 股名(股號)/現價(與漲跌幅)/資料時間\n"
+                  "- 走勢\n"
+                  "- 基本面\n"
+                  "- 技術面\n"
+                  "- 消息面\n"
+                  "- 籌碼面\n"
+                  "- 建議買進區間\n"
+                  "- 停利點\n"
+                  "- 建議部位\n"
+                  "- 總結\n"
+                  f"最後附上正確連結：[股票資訊連結]({stock_link})。\n"
+                  "使用台灣繁體中文，回覆精簡有力。")
+    try:
+        result = get_analysis_reply([{"role":"system","content":sys_prompt},{"role":"user","content":content_block}])
+        return result
+    except Exception as e:
+        logger.error(f"股票分析失敗：{e}")
+        return f"（分析模型不可用）原始資料：\n{content_block[:500]}...\n\n連結：{stock_link}"
+
+# ── 事件處理 ─────────────────────────────────────────────────────────────────
+async def handle_text_message(event: MessageEvent):
+    """處理文字訊息"""
     chat_id = get_chat_id(event)
-    msg_raw = event.message.text.strip()
-    reply_token = event.reply_token
-    is_group = not isinstance(event.source, SourceUser)
+    _ensure_tts_pref(chat_id)  # [ADD] 確保有初始化 per-chat TTS 偏好
 
-    if not isinstance(event.message, TextMessage):
-        logger.warning(f"Ignore non-text msg: {type(event.message)}")
+    msg_raw = (event.message.text or "").strip()
+    reply_tok = event.reply_token
+    if not msg_raw:
         return
 
-    logger.info(f"Msg: '{msg_raw[:50]}...' from {chat_id[:10]}...")
+    # 語音開關（Quick Reply 指令）
+    if msg_raw.upper() == "TTS:ON":
+        tts_user_pref[chat_id] = True
+        await reply_text_with_tts_and_extras(reply_tok, "🔊 已開啟本聊天室的語音回覆", chat_id=chat_id)
+        return
+    if msg_raw.upper() == "TTS:OFF":
+        tts_user_pref[chat_id] = False
+        await reply_text_with_tts_and_extras(reply_tok, "🔈 已關閉本聊天室的語音回覆", chat_id=chat_id)
+        return
 
+    # 取得 Bot 名稱（處理 @提及）
     try:
-        bot_info = line_bot_api.get_bot_info()
+        bot_info: BotInfoResponse = await line_bot_api.get_bot_info()
         bot_name = bot_info.display_name
-        logger.debug(f"Bot name: {bot_name}")
-    except Exception as e:
-        logger.warning(f"⚠️ Get Bot info fail: {e}")
+    except Exception:
         bot_name = "AI 助手"
 
-    if not msg_raw:
-        logger.debug("Empty msg")
+    msg = msg_raw
+    if msg_raw.startswith(f"@{bot_name}"):
+        msg = re.sub(f'^@{re.escape(bot_name)}\\s*','', msg_raw).strip()
+
+    # ── 翻譯模式命令 ──────────────────────────────────────────────────────────
+    m = TRANSLATE_CMD.match(msg)
+    if m:
+        lang_token = m.group(1)
+        rev = {"english":"英文","japanese":"日文","korean":"韓文","vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
+        lang_display = rev.get(lang_token.lower(), lang_token)
+        _tstate_set(chat_id, lang_display)
+        await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。", chat_id=chat_id)
         return
 
-    if chat_id not in auto_reply_status:
-        auto_reply_status[chat_id] = True
-
-    mentioned = msg_raw.startswith(f"@{bot_name}")
-    should_reply = not is_group or auto_reply_status.get(chat_id, True) or mentioned
-    if not should_reply:
-        logger.debug("Ignore msg in group")
+    if msg.startswith("翻譯->"):
+        lang = msg.split("->",1)[1].strip()
+        if lang=="結束":
+            _tstate_clear(chat_id)
+            await reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式", chat_id=chat_id)
+        else:
+            _tstate_set(chat_id, lang)
+            await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。", chat_id=chat_id)
         return
 
-    msg = msg_raw[len(f"@{bot_name}"):].strip() if mentioned else msg_raw
-    if not msg:
-        logger.debug("Empty after mention removal")
+    # ── 內聯翻譯 ─────────────────────────────────────────────────────────────
+    im = INLINE_TRANSLATE.match(msg)
+    if im:
+        lang_key, text_to_translate = im.group(1).lower(), im.group(2)
+        lang_display = {"en":"英文","eng":"英文","英文":"英文","ja":"日文","jp":"日文","日文":"日文","zh":"繁體中文","繁中":"繁體中文","中文":"繁體中文"}.get(lang_key,"英文")
+        out = await translate_text(text_to_translate, lang_display)
+        # [ADD] 翻譯模式顯示名稱覆寫
+        await reply_text_with_tts_and_extras(reply_tok, out, chat_id=chat_id, sender_name="from 翻譯模式")
         return
 
+    # ── 翻譯模式中 ────────────────────────────────────────────────────────────
+    current_lang = _tstate_get(chat_id)
+    if current_lang:
+        out = await translate_text(msg, current_lang)
+        # [ADD] 翻譯模式顯示名稱覆寫
+        await reply_text_with_tts_and_extras(reply_tok, out, chat_id=chat_id, sender_name="from 翻譯模式")
+        return
+
+    # ── 主選單 / 子選單 / 人設 ────────────────────────────────────────────────
     low = msg.lower()
-    try:
-        if low in ("menu", "選單", "主選單"):
-            logger.info("Route: Main menu")
-            line_bot_api.reply_message(reply_token, build_main_menu_flex())
-            return
-
-        if msg in ["大樂透", "威力彩", "539"]:
-            logger.info(f"Route: Lottery ({msg})")
-            report = get_lottery_analysis(msg)
-            reply_with_quick_bar(reply_token, report)
-            return
-
-        if low in ("金價", "黃金"):
-            logger.info("Route: Gold")
-            out = get_gold_analysis()
-            reply_with_quick_bar(reply_token, out)
-            return
-
-        if low == "jpy":
-            logger.info("Route: JPY")
-            out = get_currency_analysis("JPY")
-            reply_with_quick_bar(reply_token, out)
-            return
-
-        if is_stock_query(msg):
-            logger.info(f"Route: Stock ({msg})")
-            report = get_stock_report(msg)
-            reply_with_quick_bar(reply_token, report)
-            return
-
-        if low in ("開啟自動回答", "關閉自動回答"):
-            logger.info(f"Route: Auto-reply ({low})")
-            is_on = low == "開啟自動回答"
-            auto_reply_status[chat_id] = is_on
-            text = "✅ 自動回答已開啟" if is_on else "❌ 自動回答已關閉"
-            reply_with_quick_bar(reply_token, text)
-            return
-
-        if msg.startswith("翻譯->"):
-            lang = msg.split("->", 1)[1].strip()
-            logger.info(f"Route: Translate mode ({lang})")
-            if lang == "結束":
-                translation_states.pop(chat_id, None)
-                reply_with_quick_bar(reply_token, "✅ 翻譯模式結束")
-            else:
-                translation_states[chat_id] = lang
-                reply_with_quick_bar(reply_token, f"🌐 開啟翻譯 → {lang}")
-            return
-
-        # [CHANGE] 若已在翻譯模式，回覆訊息的顯示名稱覆蓋為「from 翻譯模式」
-        if chat_id in translation_states:
-            logger.info(f"Route: Translate content (-> {translation_states[chat_id]})")
-            out = translate_text(msg, translation_states[chat_id])
-            reply_with_quick_bar(reply_token, out, sender_name="from 翻譯模式")  # [ADD] 關鍵：覆蓋 Sender 名稱
-            return
-
-        # 一般聊天
-        logger.info("Route: General Chat")
-        history = conversation_history.get(chat_id, [])
-        logger.debug("Analyze sentiment...")
-        sentiment = analyze_sentiment(msg)
-        logger.debug("Build prompt...")
-        sys_prompt = build_persona_prompt(chat_id, sentiment)
-        messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
-        logger.info("Call AI chat...")
-        final_reply = get_analysis_reply(messages)
-        history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}])
-        conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
-        logger.debug("History updated")
-        reply_with_quick_bar(reply_token, final_reply)
+    if low in ("menu","選單","主選單"):
+        await reply_menu_with_hint(reply_tok, build_main_menu(), chat_id=chat_id)
         return
 
-    except LineBotApiError as lbe:
-        logger.error(f"❌ LINE API Error: {lbe.status_code} {lbe.error.message}", exc_info=False)
-        try:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="😥 LINE communication error."))
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"❌ Handler internal error: {e}", exc_info=True)
-        try:
-            reply_with_quick_bar(reply_token, "😵‍💫 Unexpected error processing request.")
-        except Exception as reply_e:
-            logger.error(f"❌ Failed to even send error reply: {reply_e}")
+    if msg in PERSONA_ALIAS:
+        key = set_user_persona(chat_id, msg)
+        p = PERSONAS[key]
+        await reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}", chat_id=chat_id)
+        return
 
-@handler.add(PostbackEvent)
-def on_postback(event: PostbackEvent):
-    logger.info(f"Postback: data={event.postback.data} from {get_chat_id(event)[:10]}...")
-    data = (event.postback.data or "").strip()
-    kind = data[5:] if data.startswith("menu:") else None
-    if kind:
-        logger.info(f"Postback menu: {kind}")
+    # ── 金價 ───────────────────────────────────────────────────────────────────
+    if msg in ("金價","黃金"):
+        try:
+            d = get_bot_gold_quote()
+            ts, sell, buy = d.get("listed_at") or "（未標示）", d["sell_twd_per_g"], d["buy_twd_per_g"]
+            spread = sell - buy
+            txt = (f"**金價（台灣銀行）**\n"
+                   f"- 掛牌時間：{ts}\n"
+                   f"- 賣出(1g)：{sell:,.0f} 元\n"
+                   f"- 買進(1g)：{buy:,.0f} 元\n"
+                   f"- 價差：{spread:,.0f} 元\n"
+                   f"來源：{BOT_GOLD_URL}")
+            await reply_text_with_tts_and_extras(reply_tok, txt, chat_id=chat_id)
+        except Exception as e:
+            await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價，請稍後再試。", chat_id=chat_id)
+        return
+
+    # ── 彩票分析 ──────────────────────────────────────────────────────────────
+    if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
+        if LOTTERY_OK and callable(run_lottery_analysis):
+            try:
+                report = await run_in_threadpool(run_lottery_analysis, msg)
+                await reply_text_with_tts_and_extras(reply_tok, report, chat_id=chat_id)
+            except Exception as e:
+                error_msg = f"抱歉，分析 {msg} 時發生錯誤：{str(e)[:100]}..."
+                await reply_text_with_tts_and_extras(reply_tok, error_msg, chat_id=chat_id)
+        else:
+            error_msg = (
+                f"🎰 彩票分析功能暫時不可用\n"
+                f"錯誤詳情：{LOTTERY_IMPORT_ERR[:100]}...\n\n"
+                f"💡 建議：\n"
+                f"• 確認 taiwanlottery 套件已安裝\n"
+                f"• 稍後再試\n"
+                f"其他功能（如股票、外匯）正常使用！"
+            )
+            await reply_text_with_tts_and_extras(reply_tok, error_msg, chat_id=chat_id)
+        return
+
+    # ── 外匯 ───────────────────────────────────────────────────────────────────
+    if _is_fx_query(msg):
+        try:
+            base, quote, link = parse_fx_pair(msg)
+            last, chg, ts, df = fetch_fx_quote_yf(f"{base}{quote}=X")
+            report = render_fx_report(base, quote, link, last, chg, ts, df)
+            await reply_text_with_tts_and_extras(reply_tok, report, chat_id=chat_id)
+        except Exception as e:
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}", chat_id=chat_id)
+        return
+
+    # ── 股票 ───────────────────────────────────────────────────────────────────
+    if _is_stock_query(msg):
+        try:
+            ticker, name_hint, link = _normalize_ticker_and_name(msg)
+            content_block, _ = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
+            report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
+            await reply_text_with_tts_and_extras(reply_tok, report, chat_id=chat_id)
+        except Exception as e:
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。", chat_id=chat_id)
+        return
+
+    # ── 一般聊天 ──────────────────────────────────────────────────────────────
     try:
-        line_bot_api.reply_message(
-            event.reply_token,
-            [build_submenu_flex(kind), TextSendMessage(text="請選擇 👇", quick_reply=build_quick_reply())]
-        )
-        logger.info("Postback submenu reply OK")
-    except LineBotApiError as lbe:
-        logger.error(f"❌ Postback LINE API Error: {lbe.status_code} {lbe.error.message}", exc_info=False)
+        history = conversation_history.get(chat_id, [])
+        sentiment = await analyze_sentiment(msg)
+        sys_prompt = build_persona_prompt(chat_id, sentiment)
+
+        messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]
+        final_reply = await groq_chat_async(messages)
+
+        # 更新對話歷史
+        history.extend([{"role":"user","content":msg},{"role":"assistant","content":final_reply}])
+        conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
+
+        await reply_text_with_tts_and_extras(reply_tok, final_reply, chat_id=chat_id)
     except Exception as e:
-        logger.error(f"❌ Postback reply fail: {e}", exc_info=True)
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！", chat_id=chat_id)
+
+async def handle_audio_message(event: MessageEvent):
+    """處理語音訊息"""
+    reply_tok = event.reply_token
+    chat_id = get_chat_id(event)
+    _ensure_tts_pref(chat_id)
+
+    try:
+        content_stream = await line_bot_api.get_message_content(event.message.id)
+        audio_in = await content_stream.read()
+
+        text = await speech_to_text_async(audio_in)
+        if not text:
+            await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。", chat_id=chat_id)
+            return
+
+        msgs = [TextMessage(text=f"🎧 我聽到了：\n{text}", quick_reply=build_quick_reply(chat_id))]
+        # Echo 語音（若 TTS 開啟）
+        if tts_user_pref.get(chat_id, True) and CLOUDINARY_CONFIGURED and GTTS_AVAILABLE:
+            try:
+                echo_bytes = await text_to_speech_async(f"你說了：{text}")
+                if echo_bytes:
+                    upload_result = await run_in_threadpool(
+                        lambda: cloudinary_uploader.upload(
+                            io.BytesIO(echo_bytes),
+                            resource_type="video",
+                            folder="line-bot-tts",
+                            format="mp3"
+                        )
+                    )
+                    url = upload_result.get("secure_url")
+                    if url:
+                        est = max(3000, min(30000, len(text) * 60))
+                        msgs.append(AudioMessage(original_content_url=url, duration=est))
+            except Exception as e:
+                logger.warning(f"語音回音失敗：{e}")
+
+        await line_bot_api.reply_message(ReplyMessageRequest(reply_token=reply_tok, messages=msgs))
+    except Exception as e:
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。", chat_id=chat_id)
+
+async def handle_postback(event: PostbackEvent):
+    """處理 Postback 事件"""
+    data = event.postback.data or ""
+    chat_id = get_chat_id(event)
+    if data.startswith("menu:"):
+        kind = data.split(":",1)[-1]
+        await reply_menu_with_hint(event.reply_token, build_submenu(kind), hint="👇 子選單", chat_id=chat_id)
     else:
-        if not kind:
-            logger.warning(f"⚠️ Unhandled Postback data: {data}")
+        await reply_text_with_tts_and_extras(event.reply_token, "收到你的選擇，正在處理中...", chat_id=chat_id)
 
-def is_stock_query(text: str) -> bool:
-    t = text.strip().upper()
-    return (
-        t in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"]
-        or bool(_TW_CODE_RE.match(t))
-        or (bool(_US_CODE_RE.match(t)) and t not in ["JPY"])
-    )
+async def handle_events(events):
+    """處理事件列表"""
+    for event in events:
+        try:
+            if isinstance(event, MessageEvent):
+                if isinstance(event.message, TextMessageContent):
+                    await handle_text_message(event)
+                elif isinstance(event.message, AudioMessageContent):
+                    await handle_audio_message(event)
+            elif isinstance(event, PostbackEvent):
+                await handle_postback(event)
+        except Exception as e:
+            logger.error(f"事件處理失敗：{e}", exc_info=True)
 
-# ========== 10) FastAPI Routes ==========
+# ── FastAPI ──────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """應用程式生命週期管理"""
+    logger.info("🚀 LINE Bot 啟動中...")
+
+    if BASE_URL:
+        async with httpx.AsyncClient() as c:
+            for endpoint in ("https://api-data.line.me/v2/bot/channel/webhook/endpoint",
+                             "https://api.line.me/v2/bot/channel/webhook/endpoint"):
+                try:
+                    headers={"Authorization":f"Bearer {CHANNEL_TOKEN}","Content-Type":"application/json"}
+                    payload={"endpoint":f"{BASE_URL}/callback"}
+                    r = await c.put(endpoint, headers=headers, json=payload, timeout=10.0)
+                    r.raise_for_status()
+                    logger.info(f"✅ Webhook 更新成功: {r.status_code}")
+                    break
+                except Exception as e:
+                    logger.warning(f"⚠️ Webhook 更新失敗：{e}")
+
+    logger.info("✅ 應用程式啟動完成")
+    yield
+    logger.info("👋 應用程式關閉")
+
+app = FastAPI(lifespan=lifespan, title="AI醬 LINE Bot", version="1.6.0", description="全方位 AI 助理：彩票分析、股票、外匯、翻譯、TTS")
+router = APIRouter()
+
 @router.post("/callback")
 async def callback(request: Request):
-    logger.info("Callback V2 received")
+    """LINE Webhook 回調"""
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
-    body_decoded = body.decode("utf-8")
-    logger.debug(f"Sig: {signature[:10]}..., Body: {len(body_decoded)} bytes")
-    if not handler:
-        logger.critical("❌ Handler not init!")
-        raise HTTPException(status_code=500, detail="Handler not initialized")
+
     try:
-        handler.handle(body_decoded, signature)
-        logger.info("✅ Callback V2 handled")
+        events = parser.parse(body.decode("utf-8"), signature)
+        await handle_events(events)
+        return JSONResponse({"status":"ok"})
     except InvalidSignatureError:
-        logger.error(f"❌ Invalid signature: {signature}")
         raise HTTPException(status_code=400, detail="Invalid signature")
-    except LineBotApiError as lbe:
-        logger.error(f"❌ LINE API Error in callback: {lbe.status_code} {lbe.error.message}", exc_info=True)
-        return JSONResponse({"status": "ok but error logged"})
     except Exception as e:
-        logger.error(f"❌ Callback V2 fail: {e}", exc_info=True)
+        logger.error(f"Callback 失敗：{e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
-    return JSONResponse({"status": "ok"})
 
 @router.get("/")
 async def root():
-    logger.debug("GET /")
-    return PlainTextResponse("LINE Bot (V2 SDK - Sync) running.", status_code=200)
+    """根路徑 - 歡迎訊息"""
+    return PlainTextResponse(
+        "🤖 AI醬 LINE Bot v1.6.0 運行中！\n"
+        "功能：彩票分析 💰 | 股票查詢 📈 | 外匯匯率 💱 | 即時翻譯 🌐 | 語音互動 🎤\n"
+        "健康檢查：/healthz"
+    )
 
 @router.get("/healthz")
 async def healthz():
-    return PlainTextResponse("ok")
-
-@router.get("/health/providers")
-async def providers_health():
-    logger.info("GET /health/providers")
-    return {
-        "openai_ok": openai_client is not None,
-        "groq_ok": sync_groq_client is not None,
-        "line_ok": line_bot_api is not None,
-        "ts": datetime.utcnow().isoformat() + "Z",
+    """健康檢查端點"""
+    status = {
+        "status": "ok",
+        "version": "1.6.0",
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {
+            "line_bot": "active",
+            "lottery_module": LOTTERY_OK,
+            "stock_module": STOCK_OK,
+            "cloudinary": CLOUDINARY_CONFIGURED,
+            "gtts_available": GTTS_AVAILABLE,
+            "openai_available": openai_client is not None,
+            "groq_available": async_groq_client is not None,
+            "active_conversations": len(conversation_history),
+            "tts_chat_enabled_count": sum(1 for v in tts_user_pref.values() if v),
+        }
     }
+    return JSONResponse(status)
 
 app.include_router(router)
 
-# ========== 11) 金融：黃金與外匯 ==========
-def get_gold_analysis() -> str:
-    logger.info("呼叫：get_gold_analysis()")
-    try:
-        r = requests.get(BOT_GOLD_URL, headers=DEFAULT_HEADERS, timeout=10)
-        r.raise_for_status()
-        data = _parse_bot_gold_text(r.text)
-        ts = data.get("listed_at") or "N/A"
-        sell = float(data["sell_twd_per_g"])
-        buy = float(data["buy_twd_per_g"])
-        spread = sell - buy
-        bias = "盤整" if spread <= 30 else ("偏寬" if spread <= 60 else "價差大")
-        now = datetime.now().strftime("%H:%M")
-        report = (
-            f"**金價({now})**\n"
-            f"賣: **{sell:,.0f}** | 買: **{buy:,.0f}** | 價差: {spread:,.0f} ({bias})\n"
-            f"掛牌: {ts}\n來源:台灣銀行"
-        )
-        return report
-    except Exception as e:
-        logger.error(f"❌ 黃金分析失敗: {e}", exc_info=False)
-        return "抱歉，目前無法取得黃金牌價 🙏"
-
-def get_currency_analysis(target_currency: str):
-    logger.info(f"呼叫：get_currency_analysis({target_currency})")
-    try:
-        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("result") != "success":
-            return f"匯率 API 錯誤: {data.get('error-type','未知')}"
-        rate = data["rates"].get("TWD")
-        if rate is None:
-            return f"抱歉，API 無 TWD 數據。"
-        return f"即時：1 {target_currency.upper()} ≈ **{rate:.4f}** 新台幣"
-    except requests.exceptions.RequestException:
-        return "抱歉，無法連線至匯率伺服器。"
-    except Exception:
-        return "抱歉，外匯資料暫無法取得。"
-
-# ========== 12) Local run ==========
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    logger.info(f"Starting Uvicorn on 0.0.0.0:{port}")
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    logger.info(f"🎬 啟動開發伺服器，端口：{port}")
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
