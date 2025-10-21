@@ -1,4 +1,4 @@
-# app_fastapi.py (Version 2.0.7 - Uncompress normalize_ticker)
+# app_fastapi.py (Version 2.0.8 - Uncompress load_stock_data)
 # ========== 1) Imports ==========
 import os
 import re
@@ -84,7 +84,7 @@ GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 logger.info(f"Groq 模型: Primary={GROQ_MODEL_PRIMARY}, Fallback={GROQ_MODEL_FALLBACK}")
 
 # --- 【靈活載入】自訂模組 ---
-# ... (與 v2.0.6 相同) ...
+# ... (與 v2.0.7 相同) ...
 LOTTERY_ENABLED = True
 try: from TaiwanLottery import TaiwanLotteryCrawler; from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler; lottery_crawler = TaiwanLotteryCrawler(); caiyunfangwei_crawler = CaiyunfangweiCrawler(); logger.info("✅ 已載入彩票模組")
 except ModuleNotFoundError: logger.error("❌ 找不到 'taiwanlottery' 模組。請檢查 requirements.txt。"); LOTTERY_ENABLED = False; lottery_crawler = None; caiyunfangwei_crawler = None
@@ -104,14 +104,14 @@ if not STOCK_ENABLED:
         def __init__(self, id): logger.error(f"股票(備援): YahooStock({id})"); self.name=id; self.now_price=None; self.change=None; self.currency=None; self.close_time=None
 
 # --- 狀態字典與常數 ---
-# ... (與 v2.0.6 相同) ...
+# ... (與 v2.0.7 相同) ...
 conversation_history: Dict[str, List[dict]] = {}; MAX_HISTORY_LEN = 10; user_persona: Dict[str, str] = {}; translation_states: Dict[str, str] = {}; auto_reply_status: Dict[str, bool] = {}
 PERSONAS = { "sweet": {"title": "甜美女友", "style": "溫柔體貼", "greetings": "親愛的～我在這🌸", "emoji":"🌸💕😊"}, "salty": {"title": "傲嬌女友", "style": "機智吐槽", "greetings": "你又來啦？說吧😏", "emoji":"😏🙄"}, "moe":   {"title": "萌系女友", "style": "動漫語氣", "greetings": "呀呼～(ﾉ>ω<)ﾉ", "emoji":"✨🎀"}, "cool":  {"title": "酷系御姐", "style": "冷靜精煉", "greetings": "我在。說重點。", "emoji":"🧊⚡️"} }
 LANGUAGE_MAP = {"英文": "English", "日文": "Japanese", "韓文": "Korean", "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"}
 PERSONA_ALIAS = {"甜":"sweet", "鹹":"salty", "萌":"moe", "酷":"cool", "random":"random"}
 
 # ========== 3) FastAPI ==========
-# ... (lifespan 與 v2.0.6 相同) ...
+# ... (lifespan 與 v2.0.7 相同) ...
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("應用程式啟動 (lifespan)...")
@@ -127,11 +127,11 @@ async def lifespan(app: FastAPI):
     else: logger.warning("⚠️ Webhook 未更新：未設定 BASE_URL 或 CHANNEL_ACCESS_TOKEN (Mock 模式)")
     logger.info("Lifespan 啟動程序完成。"); yield; logger.info("應用程式關閉 (lifespan)...")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.7-uncompress-normalize-ticker") # --- 繁體中文解：更新版本號 ---
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.8-uncompress-load-stock") # --- 繁體中文解：更新版本號 ---
 router = APIRouter()
 
 # ========== 4) Helpers (V2 SDK Style) ==========
-# ... (get_chat_id, build_quick_reply, reply_with_quick_bar, build_main_menu_flex, build_submenu_flex 與 v2.0.6 相同) ...
+# ... (get_chat_id, build_quick_reply, reply_with_quick_bar, build_main_menu_flex, build_submenu_flex 與 v2.0.7 相同) ...
 def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceGroup): return event.source.group_id
     if isinstance(event.source, SourceRoom):  return event.source.room_id
@@ -158,7 +158,7 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
     bubble = BubbleContainer( direction="ltr", header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="lg")]), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm") ); return FlexSendMessage(alt_text=title, contents=bubble)
 
 # ========== 5) AI & 分析 ==========
-# ... (與 v2.0.6 相同) ...
+# ... (與 v2.0.7 相同) ...
 def get_analysis_reply(messages: List[dict]) -> str:
     logger.debug(f"呼叫 get_analysis_reply (OpenAI優先), messages count: {len(messages)}")
     if openai_client:
@@ -186,7 +186,7 @@ def translate_text(text: str, target_lang_display: str) -> str:
 
 
 # ========== 6) 金融工具 ==========
-# ... (get_gold_analysis, get_currency_analysis 與 v2.0.6 相同) ...
+# ... (get_gold_analysis, get_currency_analysis 與 v2.0.7 相同) ...
 def get_gold_analysis() -> str:
     logger.info("呼叫：get_gold_analysis()")
     try: r = requests.get(BOT_GOLD_URL, headers=DEFAULT_HEADERS, timeout=10); r.raise_for_status(); data = _parse_bot_gold_text(r.text); logger.debug(f"金價: {data}"); ts = data.get("listed_at") or "N/A"; sell, buy = data["sell_twd_per_g"], data["buy_twd_per_g"]; spread = sell - buy; bias = "盤整" if spread <= 30 else ("偏寬" if spread <= 60 else "價差大"); now = datetime.now().strftime("%H:%M"); report = (f"**金價({now})**\n賣: **{sell:,.0f}** | 買: **{buy:,.0f}** | 價差: {spread:,.0f} ({bias})\n掛牌: {ts}\n來源:台灣銀行"); logger.info("金價分析成功"); return report
@@ -206,25 +206,9 @@ def get_currency_analysis(target_currency: str):
 # --- 股票相關函數 ---
 _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
-
-# --- 繁體中文解：[修正] 將 normalize_ticker 恢復多行格式 ---
-def normalize_ticker(t: str) -> Tuple[str, str, str, bool]:
-    t = t.strip().upper()
-    logger.debug(f"正規化 ticker: {t}")
-    if t in ["台股大盤", "大盤"]:
-        return "^TWII", "^TWII", "^TWII", True
-    if t in ["美股大盤", "美盤", "美股"]:
-        return "^GSPC", "^GSPC", "^GSPC", True
-    if _TW_CODE_RE.match(t):
-        return f"{t}.TW", t, t, False
-    if _US_CODE_RE.match(t) and t != "JPY":
-        return t, t, t, False
-    # 如果以上都不匹配
-    logger.warning(f"無法明確識別 ticker: {t}")
-    return t, t, t, False # 返回原始值，預設非指數
-
-# ... (fetch_realtime_snapshot, load_stock_data, get_stock_name, get_stock_report 與 v2.0.6 相同) ...
+def normalize_ticker(t: str) -> Tuple[str, str, str, bool]: t = t.strip().upper(); logger.debug(f"正規化 ticker: {t}"); if t in ["台股大盤", "大盤"]: return "^TWII", "^TWII", "^TWII", True; if t in ["美股大盤", "美盤", "美股"]: return "^GSPC", "^GSPC", "^GSPC", True; if _TW_CODE_RE.match(t): return f"{t}.TW", t, t, False; if _US_CODE_RE.match(t) and t != "JPY": return t, t, t, False; logger.warning(f"無法識別 ticker: {t}"); return t, t, t, False
 def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
+    # ... (與 v2.0.7 相同) ...
     logger.debug(f"抓取快照 (yf: {yf_symbol}, slug: {yahoo_slug})")
     snap: dict = {"name": None, "now_price": None, "change": None, "currency": None, "close_time": None}
     try:
@@ -251,7 +235,21 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
     logger.debug(f"快照結果: {snap}"); return snap
 
 stock_data_df: Optional[pd.DataFrame] = None
-def load_stock_data() -> pd.DataFrame: global stock_data_df; if stock_data_df is None: try: stock_data_df = pd.read_csv('name_df.csv'); logger.info("✅ loaded name_df.csv") except FileNotFoundError: logger.error("❌ `name_df.csv` not found."); stock_data_df = pd.DataFrame(columns=['股號', '股名']); return stock_data_df
+# --- 繁體中文解：[修正] 將 load_stock_data 恢復多行格式 ---
+def load_stock_data() -> pd.DataFrame:
+    global stock_data_df
+    if stock_data_df is None:
+        try:
+            stock_data_df = pd.read_csv('name_df.csv')
+            logger.info("✅ loaded name_df.csv")
+        except FileNotFoundError:
+            logger.error("❌ `name_df.csv` not found.")
+            # --- 繁體中文解：[修正] 確保在 except 後仍然返回 DataFrame ---
+            stock_data_df = pd.DataFrame(columns=['股號', '股名'])
+    # --- 繁體中文解：[修正] 確保函數總是有返回值 ---
+    return stock_data_df
+
+# ... (get_stock_name, get_stock_report 與 v2.0.7 相同) ...
 def get_stock_name(stock_id: str) -> Optional[str]: df = load_stock_data(); res = df[df['股號'].astype(str).str.strip().str.upper() == str(stock_id).strip().upper()]; if not res.empty: name = res.iloc[0]['股名']; logger.debug(f"name_df lookup: {stock_id} -> {name}"); return name; logger.debug(f"name_df not found: {stock_id}"); return None
 def get_stock_report(user_input: str) -> str:
     logger.info(f"呼叫：get_stock_report({user_input})"); yf_symbol, yahoo_slug, display_code, is_index = normalize_ticker(user_input); snapshot = fetch_realtime_snapshot(yf_symbol, yahoo_slug)
@@ -278,9 +276,8 @@ def get_stock_report(user_input: str) -> str:
     msgs = [{"role":"system","content":system_prompt}, {"role":"user","content":content_msg}]
     logger.info("呼叫 AI 股票分析..."); analysis_result = get_analysis_reply(msgs); logger.info("股票分析完成"); return analysis_result
 
-
 # ========== 7) 彩票分析 ==========
-# ... (與 v2.0.6 相同) ...
+# ... (與 v2.0.7 相同) ...
 def _lotto_fallback_scrape(kind: str) -> str:
     logger.warning(f"使用後備彩票爬蟲 for {kind}")
     try:
@@ -315,12 +312,12 @@ def get_lottery_analysis(lottery_type_input: str) -> str:
     logger.info("呼叫 AI 彩票分析..."); analysis_result = get_analysis_reply(messages); logger.info("彩票分析完成"); return analysis_result
 
 # ========== 8) 對話與翻譯 ==========
-# ... (與 v2.0.6 相同) ...
+# ... (與 v2.0.7 相同) ...
 def set_user_persona(chat_id: str, key: str): logger.debug(f"Set persona: {chat_id[:10]} -> {key}"); key = random.choice(list(PERSONAS.keys())) if key == "random" else key; key = "sweet" if key not in PERSONAS else key; user_persona[chat_id] = key; logger.info(f"Persona set: {chat_id[:10]} -> {key}"); return key
 def build_persona_prompt(chat_id: str, sentiment: str) -> str: key = user_persona.get(chat_id, "sweet"); p = PERSONAS[key]; prompt = (f"你是「{p['title']}」。風格：{p['style']}\n情緒：{sentiment}；調整語氣（開心→同樂；難過/生氣→共情安撫；中性→自然）。\n用繁體中文，精煉自然，帶少量表情 {p['emoji']}。"); logger.debug(f"Persona prompt (key={key}, sent={sentiment}): {prompt[:50]}..."); return prompt
 
 # ========== 9) LINE Handlers (V2 SDK Style) ==========
-# ... (與 v2.0.6 相同) ...
+# ... (與 v2.0.7 相同) ...
 @handler.add(MessageEvent, message=TextMessage)
 def on_message_text(event: MessageEvent):
     chat_id = get_chat_id(event); msg_raw = event.message.text.strip(); reply_token = event.reply_token; is_group = not isinstance(event.source, SourceUser)
@@ -363,7 +360,7 @@ def on_postback(event: PostbackEvent):
 def is_stock_query(text: str) -> bool: t = text.strip().upper(); return t in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"] or bool(_TW_CODE_RE.match(t)) or (bool(_US_CODE_RE.match(t)) and t not in ["JPY"])
 
 # ========== 10) FastAPI Routes ==========
-# ... (與 v2.0.6 相同) ...
+# ... (與 v2.0.7 相同) ...
 @router.post("/callback")
 async def callback(request: Request):
     logger.info("Callback V2 received"); signature = request.headers.get("X-Line-Signature", ""); body = await request.body(); body_decoded = body.decode("utf-8"); logger.debug(f"Sig: {signature[:10]}..., Body: {len(body_decoded)} bytes")
