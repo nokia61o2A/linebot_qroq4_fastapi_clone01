@@ -1,4 +1,4 @@
-# app_fastapi.py (Version 2.0.3 - Update Groq Models Defaults)
+# app_fastapi.py (Version 2.0.4 - Syntax Fix)
 # ========== 1) Imports ==========
 import os
 import re
@@ -111,15 +111,14 @@ else:
     logger.info("ℹ️ 未設定 OPENAI_API_KEY，將僅使用 Groq")
 
 
-# --- 繁體中文解：[修正] 真正更新 Groq 預設模型名稱 ---
-GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile") # <-- 修正
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")  # <-- 修正
+# --- Groq 模型 ---
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 logger.info(f"Groq 模型設定 - Primary: {GROQ_MODEL_PRIMARY}, Fallback: {GROQ_MODEL_FALLBACK}")
 
 # --- 【靈活載入】自訂模組 ---
 LOTTERY_ENABLED = True
 try:
-    # --- 繁體中文解：確保 requirements.txt 中有 taiwanlottery ---
     from TaiwanLottery import TaiwanLotteryCrawler
     from my_commands.CaiyunfangweiCrawler import CaiyunfangweiCrawler
     lottery_crawler = TaiwanLotteryCrawler()
@@ -127,14 +126,10 @@ try:
     logger.info("✅ 已載入自訂 TaiwanLotteryCrawler / CaiyunfangweiCrawler")
 except ModuleNotFoundError:
     logger.error("❌ 找不到 'taiwanlottery' 模組。請確認 requirements.txt 並重新部署。將使用後備解析。")
-    LOTTERY_ENABLED = False
-    lottery_crawler = None
-    caiyunfangwei_crawler = None
+    LOTTERY_ENABLED = False; lottery_crawler = None; caiyunfangwei_crawler = None
 except Exception as e:
     logger.warning(f"⚠️ 無法載入自訂彩票模組：{e}，將使用後備解析。")
-    LOTTERY_ENABLED = False
-    lottery_crawler = None
-    caiyunfangwei_crawler = None
+    LOTTERY_ENABLED = False; lottery_crawler = None; caiyunfangwei_crawler = None
 
 STOCK_ENABLED = True
 try:
@@ -145,10 +140,8 @@ try:
     from my_commands.stock.YahooStock import YahooStock
     logger.info("✅ 已載入自訂股票模組 (my_commands.stock)")
 except ModuleNotFoundError as e:
-    if 'taiwanlottery' in str(e):
-         logger.error("❌ 股票模組因找不到 'taiwanlottery' 而載入失敗。請確認 requirements.txt 並重新部署。")
-    else:
-         logger.error(f"❌ 股票模組載入失敗 (ModuleNotFoundError): {e}")
+    if 'taiwanlottery' in str(e): logger.error("❌ 股票模組因找不到 'taiwanlottery' 而載入失敗。")
+    else: logger.error(f"❌ 股票模組載入失敗 (ModuleNotFoundError): {e}")
     STOCK_ENABLED = False
 except Exception as e:
     logger.warning(f"⚠️ 無法載入股票模組：{e}；將只顯示基本快照。")
@@ -164,158 +157,106 @@ if not STOCK_ENABLED:
 
 
 # --- 狀態字典與常數 ---
-# ... (與 v2.0.2 相同) ...
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}
 auto_reply_status: Dict[str, bool] = {}
 
-PERSONAS = {
-    "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰", "greetings": "親愛的～我在這裡聽你說 🌸", "emoji":"🌸💕😊"},
-    "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度", "greetings": "你又來啦？說吧，哪裡卡住了。😏", "emoji":"😏🙄"},
-    "moe":   {"title": "萌系女友", "style": "動漫語氣＋可愛顏文字", "greetings": "呀呼～今天也被我治癒一下嗎？(ﾉ>ω<)ﾉ", "emoji":"✨🎀"},
-    "cool":  {"title": "酷系御姐", "style": "冷靜精煉，關鍵建議", "greetings": "我在。說重點。", "emoji":"🧊⚡️"}
-}
+PERSONAS = { "sweet": {"title": "甜美女友", "style": "溫柔體貼，鼓勵安慰", "greetings": "親愛的～我在這裡聽你說 🌸", "emoji":"🌸💕😊"}, "salty": {"title": "傲嬌女友", "style": "機智吐槽，壞壞但有溫度", "greetings": "你又來啦？說吧，哪裡卡住了。😏", "emoji":"😏🙄"}, "moe":   {"title": "萌系女友", "style": "動漫語氣＋可愛顏文字", "greetings": "呀呼～今天也被我治癒一下嗎？(ﾉ>ω<)ﾉ", "emoji":"✨🎀"}, "cool":  {"title": "酷系御姐", "style": "冷靜精煉，關鍵建議", "greetings": "我在。說重點。", "emoji":"🧊⚡️"} }
 LANGUAGE_MAP = {"英文": "English", "日文": "Japanese", "韓文": "Korean", "越南文": "Vietnamese", "繁體中文": "Traditional Chinese"}
 PERSONA_ALIAS = {"甜":"sweet", "鹹":"salty", "萌":"moe", "酷":"cool", "random":"random"}
 
 # ========== 3) FastAPI ==========
-# ... (lifespan 與 v2.0.2 相同) ...
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ... (與 v2.0.3 相同) ...
     logger.info("應用程式啟動 (lifespan)...")
-    if BASE_URL and CHANNEL_TOKEN != "dummy": # Dummy check
+    if BASE_URL and CHANNEL_TOKEN != "dummy":
         try:
             async with httpx.AsyncClient() as c:
                 headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
                 payload = {"endpoint": f"{BASE_URL}/callback"}
                 logger.info(f"準備更新 Webhook 至: {payload['endpoint']}")
-                r = await c.put(
-                    "https://api.line.me/v2/bot/channel/webhook/endpoint",
-                    headers=headers, json=payload, timeout=10.0
-                )
-                r.raise_for_status()
-                logger.info(f"✅ Webhook 更新成功: {r.status_code}")
-        except Exception as e:
-            logger.error(f"⚠️ Webhook 更新失敗: {e}", exc_info=True)
-    else:
-        logger.warning("⚠️ Webhook 未更新：未設定 BASE_URL 或 CHANNEL_ACCESS_TOKEN (Mock 模式)")
+                r = await c.put("https://api.line.me/v2/bot/channel/webhook/endpoint", headers=headers, json=payload, timeout=10.0)
+                r.raise_for_status(); logger.info(f"✅ Webhook 更新成功: {r.status_code}")
+        except Exception as e: logger.error(f"⚠️ Webhook 更新失敗: {e}", exc_info=True)
+    else: logger.warning("⚠️ Webhook 未更新：未設定 BASE_URL 或 CHANNEL_ACCESS_TOKEN (Mock 模式)")
+    logger.info("Lifespan 啟動程序完成，應用程式準備就緒."); yield; logger.info("應用程式關閉 (lifespan)...")
 
-    logger.info("Lifespan 啟動程序完成，應用程式準備就緒。")
-    yield
-    logger.info("應用程式關閉 (lifespan)...")
-
-
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.3-groq-model-fix") # --- 繁體中文解：更新版本號 ---
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.4-syntax-fix") # --- 繁體中文解：更新版本號 ---
 router = APIRouter()
 
 # ========== 4) Helpers (V2 SDK Style) ==========
-# ... (get_chat_id, build_quick_reply, reply_with_quick_bar, build_main_menu_flex, build_submenu_flex 與 v2.0.2 相同) ...
+# ... (get_chat_id, build_quick_reply, reply_with_quick_bar, build_main_menu_flex, build_submenu_flex 與 v2.0.3 相同) ...
 def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceGroup): return event.source.group_id
     if isinstance(event.source, SourceRoom):  return event.source.room_id
     if isinstance(event.source, SourceUser): return event.source.user_id
-    logger.warning(f"未知的 event source type: {type(event.source)}")
-    return "unknown_source"
+    logger.warning(f"未知的 event source type: {type(event.source)}"); return "unknown_source"
 
 def build_quick_reply() -> QuickReply:
-    logger.debug("建立 QuickReply 按鈕")
-    return QuickReply(items=[ QuickReplyButton(action=MessageAction(label="主選單", text="選單")), QuickReplyButton(action=MessageAction(label="台股大盤", text="台股大盤")), QuickReplyButton(action=MessageAction(label="美股大盤", text="美股大盤")), QuickReplyButton(action=MessageAction(label="黃金價格", text="金價")), QuickReplyButton(action=MessageAction(label="查台積電", text="2330")), QuickReplyButton(action=MessageAction(label="查輝達", text="NVDA")), QuickReplyButton(action=MessageAction(label="查日圓", text="JPY")), QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")), QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")) ])
+    logger.debug("建立 QuickReply 按鈕"); return QuickReply(items=[ QuickReplyButton(action=MessageAction(label="主選單", text="選單")), QuickReplyButton(action=MessageAction(label="台股大盤", text="台股大盤")), QuickReplyButton(action=MessageAction(label="美股大盤", text="美股大盤")), QuickReplyButton(action=MessageAction(label="黃金價格", text="金價")), QuickReplyButton(action=MessageAction(label="查台積電", text="2330")), QuickReplyButton(action=MessageAction(label="查輝達", text="NVDA")), QuickReplyButton(action=MessageAction(label="查日圓", text="JPY")), QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")), QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")) ])
 
 def reply_with_quick_bar(reply_token: str, text: str):
     if not line_bot_api: logger.error("LINE Bot API 未初始化，無法回覆"); print(f"[MOCK] Reply with Quick Bar: {text}"); return
-    try:
-        logger.debug(f"準備回覆 (含 QuickReply): {text[:50]}...")
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=build_quick_reply()))
-        logger.debug("回覆 (含 QuickReply) 成功")
+    try: logger.debug(f"準備回覆 (含 QuickReply): {text[:50]}..."); line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=build_quick_reply())); logger.debug("回覆 (含 QuickReply) 成功")
     except LineBotApiError as lbe: logger.error(f"❌ 回覆 (含 QuickReply) 失敗: {lbe.status_code} {lbe.error.message}", exc_info=False)
     except Exception as e: logger.error(f"❌ 回覆 (含 QuickReply) 發生未知錯誤: {e}", exc_info=True)
 
 def build_main_menu_flex() -> FlexSendMessage:
-    logger.debug("建立主選單 FlexMessage")
-    bubble = BubbleContainer( direction="ltr", header=BoxComponent(layout="vertical", contents=[TextComponent(text="AI 助理主選單", weight="bold", size="lg")]), body=BoxComponent( layout="vertical", spacing="md", contents=[ TextComponent(text="請選擇功能分類：", size="sm"), SeparatorComponent(margin="md"), ButtonComponent(action=PostbackAction(label="💹 金融查詢", data="menu:finance"), style="primary", color="#5E86C1"), ButtonComponent(action=PostbackAction(label="🎰 彩票分析", data="menu:lottery"), style="primary", color="#5EC186"), ButtonComponent(action=PostbackAction(label="💖 AI 角色扮演", data="menu:persona"), style="secondary"), ButtonComponent(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate"), style="secondary"), ButtonComponent(action=PostbackAction(label="⚙️ 系統設定", data="menu:settings"), style="secondary"), ] ) )
-    return FlexSendMessage(alt_text="主選單", contents=bubble)
+    logger.debug("建立主選單 FlexMessage"); bubble = BubbleContainer( direction="ltr", header=BoxComponent(layout="vertical", contents=[TextComponent(text="AI 助理主選單", weight="bold", size="lg")]), body=BoxComponent( layout="vertical", spacing="md", contents=[ TextComponent(text="請選擇功能分類：", size="sm"), SeparatorComponent(margin="md"), ButtonComponent(action=PostbackAction(label="💹 金融查詢", data="menu:finance"), style="primary", color="#5E86C1"), ButtonComponent(action=PostbackAction(label="🎰 彩票分析", data="menu:lottery"), style="primary", color="#5EC186"), ButtonComponent(action=PostbackAction(label="💖 AI 角色扮演", data="menu:persona"), style="secondary"), ButtonComponent(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate"), style="secondary"), ButtonComponent(action=PostbackAction(label="⚙️ 系統設定", data="menu:settings"), style="secondary"), ] ) ); return FlexSendMessage(alt_text="主選單", contents=bubble)
 
 def build_submenu_flex(kind: str) -> FlexSendMessage:
-    logger.debug(f"建立子選單 FlexMessage (kind={kind})")
-    title, buttons = "子選單", []
+    logger.debug(f"建立子選單 FlexMessage (kind={kind})"); title, buttons = "子選單", []
     if kind == "finance": title, buttons = "💹 金融查詢", [ButtonComponent(action=MessageAction(label="台股大盤", text="台股大盤")), ButtonComponent(action=MessageAction(label="美股大盤", text="美股大盤")), ButtonComponent(action=MessageAction(label="黃金價格", text="金價")), ButtonComponent(action=MessageAction(label="日圓匯率", text="JPY")), ButtonComponent(action=MessageAction(label="查 2330 台積電", text="2330")), ButtonComponent(action=MessageAction(label="查 NVDA 輝達", text="NVDA"))]
     elif kind == "lottery": title, buttons = "🎰 彩票分析", [ButtonComponent(action=MessageAction(label="大樂透", text="大樂透")), ButtonComponent(action=MessageAction(label="威力彩", text="威力彩")), ButtonComponent(action=MessageAction(label="今彩539", text="539"))]
     elif kind == "persona": title, buttons = "💖 AI 角色扮演", [ButtonComponent(action=MessageAction(label="甜美女友", text="甜")), ButtonComponent(action=MessageAction(label="傲嬌女友", text="鹹")), ButtonComponent(action=MessageAction(label="萌系女友", text="萌")), ButtonComponent(action=MessageAction(label="酷系御姐", text="酷")), ButtonComponent(action=MessageAction(label="隨機切換", text="random"))]
     elif kind == "translate": title, buttons = "🌐 翻譯工具", [ButtonComponent(action=MessageAction(label="翻成英文", text="翻譯->英文")), ButtonComponent(action=MessageAction(label="翻成日文", text="翻譯->日文")), ButtonComponent(action=MessageAction(label="翻成繁中", text="翻譯->繁體中文")), ButtonComponent(action=MessageAction(label="結束翻譯模式", text="翻譯->結束"))]
     elif kind == "settings": title, buttons = "⚙️ 系統設定", [ButtonComponent(action=MessageAction(label="開啟自動回答 (群組)", text="開啟自動回答")), ButtonComponent(action=MessageAction(label="關閉自動回答 (群組)", text="關閉自動回答"))]
-    bubble = BubbleContainer( direction="ltr", header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="lg")]), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm") )
-    return FlexSendMessage(alt_text=title, contents=bubble)
+    bubble = BubbleContainer( direction="ltr", header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="lg")]), body=BoxComponent(layout="vertical", contents=buttons, spacing="sm") ); return FlexSendMessage(alt_text=title, contents=bubble)
 
 # ========== 5) AI & 分析 ==========
-# ... (get_analysis_reply, analyze_sentiment, translate_text 與 v2.0.2 相同) ...
+# ... (get_analysis_reply, analyze_sentiment, translate_text 與 v2.0.3 相同) ...
 def get_analysis_reply(messages: List[dict]) -> str:
-    """[同步] 先試 OpenAI（若有），失敗改用 Groq。"""
     logger.debug(f"呼叫 get_analysis_reply (OpenAI優先), messages count: {len(messages)}")
     if openai_client:
         try:
-            logger.debug("嘗試使用 OpenAI...")
-            resp = openai_client.chat.completions.create( model="gpt-4o-mini", messages=messages, temperature=0.7, max_tokens=1500, )
-            reply = resp.choices[0].message.content
-            logger.debug(f"OpenAI 成功回覆，長度: {len(reply)}")
-            return reply
-        except Exception as e:
-            logger.warning(f"⚠️ OpenAI 失敗：{e}")
-
+            logger.debug("嘗試使用 OpenAI..."); resp = openai_client.chat.completions.create( model="gpt-4o-mini", messages=messages, temperature=0.7, max_tokens=1500, )
+            reply = resp.choices[0].message.content; logger.debug(f"OpenAI 成功回覆，長度: {len(reply)}"); return reply
+        except Exception as e: logger.warning(f"⚠️ OpenAI 失敗：{e}")
     if not sync_groq_client: logger.error("❌ Groq Client 未初始化，無法回覆"); return "抱歉，AI 分析引擎目前無法連線。"
     try:
-        logger.debug(f"嘗試使用 Groq 主模型: {GROQ_MODEL_PRIMARY}")
-        resp = sync_groq_client.chat.completions.create( model=GROQ_MODEL_PRIMARY, messages=messages, temperature=0.7, max_tokens=2000, )
-        reply = resp.choices[0].message.content
-        logger.debug(f"Groq 主模型成功回覆，長度: {len(reply)}")
-        return reply
+        logger.debug(f"嘗試使用 Groq 主模型: {GROQ_MODEL_PRIMARY}"); resp = sync_groq_client.chat.completions.create( model=GROQ_MODEL_PRIMARY, messages=messages, temperature=0.7, max_tokens=2000, )
+        reply = resp.choices[0].message.content; logger.debug(f"Groq 主模型成功回覆，長度: {len(reply)}"); return reply
     except Exception as e:
         logger.warning(f"⚠️ Groq 主模型失敗：{e}")
         try:
-            logger.debug(f"嘗試使用 Groq 備援模型: {GROQ_MODEL_FALLBACK}")
-            resp = sync_groq_client.chat.completions.create( model=GROQ_MODEL_FALLBACK, messages=messages, temperature=0.9, max_tokens=1500, )
-            reply = resp.choices[0].message.content
-            logger.debug(f"Groq 備援模型成功回覆，長度: {len(reply)}")
-            return reply
-        except Exception as ee:
-            logger.error(f"❌ 所有 AI API 都失敗：{ee}", exc_info=True)
-            return "抱歉，AI 分析師目前連線不穩定，請稍後再試。"
+            logger.debug(f"嘗試使用 Groq 備援模型: {GROQ_MODEL_FALLBACK}"); resp = sync_groq_client.chat.completions.create( model=GROQ_MODEL_FALLBACK, messages=messages, temperature=0.9, max_tokens=1500, )
+            reply = resp.choices[0].message.content; logger.debug(f"Groq 備援模型成功回覆，長度: {len(reply)}"); return reply
+        except Exception as ee: logger.error(f"❌ 所有 AI API 都失敗：{ee}", exc_info=True); return "抱歉，AI 分析師目前連線不穩定，請稍後再試。"
 
 def analyze_sentiment(text: str) -> str:
-    """[同步] 呼叫 Groq 判斷訊息情緒 (備援模型)"""
-    logger.debug(f"呼叫 analyze_sentiment for: {text[:30]}...")
-    msgs = [{"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."},{"role":"user","content":text}]
+    logger.debug(f"呼叫 analyze_sentiment for: {text[:30]}..."); msgs = [{"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."},{"role":"user","content":text}]
     if not sync_groq_client: logger.error("❌ Groq Client 未初始化，無法分析情緒"); return "neutral"
     try:
-        resp = sync_groq_client.chat.completions.create( model=GROQ_MODEL_FALLBACK, messages=msgs, max_tokens=10, temperature=0 )
-        result = (resp.choices[0].message.content or "neutral").strip().lower()
-        logger.debug(f"Groq 同步情緒分析結果: {result}")
-        if result not in ["positive", "neutral", "negative", "angry"]: logger.warning(f"情緒分析返回意外結果: {result}, 使用 neutral 作為備援"); return "neutral"
-        return result
-    except Exception as e:
-        logger.error(f"❌ Groq 同步情緒分析失敗: {e}", exc_info=True)
-        return "neutral"
+        resp = sync_groq_client.chat.completions.create( model=GROQ_MODEL_FALLBACK, messages=msgs, max_tokens=10, temperature=0 ); result = (resp.choices[0].message.content or "neutral").strip().lower()
+        logger.debug(f"Groq 同步情緒分析結果: {result}"); return result if result in ["positive", "neutral", "negative", "angry"] else "neutral"
+    except Exception as e: logger.error(f"❌ Groq 同步情緒分析失敗: {e}", exc_info=True); return "neutral"
 
 def translate_text(text: str, target_lang_display: str) -> str:
-    """[同步] 呼叫 Groq 進行翻譯 (備援模型)"""
-    logger.debug(f"呼叫 translate_text to {target_lang_display} for: {text[:30]}...")
-    target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
+    logger.debug(f"呼叫 translate_text to {target_lang_display} for: {text[:30]}..."); target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
     sys = "You are a precise translation engine. Output ONLY the translated text, without any introductory phrases or explanations."
     usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
     if not sync_groq_client: logger.error("❌ Groq Client 未初始化，無法翻譯"); return "抱歉，翻譯引擎目前無法連線。"
     try:
         resp = sync_groq_client.chat.completions.create( model=GROQ_MODEL_FALLBACK, messages=[{"role":"system","content":sys},{"role":"user","content":usr}], max_tokens=len(text)*3 + 50, temperature=0.2 )
-        translated_text = (resp.choices[0].message.content or "").strip()
-        logger.debug(f"Groq 同步翻譯結果: {translated_text[:50]}...")
-        return translated_text
-    except Exception as e:
-        logger.error(f"❌ Groq 同步翻譯失敗: {e}", exc_info=True)
-        return "抱歉，翻譯功能暫時出錯了。"
+        translated_text = (resp.choices[0].message.content or "").strip(); logger.debug(f"Groq 同步翻譯結果: {translated_text[:50]}..."); return translated_text
+    except Exception as e: logger.error(f"❌ Groq 同步翻譯失敗: {e}", exc_info=True); return "抱歉，翻譯功能暫時出錯了。"
 
 
 # ========== 6) 金融工具 ==========
-# ... (與 v2.0.2 相同) ...
+# ... (與 v2.0.3 相同) ...
 def get_gold_analysis() -> str:
     logger.info("呼叫：get_gold_analysis()")
     try:
@@ -353,34 +294,23 @@ def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
     logger.debug(f"呼叫 fetch_realtime_snapshot (yf: {yf_symbol}, slug: {yahoo_slug})")
     snap: dict = {"name": None, "now_price": None, "change": None, "currency": None, "close_time": None}
     try:
-        tk = yf.Ticker(yf_symbol); info = {}; hist = pd.DataFrame() # 初始化
+        tk = yf.Ticker(yf_symbol); info = {}; hist = pd.DataFrame()
         try: info = tk.info or {}
         except Exception as info_e: logger.warning(f"yf tk.info 失敗 for {yf_symbol}: {info_e}")
         try: hist = tk.history(period="2d", interval="1d")
         except Exception as hist_e: logger.warning(f"yf tk.history 失敗 for {yf_symbol}: {hist_e}")
-
         name = info.get("shortName") or info.get("longName"); snap["name"] = name or yf_symbol
-        price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-        ccy = info.get("currency")
+        price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose"); ccy = info.get("currency")
         if price: snap["now_price"] = f"{price:.2f}"; snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
         elif not hist.empty: price = float(hist["Close"].iloc[-1]); snap["now_price"] = f"{price:.2f}"; snap["currency"] = ccy or ("TWD" if yf_symbol.endswith(".TW") else "USD")
-        if not hist.empty and len(hist) >= 2 and hist["Close"].iloc[-2] != 0:
-            chg = float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2]); pct = chg / float(hist["Close"].iloc[-2]) * 100; sign = "+" if chg >= 0 else ""
-            snap["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
-        elif info.get('regularMarketChange') is not None and info.get('regularMarketChangePercent') is not None:
-             chg = info['regularMarketChange']; pct = info['regularMarketChangePercent'] * 100; sign = "+" if chg >= 0 else ""
-             snap["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
+        if not hist.empty and len(hist) >= 2 and hist["Close"].iloc[-2] != 0: chg = float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2]); pct = chg / float(hist["Close"].iloc[-2]) * 100; sign = "+" if chg >= 0 else ""; snap["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
+        elif info.get('regularMarketChange') is not None and info.get('regularMarketChangePercent') is not None: chg = info['regularMarketChange']; pct = info['regularMarketChangePercent'] * 100; sign = "+" if chg >= 0 else ""; snap["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
         if not hist.empty: ts = hist.index[-1]; snap["close_time"] = ts.strftime("%Y-%m-%d %H:%M")
-        elif info.get("regularMarketTime"):
-             try: snap["close_time"] = datetime.fromtimestamp(info["regularMarketTime"]).strftime("%Y-%m-%d %H:%M")
-             except: pass
+        elif info.get("regularMarketTime"): try: snap["close_time"] = datetime.fromtimestamp(info["regularMarketTime"]).strftime("%Y-%m-%d %H:%M") except: pass
     except Exception as e: logger.warning(f"⚠️ yfinance 取得 {yf_symbol} 失敗：{e}")
     if (not snap["now_price"] or not snap["name"]) and STOCK_ENABLED and 'YahooStock' in globals():
         logger.debug(f"yfinance 失敗，嘗試使用 YahooStock 後備 for {yahoo_slug}")
-        try:
-            ys = YahooStock(yahoo_slug); snap["name"] = ys.name or snap["name"] or yahoo_slug; snap["now_price"] = ys.now_price or snap["now_price"]
-            snap["change"] = ys.change or snap["change"]; snap["currency"] = ys.currency or ("TWD" if yf_symbol.endswith(".TW") else snap["currency"]); snap["close_time"] = ys.close_time or snap["close_time"]
-            logger.debug("YahooStock 後備成功")
+        try: ys = YahooStock(yahoo_slug); snap["name"] = ys.name or snap["name"] or yahoo_slug; snap["now_price"] = ys.now_price or snap["now_price"]; snap["change"] = ys.change or snap["change"]; snap["currency"] = ys.currency or ("TWD" if yf_symbol.endswith(".TW") else snap["currency"]); snap["close_time"] = ys.close_time or snap["close_time"]; logger.debug("YahooStock 後備成功")
         except Exception as e: logger.error(f"❌ YahooStock 取得 {yahoo_slug} 失敗：{e}")
     logger.debug(f"Snapshot 結果: {snap}"); return snap
 
@@ -398,8 +328,7 @@ def get_stock_name(stock_id_without_suffix: str) -> Optional[str]:
     logger.debug(f"在 name_df.csv 中找不到 {stock_id_without_suffix}"); return None
 
 def get_stock_report(user_input: str) -> str:
-    logger.info(f"呼叫：get_stock_report(user_input={user_input})")
-    yf_symbol, yahoo_slug, display_code, is_index = normalize_ticker(user_input); snapshot = fetch_realtime_snapshot(yf_symbol, yahoo_slug)
+    logger.info(f"呼叫：get_stock_report(user_input={user_input})"); yf_symbol, yahoo_slug, display_code, is_index = normalize_ticker(user_input); snapshot = fetch_realtime_snapshot(yf_symbol, yahoo_slug)
     price_data, news_data, value_part, dividend_part = "", "", "", ""
     if STOCK_ENABLED:
         logger.debug("股票模組已啟用，嘗試獲取詳細資料...")
@@ -423,8 +352,9 @@ def get_stock_report(user_input: str) -> str:
     msgs = [{"role":"system","content":system_prompt}, {"role":"user","content":content_msg}]
     logger.info("準備呼叫 AI 進行股票分析..."); analysis_result = get_analysis_reply(msgs); logger.info("股票分析完成"); return analysis_result
 
+
 # ========== 7) 彩票分析 ==========
-# ... (與 v2.0.2 相同) ...
+# ... (與 v2.0.3 相同) ...
 def _lotto_fallback_scrape(kind: str) -> str:
     logger.warning(f"使用後備彩票爬蟲 for {kind}")
     try:
@@ -443,9 +373,7 @@ def _lotto_fallback_scrape(kind: str) -> str:
     except Exception as e: logger.error(f"❌ 後備彩票爬取失敗：{e}", exc_info=True); return f"抱歉，{kind} 近期號碼暫時取不到 (Fallback exception)。"
 
 def get_lottery_analysis(lottery_type_input: str) -> str:
-    logger.info(f"呼叫：get_lottery_analysis(lottery_type_input={lottery_type_input})")
-    kind = "威力彩" if "威力" in lottery_type_input else ("大樂透" if "大樂" in lottery_type_input else ("539" if "539" in lottery_type_input else lottery_type_input))
-    latest_data_str = ""
+    logger.info(f"呼叫：get_lottery_analysis(lottery_type_input={lottery_type_input})"); kind = "威力彩" if "威力" in lottery_type_input else ("大樂透" if "大樂" in lottery_type_input else ("539" if "539" in lottery_type_input else lottery_type_input)); latest_data_str = ""
     if LOTTERY_ENABLED and lottery_crawler:
         try:
             logger.debug(f"嘗試使用自訂爬蟲獲取 {kind} 資料...")
@@ -456,23 +384,17 @@ def get_lottery_analysis(lottery_type_input: str) -> str:
             logger.info("自訂爬蟲成功獲取資料")
         except Exception as e: logger.warning(f"⚠️ 自訂彩票爬蟲失敗，改用後備：{e}"); latest_data_str = _lotto_fallback_scrape(kind)
     else: logger.warning("自訂彩票模組未啟用或未載入，使用後備爬蟲"); latest_data_str = _lotto_fallback_scrape(kind)
-    cai_part = ""
+    cai_part = "";
     if caiyunfangwei_crawler:
-        try:
-            logger.debug("嘗試獲取財運方位..."); cai = caiyunfangwei_crawler.get_caiyunfangwei()
-            cai_part = f"今天日期：{cai.get('今天日期','')}\n今日歲次：{cai.get('今日歲次','')}\n財神方位：{cai.get('財神方位','')}\n"
-            logger.info("財運方位獲取成功")
+        try: logger.debug("嘗試獲取財運方位..."); cai = caiyunfangwei_crawler.get_caiyunfangwei(); cai_part = f"今天日期：{cai.get('今天日期','')}\n今日歲次：{cai.get('今日歲次','')}\n財神方位：{cai.get('財神方位','')}\n"; logger.info("財運方位獲取成功")
         except Exception as e: logger.warning(f"⚠️ 無法獲取財運方位: {e}"); cai_part = ""
-    prompt = (f"你是一位資深彩券分析師。以下是 {kind} 近況/最新號碼資料：\n{latest_data_str}\n\n{cai_part}請用繁體中文寫出：\n1) 近期走勢重點（高機率區間/熱冷號）\n2) 選號建議與注意事項（理性與風險聲明）\n3) 提供三組推薦號碼（依彩種格式呈現）\n文字請精煉、分點條列。")
-    messages = [{"role":"system","content":"你是資深彩券分析師。"}, {"role":"user","content":prompt}]
+    prompt = (f"你是一位資深彩券分析師。以下是 {kind} 近況/最新號碼資料：\n{latest_data_str}\n\n{cai_part}請用繁體中文寫出：\n1) 近期走勢重點（高機率區間/熱冷號）\n2) 選號建議與注意事項（理性與風險聲明）\n3) 提供三組推薦號碼（依彩種格式呈現）\n文字請精煉、分點條列。"); messages = [{"role":"system","content":"你是資深彩券分析師。"}, {"role":"user","content":prompt}]
     logger.info("準備呼叫 AI 進行彩票分析..."); analysis_result = get_analysis_reply(messages); logger.info("彩票分析完成"); return analysis_result
 
 # ========== 8) 對話與翻譯 ==========
-# ... (與 v2.0.2 相同) ...
+# ... (與 v2.0.3 相同) ...
 def set_user_persona(chat_id: str, key: str):
-    logger.debug(f"呼叫 set_user_persona for {chat_id[:10]}... with key={key}")
-    if key == "random": key = random.choice(list(PERSONAS.keys()))
-    if key not in PERSONAS: key = "sweet"
+    logger.debug(f"呼叫 set_user_persona for {chat_id[:10]}... with key={key}"); key = random.choice(list(PERSONAS.keys())) if key == "random" else key; key = "sweet" if key not in PERSONAS else key
     user_persona[chat_id] = key; logger.info(f"人設切換成功: {chat_id[:10]}... -> {key}"); return key
 
 def build_persona_prompt(chat_id: str, sentiment: str) -> str:
@@ -481,7 +403,6 @@ def build_persona_prompt(chat_id: str, sentiment: str) -> str:
     logger.debug(f"建構人設 Prompt (key={key}, sentiment={sentiment}): {prompt[:50]}..."); return prompt
 
 # ========== 9) LINE Handlers (V2 SDK Style) ==========
-# ... (與 v2.0.2 相同) ...
 @handler.add(MessageEvent, message=TextMessage)
 def on_message_text(event: MessageEvent):
     chat_id = get_chat_id(event)
@@ -509,13 +430,27 @@ def on_message_text(event: MessageEvent):
         if msg in PERSONA_ALIAS: logger.info(f"分支：人設切換 ({msg})"); key_alias = msg; key = set_user_persona(chat_id, PERSONA_ALIAS[key_alias]); p = PERSONAS[user_persona[chat_id]]; txt = f"💖 已切換人設：{p['title']}\n\n{p['greetings']}"; return reply_with_quick_bar(reply_token, txt)
         if chat_id in translation_states: logger.info(f"分支：執行翻譯 (-> {translation_states[chat_id]})"); out = translate_text(msg, translation_states[chat_id]); return reply_with_quick_bar(reply_token, out)
         logger.info("分支：一般聊天 (Groq/OpenAI)"); history = conversation_history.get(chat_id, []); logger.debug("分析情緒..."); sentiment = analyze_sentiment(msg); logger.debug("建構 Prompt..."); sys_prompt = build_persona_prompt(chat_id, sentiment); messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]; logger.info("呼叫 AI 進行聊天回覆..."); final_reply = get_analysis_reply(messages); history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}]); conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]; logger.debug("聊天歷史已更新"); return reply_with_quick_bar(reply_token, final_reply)
-    except LineBotApiError as lbe: logger.error(f"❌ LINE API 錯誤: {lbe.status_code} {lbe.error.message}", exc_info=False); try: line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，與 LINE 溝通時發生錯誤 😥")) except: pass
-    except Exception as e: logger.error(f"❌ on_message_text 內部錯誤: {e}", exc_info=True); try: reply_with_quick_bar(reply_token, "抱歉，處理您的請求時發生了未預期的錯誤 😵‍💫") except Exception as reply_e: logger.error(f"❌ 連錯誤訊息都無法回覆: {reply_e}")
+    # --- 繁體中文解：[修正] 修正 except 區塊的縮排和語法 ---
+    except LineBotApiError as lbe:
+        logger.error(f"❌ LINE API 錯誤: {lbe.status_code} {lbe.error.message}", exc_info=False)
+        try:
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，與 LINE 溝通時發生錯誤 😥"))
+        except Exception as inner_e:
+            logger.error(f"❌ 連錯誤訊息都無法回覆 (inner): {inner_e}")
+            # 在這裡不需 pass，因為外層 except 會處理
+    except Exception as e:
+        logger.error(f"❌ on_message_text 內部錯誤: {e}", exc_info=True)
+        try:
+             reply_with_quick_bar(reply_token, "抱歉，處理您的請求時發生了未預期的錯誤 😵‍💫")
+        except Exception as reply_e:
+             logger.error(f"❌ 連錯誤訊息都無法回覆: {reply_e}")
+             # 在這裡不需 pass
+
 
 @handler.add(PostbackEvent)
 def on_postback(event: PostbackEvent):
-    logger.info(f"收到 V2 Postback Event from {get_chat_id(event)[:10]}..., data: {event.postback.data}")
-    data = (event.postback.data or "").strip(); kind = data[5:] if data.startswith("menu:") else None
+    # ... (與 v2.0.3 相同) ...
+    logger.info(f"收到 V2 Postback Event from {get_chat_id(event)[:10]}..., data: {event.postback.data}"); data = (event.postback.data or "").strip(); kind = data[5:] if data.startswith("menu:") else None
     if kind: logger.info(f"匹配到 Postback 選單: {kind}")
     try: line_bot_api.reply_message( event.reply_token, [build_submenu_flex(kind), TextSendMessage(text="請選擇一項服務 👇", quick_reply=build_quick_reply())] ); logger.info("Postback 子選單回覆成功")
     except LineBotApiError as lbe: logger.error(f"❌ Postback 回覆 LINE API 錯誤: {lbe.status_code} {lbe.error.message}", exc_info=False)
@@ -526,36 +461,29 @@ def is_stock_query(text: str) -> bool: t = text.strip().upper(); return t in ["�
 
 
 # ========== 10) FastAPI Routes ==========
-# ... (與 v2.0.2 相同) ...
+# ... (與 v2.0.3 相同) ...
 @router.post("/callback")
 async def callback(request: Request):
     logger.info("收到 /callback 請求 (V2)")
     if not handler: logger.critical("❌ WebhookHandler 未初始化，無法處理請求"); raise HTTPException(status_code=500, detail="WebhookHandler not initialized")
     signature = request.headers.get("X-Line-Signature", ""); body = await request.body(); body_decoded = body.decode("utf-8")
     logger.debug(f"Callback V2 - Signature: {signature[:10]}..., Body size: {len(body_decoded)}")
-    try:
-        handler.handle(body_decoded, signature) # 直接同步調用
-        logger.info("✅ Callback V2 同步處理完成")
+    try: handler.handle(body_decoded, signature); logger.info("✅ Callback V2 同步處理完成") # 直接同步調用
     except InvalidSignatureError: logger.error(f"❌ Invalid signature 驗證失敗 (Signature: {signature})，請檢查 CHANNEL_SECRET 是否正確。"); raise HTTPException(status_code=400, detail="Invalid signature")
-    except LineBotApiError as lbe: logger.error(f"❌ Callback V2 處理期間 LINE API 錯誤: {lbe.status_code} {lbe.error.message}", exc_info=True); return JSONResponse({"status": "ok but error logged"}) # 回覆 OK 避免重試
+    except LineBotApiError as lbe: logger.error(f"❌ Callback V2 處理期間 LINE API 錯誤: {lbe.status_code} {lbe.error.message}", exc_info=True); return JSONResponse({"status": "ok but error logged"})
     except Exception as e: logger.error(f"❌ Callback V2 處理失敗：{e}", exc_info=True); raise HTTPException(status_code=500, detail="Internal error")
     return JSONResponse({"status": "ok"})
 
 @router.get("/")
 async def root(): logger.debug("收到 / (root) 請求"); return PlainTextResponse("LINE Bot (V2 SDK - Sync Handler) is running.", status_code=200)
-
 @router.get("/healthz")
 async def healthz(): return PlainTextResponse("ok")
-
 @router.get("/health/providers")
-async def providers_health():
-    logger.info("收到 /health/providers 請求")
-    return {"openai_client_initialized": openai_client is not None, "groq_client_initialized": sync_groq_client is not None, "line_api_initialized": line_bot_api is not None, "ts": datetime.utcnow().isoformat() + "Z",}
+async def providers_health(): logger.info("收到 /health/providers 請求"); return {"openai_client_initialized": openai_client is not None, "groq_client_initialized": sync_groq_client is not None, "line_api_initialized": line_bot_api is not None, "ts": datetime.utcnow().isoformat() + "Z",}
 
 app.include_router(router)
 
 # ========== 11) Local run ==========
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    logger.info(f"準備啟動 Uvicorn (app_fastapi:app) 於 0.0.0.0:{port}")
+    port = int(os.environ.get("PORT", 8000)); logger.info(f"準備啟動 Uvicorn (app_fastapi:app) 於 0.0.0.0:{port}")
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
