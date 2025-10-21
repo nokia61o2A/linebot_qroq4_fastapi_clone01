@@ -14,7 +14,7 @@ from fastapi.routing import APIRouter
 from contextlib import asynccontextmanager
 import uvicorn
 from linebot.exceptions import InvalidSignatureError
-# --- 繁體中文解：[修正] 匯入 V3 所需的 Configuration 和 ApiClient ---
+# --- 繁體中文解：[V3] 匯入 V3 所需的 Configuration 和 ApiClient ---
 from linebot.v3.messaging import (
     MessagingApi, ReplyMessageRequest, TextMessage, PushMessageRequest,
     Configuration, ApiClient
@@ -48,17 +48,14 @@ DISABLE_GROQ = os.getenv("DISABLE_GROQ", "false").lower() == "true"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# --- 繁體中文解：請再次確認 Render.com 上的 KEY 是 CHANNEL_TOKEN ---
 CHANNEL_TOKEN = os.getenv("CHANNEL_TOKEN", "dummy")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "dummy")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
-# --- 繁體中文解：[修正] line_bot_api 改為在各函數內部動態建立 ---
-# --- 繁體中文解：[修正] 建立 V3 所需的全域 Configuration 物件 ---
+# --- 繁體中文解：[V3] 建立 V3 所需的全域 Configuration 物件 ---
 configuration = Configuration(access_token=CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
 
-# --- 繁體中文解：[修正] WebhookParser 在 V3 只需要 CHANNEL_SECRET。
-# --- 繁體中文解：並檢查 CHANNEL_SECRET 是否為 dummy ---
+# --- 繁體中文解：[V3] WebhookParser 在 V3 只需要 CHANNEL_SECRET ---
 parser = WebhookParser(CHANNEL_SECRET) if CHANNEL_SECRET != "dummy" else None
 
 # Mock 客戶端
@@ -83,28 +80,28 @@ def _tstate_clear(chat_id):
     pass
 
 async def reply_text_with_tts_and_extras(reply_tok, text, event=None):
-    # --- 繁體中文解：[修正] 檢查 V3 configuration 物件是否存在 ---
     if configuration is not None:
         try:
-            # --- 繁體中文解：[修正] 使用 with...as... 語法動態建立 V3 ApiClient 和 MessagingApi ---
-            async with ApiClient(configuration) as api_client:
+            # --- 繁體中文解：[V3 修正] ApiClient 是同步的，必須使用 'with' 而不是 'async with' ---
+            with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 logger.debug(f"準備回覆 (reply_token: {reply_tok[:10]}...): {text[:50]}...")
                 request = ReplyMessageRequest(reply_token=reply_tok, messages=[TextMessage(text=text)])
-                # --- 繁體中文解：[修正] V3 的 API 呼叫現在是異步(async)的，所以使用 await ---
-                await line_bot_api.reply_message(request)
+                # --- 繁體中文解：[V3 修正] V3 的 API 呼叫是同步的，不能使用 'await' ---
+                line_bot_api.reply_message(request)
                 logger.debug(f"已成功回覆文字：{text[:50]}...")
         except Exception as e:
             logger.error(f"回覆訊息失敗 (Token: {reply_tok[:10]}...)，嘗試使用 push：{e}")
             if event:
                 try:
-                    # --- 繁體中文解：[修正] 推播備援也需要動態建立 V3 ApiClient ---
-                    async with ApiClient(configuration) as api_client:
+                    # --- 繁體中文解：[V3 修正] 推播備援也必須使用 'with' ---
+                    with ApiClient(configuration) as api_client:
                         line_bot_api = MessagingApi(api_client)
                         chat_id = get_chat_id(event)
                         logger.debug(f"推播備援：準備推播至 {chat_id[:20]}...")
                         push_request = PushMessageRequest(to=chat_id, messages=[TextMessage(text=text)])
-                        await line_bot_api.push_message(push_request)
+                        # --- 繁體中文解：[V3 修正] V3 的 API 呼叫是同步的，不能使用 'await' ---
+                        line_bot_api.push_message(push_request)
                         logger.info(f"推播備援成功至 {chat_id[:20]}...")
                 except Exception as push_e:
                     logger.error(f"推播備援失敗：{push_e}")
@@ -114,11 +111,9 @@ async def reply_text_with_tts_and_extras(reply_tok, text, event=None):
         print(f"[MOCK] 回覆：{text}")
 
 async def reply_menu_with_hint(reply_tok, menu, hint=""): 
-    # --- 繁體中文解：[修正] 檢查 V3 configuration 物件 ---
     if configuration is not None:
-        # 選單需自訂（QuickReply 在 v3 為 FlexMessage 或 other）
         logger.info(f"準備回覆選單 (Token: {reply_tok[:10]}...)")
-        # --- 繁體中文解：[修正] 這裡未來實作時，也需要使用 with ApiClient... 方式呼叫 line_bot_api ---
+        # --- 繁體中文解：未來實作選單時，也需要使用 'with ApiClient(...)' 的同步方式 ---
         print("已發送選單（v3 需調整）")
     else:
         print("[MOCK] 已發送選單")
@@ -458,12 +453,12 @@ async def handle_text_message(event: MessageEvent):
     
     try:
         bot_name = "AI 助手"
-        # --- 繁體中文解：[修正] 檢查 V3 configuration 物件 ---
         if configuration is not None:
-            # --- 繁體中文解：[修正] 使用 with...as... 語法動態建立 V3 ApiClient 和 MessagingApi ---
-            async with ApiClient(configuration) as api_client:
+            # --- 繁體中文解：[V3 修正] ApiClient 是同步的，必須使用 'with' ---
+            with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
-                bot_info = await line_bot_api.get_bot_info()
+                # --- 繁體中文解：[V3 修正] API 呼叫是同步的，不能使用 'await' ---
+                bot_info = line_bot_api.get_bot_info()
                 bot_name = bot_info.display_name
         else:
             bot_name = "AI 助手 (MOCK)"
@@ -623,19 +618,18 @@ async def handle_audio_message(event: MessageEvent):
     logger.info(f"收到語音訊息：{event.message.id} (reply_token: {reply_tok[:10]}...)")
     
     try:
-        # --- 繁體中文解：[修正] 檢查 V3 configuration 物件 ---
         if configuration is None:
             logger.warning("語音處理：處於 Mock 模式")
             await reply_text_with_tts_and_extras(reply_tok, "🎧 [MOCK] 語音收到！目前語音轉文字失敗，請稍後再試。", event=event)
             return
         
         audio_in = None
-        # --- 繁體中文解：[修正] 使用 with...as... 語法動態建立 V3 ApiClient 和 MessagingApi ---
-        async with ApiClient(configuration) as api_client:
+        # --- 繁體中文解：[V3 修正] ApiClient 是同步的，必須使用 'with' ---
+        with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             logger.debug(f"呼叫：line_bot_api.get_message_content({event.message.id})")
-            response = await line_bot_api.get_message_content(event.message.id)
-            audio_in = await response.content.read()
+            # --- 繁體中文解：[V3 修正] API 呼叫是同步的，返回的直接是 bytes (或 file-like object) ---
+            audio_in = line_bot_api.get_message_content(event.message.id)
             logger.debug(f"取得語音資料，長度：{len(audio_in)}")
         
         logger.debug("呼叫：speech_to_text_async()")
@@ -704,7 +698,6 @@ async def lifespan(app: FastAPI):
     logger.info("應用程式啟動 (lifespan)...")
 
     # 1) LINE Webhook（官方域名）
-    # --- 繁體中文解：[修正] 檢查 BASE_URL 是否存在，以及 CHANNEL_TOKEN 是否有設定 (不再檢查 line_bot_api) ---
     if BASE_URL and CHANNEL_TOKEN != "dummy":
         logger.info(f"準備更新 Webhook 至：{BASE_URL}/callback")
         try:
@@ -717,7 +710,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Webhook 更新失敗（api.line.me）：{e}")
     else:
-        # --- 繁體中文解：[修正] 更新 Mock 模式的警告訊息 ---
         logger.warning("Webhook 未更新：未設定 BASE_URL 或 CHANNEL_TOKEN (Mock 模式)")
 
 
@@ -778,13 +770,12 @@ async def lifespan(app: FastAPI):
     # (關閉時執行的程式碼)
     logger.info("應用程式關閉 (lifespan)...")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.15-v3-fix") # --- 繁體中文解：更新版本號 ---
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.16-v3-sync-fix") # --- 繁體中文解：更新版本號 ---
 router = APIRouter()
 
 @router.post("/callback")
 async def callback(request: Request):
     logger.info("收到 /callback 請求")
-    # --- 繁體中文解：[修正] 檢查 parser 物件是否存在 ---
     if parser is None:
         logger.error("Callback：處於 Mock 模式 (parser 為 None)，請檢查 CHANNEL_SECRET 環境變數。")
         return JSONResponse({"status": "mock mode, no parser"}, status_code=200)
