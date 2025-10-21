@@ -1,4 +1,4 @@
-# app_fastapi.py (Version 2.0.6 - Final Final Syntax Fix)
+# app_fastapi.py (Version 2.0.6 - Final Indentation Fix)
 # ========== 1) Imports ==========
 import os
 import re
@@ -95,19 +95,12 @@ except ModuleNotFoundError as e: logger.error(f"❌ 股票模組載入失敗 (Im
 except Exception as e: logger.warning(f"⚠️ 無法載入股票模組：{e}"); STOCK_ENABLED = False
 
 if not STOCK_ENABLED:
-    # --- 繁體中文解：[修正] 將 YahooStock 的 __init__ 改為多行 ---
     def stock_price(id): logger.error("股票(備援): stock_price"); return pd.DataFrame()
     def stock_news(hint): logger.error("股票(備援): stock_news"); return ["股票模組未載入"]
     def stock_fundamental(id): logger.error("股票(備援): stock_fundamental"); return "股票模組未載入"
     def stock_dividend(id): logger.error("股票(備援): stock_dividend"); return "股票模組未載入"
     class YahooStock:
-        def __init__(self, id):
-            logger.error(f"股票(備援): YahooStock({id})")
-            self.name = id
-            self.now_price = None
-            self.change = None
-            self.currency = None
-            self.close_time = None
+        def __init__(self, id): logger.error(f"股票(備援): YahooStock({id})"); self.name=id; self.now_price=None; self.change=None; self.currency=None; self.close_time=None
 
 # --- 狀態字典與常數 ---
 conversation_history: Dict[str, List[dict]] = {}; MAX_HISTORY_LEN = 10; user_persona: Dict[str, str] = {}; translation_states: Dict[str, str] = {}; auto_reply_status: Dict[str, bool] = {}
@@ -136,7 +129,7 @@ app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.6-final-syntax-f
 router = APIRouter()
 
 # ========== 4) Helpers (V2 SDK Style) ==========
-# ... (與 v2.0.5 相同) ...
+# ... (get_chat_id, build_quick_reply, reply_with_quick_bar, build_main_menu_flex, build_submenu_flex 與 v2.0.5 相同) ...
 def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceGroup): return event.source.group_id
     if isinstance(event.source, SourceRoom):  return event.source.room_id
@@ -191,22 +184,45 @@ def translate_text(text: str, target_lang_display: str) -> str:
 
 
 # ========== 6) 金融工具 ==========
-# ... (與 v2.0.5 相同) ...
 def get_gold_analysis() -> str:
+    # ... (與 v2.0.5 相同) ...
     logger.info("呼叫：get_gold_analysis()")
     try: r = requests.get(BOT_GOLD_URL, headers=DEFAULT_HEADERS, timeout=10); r.raise_for_status(); data = _parse_bot_gold_text(r.text); logger.debug(f"金價: {data}"); ts = data.get("listed_at") or "N/A"; sell, buy = data["sell_twd_per_g"], data["buy_twd_per_g"]; spread = sell - buy; bias = "盤整" if spread <= 30 else ("偏寬" if spread <= 60 else "價差大"); now = datetime.now().strftime("%H:%M"); report = (f"**金價({now})**\n賣: **{sell:,.0f}** | 買: **{buy:,.0f}** | 價差: {spread:,.0f} ({bias})\n掛牌: {ts}\n來源:台灣銀行"); logger.info("金價分析成功"); return report
     except Exception as e: logger.error(f"❌ 黃金分析失敗: {e}", exc_info=False); return "抱歉，目前無法取得黃金牌價 🙏"
 
+# --- 繁體中文解：[修正] 將 get_currency_analysis 恢復正確的多行格式 ---
 def get_currency_analysis(target_currency: str):
-    logger.info(f"呼叫：get_currency_analysis({target_currency})")
-    try: url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"; res = requests.get(url, timeout=10); res.raise_for_status(); data = res.json(); logger.debug(f"匯率 API: {data}");
-        if data.get("result") != "success": error_msg = f"匯率 API 錯誤: {data.get('error-type','未知')}"; logger.error(error_msg); return error_msg
-        rate = data["rates"].get("TWD");
-        if rate is None: logger.error("匯率 API 回應中無 TWD"); return f"抱歉，API 無 TWD 匯率。"
-        report = f"即時：1 {target_currency.upper()} ≈ **{rate:.4f}** 新台幣"; logger.info("匯率分析成功"); return report
-    except requests.exceptions.RequestException as req_e: logger.error(f"❌ 匯率 API 請求失敗: {req_e}", exc_info=False); return "抱歉，無法連線至匯率伺服器。"
-    except Exception as e: logger.error(f"❌ 匯率分析未知錯誤: {e}", exc_info=True); return "抱歉，外匯資料暫無法取得。"
+    logger.info(f"呼叫：get_currency_analysis(target_currency={target_currency})")
+    try:
+        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
+        res = requests.get(url, timeout=10)
+        res.raise_for_status() # Raise exception for bad status codes
+        data = res.json()
+        logger.debug(f"匯率 API 回應: {data}")
 
+        if data.get("result") != "success":
+            error_msg = f"匯率 API 錯誤: {data.get('error-type','未知錯誤')}" # More specific error
+            logger.error(error_msg)
+            return error_msg # Return the error message
+
+        # --- 繁體中文解：[修正] 確保 rate 的邏輯在 if 之外且在 try 之內 ---
+        rate = data["rates"].get("TWD")
+        if rate is None:
+            logger.error("匯率 API 回應中無 TWD 資料")
+            return f"抱歉，API 回應中找不到 TWD 匯率。" # More specific error
+
+        report = f"即時：1 {target_currency.upper()} ≈ **{rate:.4f}** 新台幣" # Keep formatting
+        logger.info("匯率分析成功")
+        return report
+
+    except requests.exceptions.RequestException as req_e: # Catch specific network errors
+        logger.error(f"❌ 匯率 API 請求失敗: {req_e}", exc_info=False)
+        return "抱歉，無法連線至匯率伺服器。"
+    except Exception as e: # Catch other potential errors
+        logger.error(f"❌ 匯率分析時發生未知錯誤: {e}", exc_info=True) # Log full traceback for unknown errors
+        return "抱歉，外匯資料暫時無法取得。"
+
+# --- 股票相關函數 (與 v2.0.5 相同) ---
 _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
 def normalize_ticker(t: str) -> Tuple[str, str, str, bool]: t = t.strip().upper(); logger.debug(f"正規化 ticker: {t}"); if t in ["台股大盤", "大盤"]: return "^TWII", "^TWII", "^TWII", True; if t in ["美股大盤", "美盤", "美股"]: return "^GSPC", "^GSPC", "^GSPC", True; if _TW_CODE_RE.match(t): return f"{t}.TW", t, t, False; if _US_CODE_RE.match(t) and t != "JPY": return t, t, t, False; logger.warning(f"無法識別 ticker: {t}"); return t, t, t, False
@@ -264,7 +280,6 @@ def get_stock_report(user_input: str) -> str:
     system_prompt = ("你是專業分析師。開頭列出股名(股號)/現價/漲跌/時間；分段說明走勢/基本面/技術面/消息面/風險/建議區間/停利目標/結論。資料不完整請保守說明。")
     msgs = [{"role":"system","content":system_prompt}, {"role":"user","content":content_msg}]
     logger.info("呼叫 AI 股票分析..."); analysis_result = get_analysis_reply(msgs); logger.info("股票分析完成"); return analysis_result
-
 
 # ========== 7) 彩票分析 ==========
 # ... (與 v2.0.5 相同) ...
@@ -333,14 +348,8 @@ def on_message_text(event: MessageEvent):
         if msg in PERSONA_ALIAS: logger.info(f"Route: Set Persona ({msg})"); key = set_user_persona(chat_id, PERSONA_ALIAS[msg]); p = PERSONAS[user_persona[chat_id]]; txt = f"💖 切換人設：{p['title']}\n{p['greetings']}"; return reply_with_quick_bar(reply_token, txt)
         if chat_id in translation_states: logger.info(f"Route: Translate content (-> {translation_states[chat_id]})"); out = translate_text(msg, translation_states[chat_id]); return reply_with_quick_bar(reply_token, out)
         logger.info("Route: General Chat"); history = conversation_history.get(chat_id, []); logger.debug("Analyze sentiment..."); sentiment = analyze_sentiment(msg); logger.debug("Build prompt..."); sys_prompt = build_persona_prompt(chat_id, sentiment); messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]; logger.info("Call AI chat..."); final_reply = get_analysis_reply(messages); history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}]); conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]; logger.debug("History updated"); return reply_with_quick_bar(reply_token, final_reply)
-    except LineBotApiError as lbe:
-        logger.error(f"❌ LINE API Error: {lbe.status_code} {lbe.error.message}", exc_info=False)
-        try: line_bot_api.reply_message(reply_token, TextSendMessage(text="😥 LINE communication error."))
-        except: pass
-    except Exception as e:
-        logger.error(f"❌ Handler internal error: {e}", exc_info=True)
-        try: reply_with_quick_bar(reply_token, "😵‍💫 Unexpected error processing request.")
-        except Exception as reply_e: logger.error(f"❌ Failed to even send error reply: {reply_e}")
+    except LineBotApiError as lbe: logger.error(f"❌ LINE API Error: {lbe.status_code} {lbe.error.message}", exc_info=False); try: line_bot_api.reply_message(reply_token, TextSendMessage(text="😥 LINE communication error.")) except: pass
+    except Exception as e: logger.error(f"❌ Handler internal error: {e}", exc_info=True); try: reply_with_quick_bar(reply_token, "😵‍💫 Unexpected error processing request.") except Exception as reply_e: logger.error(f"❌ Failed to even send error reply: {reply_e}")
 
 @handler.add(PostbackEvent)
 def on_postback(event: PostbackEvent):
