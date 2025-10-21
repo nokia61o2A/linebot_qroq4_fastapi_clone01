@@ -1,4 +1,4 @@
-# app_fastapi.py (Version 2.0.7 - Correct Indentation)
+# app_fastapi.py (Version 2.0.7 - Uncompress normalize_ticker)
 # ========== 1) Imports ==========
 import os
 import re
@@ -127,7 +127,7 @@ async def lifespan(app: FastAPI):
     else: logger.warning("⚠️ Webhook 未更新：未設定 BASE_URL 或 CHANNEL_ACCESS_TOKEN (Mock 模式)")
     logger.info("Lifespan 啟動程序完成。"); yield; logger.info("應用程式關閉 (lifespan)...")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.7-final-indentation-fix") # --- 繁體中文解：更新版本號 ---
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="2.0.7-uncompress-normalize-ticker") # --- 繁體中文解：更新版本號 ---
 router = APIRouter()
 
 # ========== 4) Helpers (V2 SDK Style) ==========
@@ -186,49 +186,44 @@ def translate_text(text: str, target_lang_display: str) -> str:
 
 
 # ========== 6) 金融工具 ==========
-# ... (get_gold_analysis 與 v2.0.5 相同) ...
+# ... (get_gold_analysis, get_currency_analysis 與 v2.0.6 相同) ...
 def get_gold_analysis() -> str:
     logger.info("呼叫：get_gold_analysis()")
     try: r = requests.get(BOT_GOLD_URL, headers=DEFAULT_HEADERS, timeout=10); r.raise_for_status(); data = _parse_bot_gold_text(r.text); logger.debug(f"金價: {data}"); ts = data.get("listed_at") or "N/A"; sell, buy = data["sell_twd_per_g"], data["buy_twd_per_g"]; spread = sell - buy; bias = "盤整" if spread <= 30 else ("偏寬" if spread <= 60 else "價差大"); now = datetime.now().strftime("%H:%M"); report = (f"**金價({now})**\n賣: **{sell:,.0f}** | 買: **{buy:,.0f}** | 價差: {spread:,.0f} ({bias})\n掛牌: {ts}\n來源:台灣銀行"); logger.info("金價分析成功"); return report
     except Exception as e: logger.error(f"❌ 黃金分析失敗: {e}", exc_info=False); return "抱歉，目前無法取得黃金牌價 🙏"
 
-# --- 繁體中文解：[修正] 恢復 get_currency_analysis 的正確縮排 ---
 def get_currency_analysis(target_currency: str):
-    logger.info(f"呼叫：get_currency_analysis(target_currency={target_currency})")
+    logger.info(f"呼叫：get_currency_analysis({target_currency})")
     try:
-        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"
-        res = requests.get(url, timeout=10)
-        res.raise_for_status() # Raise exception for bad status codes
-        data = res.json()
-        logger.debug(f"匯率 API 回應: {data}")
+        url = f"https://open.er-api.com/v6/latest/{target_currency.upper()}"; res = requests.get(url, timeout=10); res.raise_for_status(); data = res.json(); logger.debug(f"匯率 API: {data}");
+        if data.get("result") != "success": error_msg = f"匯率 API 錯誤: {data.get('error-type','未知')}"; logger.error(error_msg); return error_msg
+        rate = data["rates"].get("TWD");
+        if rate is None: logger.error("匯率 API 回應中無 TWD"); return f"抱歉，API 無 TWD 匯率。"
+        report = f"即時：1 {target_currency.upper()} ≈ **{rate:.4f}** 新台幣"; logger.info("匯率分析成功"); return report
+    except requests.exceptions.RequestException as req_e: logger.error(f"❌ 匯率 API 請求失敗: {req_e}", exc_info=False); return "抱歉，無法連線至匯率伺服器。"
+    except Exception as e: logger.error(f"❌ 匯率分析未知錯誤: {e}", exc_info=True); return "抱歉，外匯資料暫無法取得。"
 
-        if data.get("result") != "success":
-            error_msg = f"匯率 API 錯誤: {data.get('error-type','未知錯誤')}"
-            logger.error(error_msg)
-            return error_msg
-
-        # ---- 這段移回 try 區塊內 ----
-        rate = data["rates"].get("TWD")
-        if rate is None:
-            logger.error("匯率 API 回應中無 TWD 資料")
-            return f"抱歉，API 回應中找不到 TWD 匯率。"
-
-        report = f"即時：1 {target_currency.upper()} ≈ **{rate:.4f}** 新台幣"
-        logger.info("匯率分析成功")
-        return report
-        # ---- try 區塊結束 ----
-
-    except requests.exceptions.RequestException as req_e:
-        logger.error(f"❌ 匯率 API 請求失敗: {req_e}", exc_info=False)
-        return "抱歉，無法連線至匯率伺服器。"
-    except Exception as e:
-        logger.error(f"❌ 匯率分析時發生未知錯誤: {e}", exc_info=True)
-        return "抱歉，外匯資料暫時無法取得。"
-
-# --- 股票相關函數 (與 v2.0.5 相同) ---
+# --- 股票相關函數 ---
 _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
-def normalize_ticker(t: str) -> Tuple[str, str, str, bool]: t = t.strip().upper(); logger.debug(f"正規化 ticker: {t}"); if t in ["台股大盤", "大盤"]: return "^TWII", "^TWII", "^TWII", True; if t in ["美股大盤", "美盤", "美股"]: return "^GSPC", "^GSPC", "^GSPC", True; if _TW_CODE_RE.match(t): return f"{t}.TW", t, t, False; if _US_CODE_RE.match(t) and t != "JPY": return t, t, t, False; logger.warning(f"無法識別 ticker: {t}"); return t, t, t, False
+
+# --- 繁體中文解：[修正] 將 normalize_ticker 恢復多行格式 ---
+def normalize_ticker(t: str) -> Tuple[str, str, str, bool]:
+    t = t.strip().upper()
+    logger.debug(f"正規化 ticker: {t}")
+    if t in ["台股大盤", "大盤"]:
+        return "^TWII", "^TWII", "^TWII", True
+    if t in ["美股大盤", "美盤", "美股"]:
+        return "^GSPC", "^GSPC", "^GSPC", True
+    if _TW_CODE_RE.match(t):
+        return f"{t}.TW", t, t, False
+    if _US_CODE_RE.match(t) and t != "JPY":
+        return t, t, t, False
+    # 如果以上都不匹配
+    logger.warning(f"無法明確識別 ticker: {t}")
+    return t, t, t, False # 返回原始值，預設非指數
+
+# ... (fetch_realtime_snapshot, load_stock_data, get_stock_name, get_stock_report 與 v2.0.6 相同) ...
 def fetch_realtime_snapshot(yf_symbol: str, yahoo_slug: str) -> dict:
     logger.debug(f"抓取快照 (yf: {yf_symbol}, slug: {yahoo_slug})")
     snap: dict = {"name": None, "now_price": None, "change": None, "currency": None, "close_time": None}
@@ -259,7 +254,6 @@ stock_data_df: Optional[pd.DataFrame] = None
 def load_stock_data() -> pd.DataFrame: global stock_data_df; if stock_data_df is None: try: stock_data_df = pd.read_csv('name_df.csv'); logger.info("✅ loaded name_df.csv") except FileNotFoundError: logger.error("❌ `name_df.csv` not found."); stock_data_df = pd.DataFrame(columns=['股號', '股名']); return stock_data_df
 def get_stock_name(stock_id: str) -> Optional[str]: df = load_stock_data(); res = df[df['股號'].astype(str).str.strip().str.upper() == str(stock_id).strip().upper()]; if not res.empty: name = res.iloc[0]['股名']; logger.debug(f"name_df lookup: {stock_id} -> {name}"); return name; logger.debug(f"name_df not found: {stock_id}"); return None
 def get_stock_report(user_input: str) -> str:
-    # ... (與 v2.0.5 相同) ...
     logger.info(f"呼叫：get_stock_report({user_input})"); yf_symbol, yahoo_slug, display_code, is_index = normalize_ticker(user_input); snapshot = fetch_realtime_snapshot(yf_symbol, yahoo_slug)
     price_data, news_data, value_part, dividend_part = "", "", "", ""
     if STOCK_ENABLED:
@@ -284,8 +278,9 @@ def get_stock_report(user_input: str) -> str:
     msgs = [{"role":"system","content":system_prompt}, {"role":"user","content":content_msg}]
     logger.info("呼叫 AI 股票分析..."); analysis_result = get_analysis_reply(msgs); logger.info("股票分析完成"); return analysis_result
 
+
 # ========== 7) 彩票分析 ==========
-# ... (與 v2.0.5 相同) ...
+# ... (與 v2.0.6 相同) ...
 def _lotto_fallback_scrape(kind: str) -> str:
     logger.warning(f"使用後備彩票爬蟲 for {kind}")
     try:
@@ -320,12 +315,12 @@ def get_lottery_analysis(lottery_type_input: str) -> str:
     logger.info("呼叫 AI 彩票分析..."); analysis_result = get_analysis_reply(messages); logger.info("彩票分析完成"); return analysis_result
 
 # ========== 8) 對話與翻譯 ==========
-# ... (與 v2.0.5 相同) ...
+# ... (與 v2.0.6 相同) ...
 def set_user_persona(chat_id: str, key: str): logger.debug(f"Set persona: {chat_id[:10]} -> {key}"); key = random.choice(list(PERSONAS.keys())) if key == "random" else key; key = "sweet" if key not in PERSONAS else key; user_persona[chat_id] = key; logger.info(f"Persona set: {chat_id[:10]} -> {key}"); return key
 def build_persona_prompt(chat_id: str, sentiment: str) -> str: key = user_persona.get(chat_id, "sweet"); p = PERSONAS[key]; prompt = (f"你是「{p['title']}」。風格：{p['style']}\n情緒：{sentiment}；調整語氣（開心→同樂；難過/生氣→共情安撫；中性→自然）。\n用繁體中文，精煉自然，帶少量表情 {p['emoji']}。"); logger.debug(f"Persona prompt (key={key}, sent={sentiment}): {prompt[:50]}..."); return prompt
 
 # ========== 9) LINE Handlers (V2 SDK Style) ==========
-# ... (與 v2.0.5 相同) ...
+# ... (與 v2.0.6 相同) ...
 @handler.add(MessageEvent, message=TextMessage)
 def on_message_text(event: MessageEvent):
     chat_id = get_chat_id(event); msg_raw = event.message.text.strip(); reply_token = event.reply_token; is_group = not isinstance(event.source, SourceUser)
@@ -351,14 +346,8 @@ def on_message_text(event: MessageEvent):
         if msg in PERSONA_ALIAS: logger.info(f"Route: Set Persona ({msg})"); key = set_user_persona(chat_id, PERSONA_ALIAS[msg]); p = PERSONAS[user_persona[chat_id]]; txt = f"💖 切換人設：{p['title']}\n{p['greetings']}"; return reply_with_quick_bar(reply_token, txt)
         if chat_id in translation_states: logger.info(f"Route: Translate content (-> {translation_states[chat_id]})"); out = translate_text(msg, translation_states[chat_id]); return reply_with_quick_bar(reply_token, out)
         logger.info("Route: General Chat"); history = conversation_history.get(chat_id, []); logger.debug("Analyze sentiment..."); sentiment = analyze_sentiment(msg); logger.debug("Build prompt..."); sys_prompt = build_persona_prompt(chat_id, sentiment); messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":msg}]; logger.info("Call AI chat..."); final_reply = get_analysis_reply(messages); history.extend([{"role":"user","content":msg}, {"role":"assistant","content":final_reply}]); conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]; logger.debug("History updated"); return reply_with_quick_bar(reply_token, final_reply)
-    except LineBotApiError as lbe:
-        logger.error(f"❌ LINE API Error: {lbe.status_code} {lbe.error.message}", exc_info=False)
-        try: line_bot_api.reply_message(reply_token, TextSendMessage(text="😥 LINE communication error."))
-        except: pass
-    except Exception as e:
-        logger.error(f"❌ Handler internal error: {e}", exc_info=True)
-        try: reply_with_quick_bar(reply_token, "😵‍💫 Unexpected error processing request.")
-        except Exception as reply_e: logger.error(f"❌ Failed to even send error reply: {reply_e}")
+    except LineBotApiError as lbe: logger.error(f"❌ LINE API Error: {lbe.status_code} {lbe.error.message}", exc_info=False); try: line_bot_api.reply_message(reply_token, TextSendMessage(text="😥 LINE communication error.")) except: pass
+    except Exception as e: logger.error(f"❌ Handler internal error: {e}", exc_info=True); try: reply_with_quick_bar(reply_token, "😵‍💫 Unexpected error processing request.") except Exception as reply_e: logger.error(f"❌ Failed to even send error reply: {reply_e}")
 
 @handler.add(PostbackEvent)
 def on_postback(event: PostbackEvent):
@@ -374,7 +363,7 @@ def on_postback(event: PostbackEvent):
 def is_stock_query(text: str) -> bool: t = text.strip().upper(); return t in ["台股大盤", "大盤", "美股大盤", "美盤", "美股"] or bool(_TW_CODE_RE.match(t)) or (bool(_US_CODE_RE.match(t)) and t not in ["JPY"])
 
 # ========== 10) FastAPI Routes ==========
-# ... (與 v2.0.5 相同) ...
+# ... (與 v2.0.6 相同) ...
 @router.post("/callback")
 async def callback(request: Request):
     logger.info("Callback V2 received"); signature = request.headers.get("X-Line-Signature", ""); body = await request.body(); body_decoded = body.decode("utf-8"); logger.debug(f"Sig: {signature[:10]}..., Body: {len(body_decoded)} bytes")
