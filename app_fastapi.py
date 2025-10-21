@@ -14,7 +14,11 @@ from fastapi.routing import APIRouter
 from contextlib import asynccontextmanager
 import uvicorn
 from linebot.exceptions import InvalidSignatureError
-from linebot.v3.messaging import MessagingApi, ReplyMessageRequest, TextMessage, PushMessageRequest  # v3 Messaging, #-- 新增 PushMessageRequest：用於回覆 token 失效時的備援推播 -- 
+# --- 繁體中文解：[修正] 匯入 V3 所需的 Configuration 和 ApiClient ---
+from linebot.v3.messaging import (
+    MessagingApi, ReplyMessageRequest, TextMessage, PushMessageRequest,
+    Configuration, ApiClient
+)
 from linebot.v3.webhook import WebhookParser  # v3 Parser
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, PostbackEvent  # v3 Events
 import openai
@@ -30,7 +34,6 @@ PERSONAS = {
 }  # 預設人設
 user_persona = {}  # 每個聊天的人設字典
 logger = logging.getLogger(__name__)
-# --- 繁體中文解：設定日誌等級為 INFO，這樣 logger.info() 和 logger.error() 才會顯示在 Render.com 的日誌中 ---
 logging.basicConfig(level=logging.INFO)
 TRANSLATE_CMD = re.compile(r'^翻譯\s*(.*)$')  # 翻譯指令正則
 INLINE_TRANSLATE = re.compile(r'^(en|ja|zh|英文|日文|中文)\s+(.+)$')  # 內聯翻譯正則
@@ -42,28 +45,26 @@ GROQ_OK = False
 OPENAI_LAST_REASON = "uninitialized"
 GROQ_LAST_REASON = "uninitialized"
 DISABLE_GROQ = os.getenv("DISABLE_GROQ", "false").lower() == "true"
-
-# --- 繁體中文解：請檢查 Render.com 上的 GROQ_API_KEY 是否已正確設定 ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# --- 繁體中文解：請檢查 Render.com 上的 OPENAI_API_KEY 是否正確。之前的日誌顯示 401 錯誤，表示金鑰無效。 ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# --- 繁體中文解：**關鍵修正點**：Render.com 上的環境變數名稱 (KEY) 必須是「CHANNEL_TOKEN」，而不是「CHANNEL_ACCESS_TOKEN」，才能被這行程式碼正確讀取。 ---
+# --- 繁體中文解：請再次確認 Render.com 上的 KEY 是 CHANNEL_TOKEN ---
 CHANNEL_TOKEN = os.getenv("CHANNEL_TOKEN", "dummy")
-# --- 繁體中文解：請檢查 Render.com 上的 CHANNEL_SECRET 是否已正確設定 ---
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "dummy")
-# --- 繁體中文解：請檢查 Render.com 上的 BASE_URL 是否已正確設定 (例如: https://linebot-qroq4-fastapi-di-pei-aijiang.onrender.com) ---
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
-# LINE Bot 客戶端（v3，mock 若無 token）
-# --- 繁體中文解：如果 CHANNEL_TOKEN 保持 "dummy" (因為環境變數名稱錯誤)，line_bot_api 會是 None，導致 Mock 模式 ---
-line_bot_api = MessagingApi(CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
-parser = WebhookParser(CHANNEL_TOKEN, CHANNEL_SECRET) if CHANNEL_TOKEN != "dummy" else None
+# --- 繁體中文解：[修正] line_bot_api 改為在各函數內部動態建立 ---
+# --- 繁體中文解：[修正] 建立 V3 所需的全域 Configuration 物件 ---
+configuration = Configuration(access_token=CHANNEL_TOKEN) if CHANNEL_TOKEN != "dummy" else None
+
+# --- 繁體中文解：[修正] WebhookParser 在 V3 只需要 CHANNEL_SECRET。
+# --- 繁體中文解：並檢查 CHANNEL_SECRET 是否為 dummy ---
+parser = WebhookParser(CHANNEL_SECRET) if CHANNEL_SECRET != "dummy" else None
 
 # Mock 客戶端
 openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 async_groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-GROQ_MODEL_FALLBACK = "llama-3.1-8b-instant"  #-- 更新模型：取代停用版本 llama3-8b-8192，解決 startup_check_failed 錯誤 -- 
+GROQ_MODEL_FALLBACK = "llama-3.1-8b-instant"
 
 # Mock 函數（之後替換為真實實作）
 def get_chat_id(event): 
@@ -81,34 +82,43 @@ def _tstate_clear(chat_id):
     logger.debug(f"[翻譯狀態] 清除 {chat_id[:10]}...")
     pass
 
-async def reply_text_with_tts_and_extras(reply_tok, text, event=None):  #-- 新增 event 參數：用於推播備援時取得 chat_id --
-    if line_bot_api is not None:
+async def reply_text_with_tts_and_extras(reply_tok, text, event=None):
+    # --- 繁體中文解：[修正] 檢查 V3 configuration 物件是否存在 ---
+    if configuration is not None:
         try:
-            # v3 回覆：使用 ReplyMessageRequest
-            # --- 繁體中文解：這是在 Render.com 日誌中顯示「準備回覆」的訊息 ---
-            logger.debug(f"準備回覆 (reply_token: {reply_tok[:10]}...): {text[:50]}...")
-            request = ReplyMessageRequest(reply_token=reply_tok, messages=[TextMessage(text=text)])
-            await line_bot_api.reply_message(request)
-            logger.debug(f"已成功回覆文字：{text[:50]}...")
+            # --- 繁體中文解：[修正] 使用 with...as... 語法動態建立 V3 ApiClient 和 MessagingApi ---
+            async with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                logger.debug(f"準備回覆 (reply_token: {reply_tok[:10]}...): {text[:50]}...")
+                request = ReplyMessageRequest(reply_token=reply_tok, messages=[TextMessage(text=text)])
+                # --- 繁體中文解：[修正] V3 的 API 呼叫現在是異步(async)的，所以使用 await ---
+                await line_bot_api.reply_message(request)
+                logger.debug(f"已成功回覆文字：{text[:50]}...")
         except Exception as e:
-            # --- 繁體中文解：這是在 Render.com 日誌中顯示「回覆失敗」的錯誤訊息 ---
-            logger.error(f"回覆訊息失敗 (Token: {reply_tok[:10]}...)，嘗試使用 push：{e}")  #-- 新增推播備援邏輯：reply_token 失效時自動推播，避免 silent fail --
-            if event:  # 用 push 備援
-                chat_id = get_chat_id(event)
-                logger.debug(f"推播備援：準備推播至 {chat_id[:20]}...")
-                push_request = PushMessageRequest(to=chat_id, messages=[TextMessage(text=text)])
-                await line_bot_api.push_message(push_request)
-                logger.info(f"推播備援成功至 {chat_id[:20]}...")
+            logger.error(f"回覆訊息失敗 (Token: {reply_tok[:10]}...)，嘗試使用 push：{e}")
+            if event:
+                try:
+                    # --- 繁體中文解：[修正] 推播備援也需要動態建立 V3 ApiClient ---
+                    async with ApiClient(configuration) as api_client:
+                        line_bot_api = MessagingApi(api_client)
+                        chat_id = get_chat_id(event)
+                        logger.debug(f"推播備援：準備推播至 {chat_id[:20]}...")
+                        push_request = PushMessageRequest(to=chat_id, messages=[TextMessage(text=text)])
+                        await line_bot_api.push_message(push_request)
+                        logger.info(f"推播備援成功至 {chat_id[:20]}...")
+                except Exception as push_e:
+                    logger.error(f"推播備援失敗：{push_e}")
             else:
                 logger.error("推播備援失敗：缺少 event 參數")
     else:
-        # --- 繁體中文解：如果 line_bot_api 是 None (Mock 模式)，日誌會印在這裡 (通常是本地端) ---
         print(f"[MOCK] 回覆：{text}")
 
 async def reply_menu_with_hint(reply_tok, menu, hint=""): 
-    if line_bot_api is not None:
+    # --- 繁體中文解：[修正] 檢查 V3 configuration 物件 ---
+    if configuration is not None:
         # 選單需自訂（QuickReply 在 v3 為 FlexMessage 或 other）
         logger.info(f"準備回覆選單 (Token: {reply_tok[:10]}...)")
+        # --- 繁體中文解：[修正] 這裡未來實作時，也需要使用 with ApiClient... 方式呼叫 line_bot_api ---
         print("已發送選單（v3 需調整）")
     else:
         print("[MOCK] 已發送選單")
@@ -184,7 +194,6 @@ def get_analysis_reply(messages):
     return "模擬分析：建議買進，目標價 110 元"
 
 def log_provider_status(): 
-    # --- 繁體中文解：這是在 Render.com 日誌中顯示 AI 供應商狀態的訊息 ---
     logger.info(f"供應商狀態：OpenAI={OPENAI_OK}, Groq={GROQ_OK}")
 
 # ── 人設與 Prompt 建構 ──────────────────────────────────────────────────────
@@ -196,8 +205,7 @@ def set_user_persona(chat_id: str, key: str):
     if key_mapped not in PERSONAS: 
         key_mapped = "sweet"
     user_persona[chat_id] = key_mapped
-    # --- 繁體中文解：這是在 Render.com 日誌中顯示「人設切換」的訊息 ---
-    logger.info(f"人設切換：{chat_id[:20]}... -> {PERSONAS[key_mapped]['title']}") # (原為 debug，提升為 info)
+    logger.info(f"人設切換：{chat_id[:20]}... -> {PERSONAS[key_mapped]['title']}")
     return key_mapped
 
 def build_persona_prompt(chat_id: str, sentiment: str) -> str:
@@ -442,7 +450,6 @@ async def handle_text_message(event: MessageEvent):
     msg_raw = (event.message.text or "").strip()
     reply_tok = event.reply_token
     
-    # --- 繁體中文解：這是在 Render.com 日誌中顯示「收到文字訊息」的紀錄 ---
     logger.info(f"收到文字訊息：{msg_raw[:50]}... (chat_id: {chat_id[:20]}..., reply_token: {reply_tok[:10]}...)")
     
     if not msg_raw: 
@@ -450,9 +457,14 @@ async def handle_text_message(event: MessageEvent):
         return
     
     try:
-        if line_bot_api is not None:
-            bot_info = line_bot_api.get_bot_info()
-            bot_name = bot_info.display_name
+        bot_name = "AI 助手"
+        # --- 繁體中文解：[修正] 檢查 V3 configuration 物件 ---
+        if configuration is not None:
+            # --- 繁體中文解：[修正] 使用 with...as... 語法動態建立 V3 ApiClient 和 MessagingApi ---
+            async with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                bot_info = await line_bot_api.get_bot_info()
+                bot_name = bot_info.display_name
         else:
             bot_name = "AI 助手 (MOCK)"
         logger.debug(f"Bot 名稱：{bot_name}")
@@ -472,12 +484,11 @@ async def handle_text_message(event: MessageEvent):
     m = TRANSLATE_CMD.match(msg)
     if m:
         lang_token = m.group(1)
-        # --- 繁體中文解：這是在 Render.com 日誌中顯示進入哪一個「if 分支」---
         logger.info(f"分支：匹配到翻譯指令 (TRANSLATE_CMD): {lang_token}")
         rev = {"english":"英文","japanese":"日文","korean":"韓文","vietnamese":"越南文","繁體中文":"繁體中文","中文":"繁體中文"}
         lang_display = rev.get(lang_token.lower(), lang_token)
         await _tstate_set(chat_id, lang_display)
-        await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。", event=event)  #-- 新增 event=event：傳遞給回覆函數以支援推播備援 --
+        await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang_display}，請直接輸入要翻的內容。", event=event)
         logger.info(f"開啟翻譯模式：{lang_display}")
         return
     
@@ -486,11 +497,11 @@ async def handle_text_message(event: MessageEvent):
         logger.info(f"分支：匹配到翻譯切換 (翻譯->): {lang}")
         if lang=="結束":
             await _tstate_clear(chat_id)
-            await reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, "✅ 已結束翻譯模式", event=event)
             logger.info(f"結束翻譯模式：{chat_id}")
         else:
             await _tstate_set(chat_id, lang)
-            await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, f"🌐 已開啟翻譯 → {lang}，請直接輸入要翻的內容。", event=event)
             logger.info(f"開啟翻譯模式：{lang}")
         return
     
@@ -500,14 +511,14 @@ async def handle_text_message(event: MessageEvent):
         logger.info(f"分支：匹配到內聯翻譯 (INLINE_TRANSLATE): {lang_key} <- {text_to_translate[:30]}...")
         lang_display = {"en":"英文","eng":"英文","英文":"英文","ja":"日文","jp":"日文","日文":"日文","zh":"繁體中文","繁中":"繁體中文","中文":"繁體中文"}.get(lang_key,"英文")
         out = await translate_text(text_to_translate, lang_display)
-        await reply_text_with_tts_and_extras(reply_tok, out, event=event)  #-- 新增 event=event --
+        await reply_text_with_tts_and_extras(reply_tok, out, event=event)
         return
 
     current_lang = _tstate_get(chat_id)
     if current_lang:
         logger.info(f"分支：處於翻譯模式 ({current_lang})")
         out = await translate_text(msg, current_lang)
-        await reply_text_with_tts_and_extras(reply_tok, out, event=event)  #-- 新增 event=event --
+        await reply_text_with_tts_and_extras(reply_tok, out, event=event)
         return
 
     low = msg.lower()
@@ -520,7 +531,7 @@ async def handle_text_message(event: MessageEvent):
         logger.info(f"分支：匹配到人設切換 ({msg})")
         key = set_user_persona(chat_id, msg)
         p = PERSONAS[key]
-        await reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}", event=event)  #-- 新增 event=event --
+        await reply_text_with_tts_and_extras(reply_tok, f"已切換為「{p['title']}」模式～{p['emoji']}", event=event)
         return
 
     if msg in ("金價","黃金"):
@@ -536,10 +547,10 @@ async def handle_text_message(event: MessageEvent):
                    f"- 買進(1g)：{buy:,.0f} 元\n"
                    f"- 價差：{spread:,.0f} 元\n"
                    f"來源：{BOT_GOLD_URL}")
-            await reply_text_with_tts_and_extras(reply_tok, txt, event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, txt, event=event)
         except Exception as e:
             logger.error(f"金價查詢失敗：{e}")
-            await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價，請稍後再試。", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, "抱歉，目前無法取得金價，請稍後再試。", event=event)
         return
 
     if msg in ("大樂透","威力彩","539","今彩539","雙贏彩","3星彩","三星彩","4星彩","38樂合彩","39樂合彩","49樂合彩","運彩"):
@@ -547,11 +558,11 @@ async def handle_text_message(event: MessageEvent):
         try:
             logger.debug(f"呼叫：run_in_threadpool(run_lottery_analysis, {msg})")
             report = await run_in_threadpool(run_lottery_analysis, msg)
-            await reply_text_with_tts_and_extras(reply_tok, report, event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, report, event=event)
             logger.info(f"彩票回覆成功：{msg}")
         except Exception as e:
             logger.error(f"彩票分析失敗: {e}", exc_info=True)
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，分析 {msg} 時發生錯誤：{e}", event=event)
         return
 
     if _is_fx_query(msg):
@@ -564,10 +575,10 @@ async def handle_text_message(event: MessageEvent):
             last, chg, ts, df = fetch_fx_quote_yf(symbol)
             logger.debug("呼叫：render_fx_report()")
             report = render_fx_report(base, quote, link, last, chg, ts, df)
-            await reply_text_with_tts_and_extras(reply_tok, report, event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, report, event=event)
         except Exception as e:
             logger.error(f"外匯查詢失敗：{e}")
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 匯率時發生錯誤：{e}", event=event)
         return
 
     if _is_stock_query(msg):
@@ -579,10 +590,10 @@ async def handle_text_message(event: MessageEvent):
             content_block, _ = await run_in_threadpool(build_stock_prompt_block, ticker, name_hint)
             logger.debug(f"呼叫：run_in_threadpool(render_stock_report, {ticker}, ...)")
             report = await run_in_threadpool(render_stock_report, ticker, link, content_block)
-            await reply_text_with_tts_and_extras(reply_tok, report, event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, report, event=event)
         except Exception as e:
             logger.error(f"股票查詢失敗：{e}")
-            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, f"抱歉，取得 {msg} 分析時發生錯誤：{e}\n請稍後再試或換個代碼。", event=event)
         return
 
     logger.info(f"分支：進入一般聊天模式 (Groq/OpenAI)")
@@ -601,47 +612,50 @@ async def handle_text_message(event: MessageEvent):
         conversation_history[chat_id] = history[-MAX_HISTORY_LEN*2:]
         logger.debug("對話歷史已儲存")
         
-        await reply_text_with_tts_and_extras(reply_tok, final_reply, event=event)  #-- 新增 event=event --
+        await reply_text_with_tts_and_extras(reply_tok, final_reply, event=event)
     except Exception as e:
         logger.error(f"一般聊天失敗：{e}")
-        await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！", event=event)  #-- 新增 event=event --
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉我剛剛走神了 😅 再說一次讓我補上！", event=event)
 
 async def handle_audio_message(event: MessageEvent):
     """處理語音訊息（統一走帶 Quick Reply 的回覆，底部顯示）"""
     reply_tok = event.reply_token
-    # --- 繁體中文解：這是在 Render.com 日誌中顯示「收到語音訊息」的紀錄 ---
     logger.info(f"收到語音訊息：{event.message.id} (reply_token: {reply_tok[:10]}...)")
     
     try:
-        if line_bot_api is None:
+        # --- 繁體中文解：[修正] 檢查 V3 configuration 物件 ---
+        if configuration is None:
             logger.warning("語音處理：處於 Mock 模式")
-            await reply_text_with_tts_and_extras(reply_tok, "🎧 [MOCK] 語音收到！目前語音轉文字失敗，請稍後再試。", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, "🎧 [MOCK] 語音收到！目前語音轉文字失敗，請稍後再試。", event=event)
             return
         
-        logger.debug(f"呼叫：line_bot_api.get_message_content({event.message.id})")
-        response = await line_bot_api.get_message_content(event.message.id)
-        audio_in = await response.content.read()
-        logger.debug(f"取得語音資料，長度：{len(audio_in)}")
+        audio_in = None
+        # --- 繁體中文解：[修正] 使用 with...as... 語法動態建立 V3 ApiClient 和 MessagingApi ---
+        async with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            logger.debug(f"呼叫：line_bot_api.get_message_content({event.message.id})")
+            response = await line_bot_api.get_message_content(event.message.id)
+            audio_in = await response.content.read()
+            logger.debug(f"取得語音資料，長度：{len(audio_in)}")
         
         logger.debug("呼叫：speech_to_text_async()")
         text = await speech_to_text_async(audio_in)
         
         if not text:
             logger.warning("語音轉文字失敗 (回傳空值)")
-            await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。", event=event)  #-- 新增 event=event --
+            await reply_text_with_tts_and_extras(reply_tok, "🎧 語音收到！目前語音轉文字失敗，請稍後再試。", event=event)
             return
         
         logger.info(f"語音轉文字成功：{text[:50]}...")
-        await reply_text_with_tts_and_extras(reply_tok, f"🎧 我聽到了：\n{text}", event=event)  #-- 新增 event=event --
+        await reply_text_with_tts_and_extras(reply_tok, f"🎧 我聽到了：\n{text}", event=event)
     except Exception as e:
         logger.error(f"語音處理失敗: {e}", exc_info=True)
-        await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。", event=event)  #-- 新增 event=event --
+        await reply_text_with_tts_and_extras(reply_tok, "抱歉，語音處理失敗，請稍後再試。", event=event)
 
 async def handle_postback(event: PostbackEvent):
     """處理 Postback 事件（走選單回覆，確保 Quick Reply 底部）"""
     data = event.postback.data or ""
     reply_tok = event.reply_token
-    # --- 繁體中文解：這是在 Render.com 日誌中顯示「收到 Postback」的紀錄 ---
     logger.info(f"收到 Postback 事件：{data} (reply_token: {reply_tok[:10]}...)")
     
     if data.startswith("menu:"):
@@ -674,8 +688,6 @@ async def handle_events(events):
                 logger.debug(f"事件類型：未處理的 WebhookEvent ({type(event)})")
         except Exception as e:
             logger.error(f"處理事件 {i+1} (類型: {type(event)}) 時發生頂層錯誤：{e}", exc_info=True)
-            # 確保即使單一事件失敗，也不會中斷整個 batch
-            # 這裡不回覆，因為 reply_token 可能已失效或不適用
             pass
     logger.info(f"--- 所有 {len(events)} 個事件處理完畢 ---")
 
@@ -689,12 +701,11 @@ async def lifespan(app: FastAPI):
     2) 啟動健康檢查：OpenAI / Groq
     """
     global OPENAI_OK, GROQ_OK, OPENAI_LAST_REASON, GROQ_LAST_REASON
-    # --- 繁體中文解：這是在 Render.com 日誌中顯示「應用程式啟動」的訊息 ---
     logger.info("應用程式啟動 (lifespan)...")
 
     # 1) LINE Webhook（官方域名）
-    # --- 繁體中文解：檢查 line_bot_api 是否為 None (Mock 模式) ---
-    if BASE_URL and line_bot_api is not None:
+    # --- 繁體中文解：[修正] 檢查 BASE_URL 是否存在，以及 CHANNEL_TOKEN 是否有設定 (不再檢查 line_bot_api) ---
+    if BASE_URL and CHANNEL_TOKEN != "dummy":
         logger.info(f"準備更新 Webhook 至：{BASE_URL}/callback")
         try:
             async with httpx.AsyncClient(timeout=10.0) as c:
@@ -702,13 +713,12 @@ async def lifespan(app: FastAPI):
                 payload={"endpoint":f"{BASE_URL}/callback"}
                 r = await c.put("https://api.line.me/v2/bot/channel/webhook/endpoint", headers=headers, json=payload)
                 r.raise_for_status()
-                # --- 繁體中文解：若成功，日誌會顯示這個 ---
                 logger.info("✅ Webhook 更新成功（api.line.me=%s）", r.status_code)
         except Exception as e:
             logger.warning(f"⚠️ Webhook 更新失敗（api.line.me）：{e}")
     else:
-        # --- 繁體中文解：若失敗 (例如 CHANNEL_TOKEN 設錯)，日誌會顯示這個 ---
-        logger.warning("Webhook 未更新：未設定 BASE_URL 或 line_bot_api (Mock 模式)")
+        # --- 繁體中文解：[修正] 更新 Mock 模式的警告訊息 ---
+        logger.warning("Webhook 未更新：未設定 BASE_URL 或 CHANNEL_TOKEN (Mock 模式)")
 
 
     # 2) OpenAI 健檢
@@ -722,7 +732,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             OPENAI_OK = False
             OPENAI_LAST_REASON = f"startup_check_failed: {e}"
-            # --- 繁體中文解：這就是你日誌中看到的 OpenAI 401 錯誤訊息來源 ---
             logger.error("❌ OpenAI 健檢失敗：%s", e)
     else:
         OPENAI_OK = False
@@ -769,15 +778,15 @@ async def lifespan(app: FastAPI):
     # (關閉時執行的程式碼)
     logger.info("應用程式關閉 (lifespan)...")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.14-debug")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="1.5.15-v3-fix") # --- 繁體中文解：更新版本號 ---
 router = APIRouter()
 
 @router.post("/callback")
 async def callback(request: Request):
-    # --- 繁體中文解：這是在 Render.com 日誌中顯示「LINE 伺服器來敲門」的紀錄 ---
     logger.info("收到 /callback 請求")
+    # --- 繁體中文解：[修正] 檢查 parser 物件是否存在 ---
     if parser is None:
-        logger.debug("Callback：處於 Mock 模式，無 parser")
+        logger.error("Callback：處於 Mock 模式 (parser 為 None)，請檢查 CHANNEL_SECRET 環境變數。")
         return JSONResponse({"status": "mock mode, no parser"}, status_code=200)
     
     # 獲取簽章和內容
@@ -792,8 +801,7 @@ async def callback(request: Request):
         await handle_events(events)
         logger.info(f"成功處理完 {len(events)} 個事件")
     except InvalidSignatureError:
-        # --- 繁體中文解：如果 CHANNEL_SECRET 設錯，日誌會顯示這個 ---
-        logger.error(f"Invalid signature 驗證失敗 (Signature: {signature})")
+        logger.error(f"Invalid signature 驗證失敗 (Signature: {signature})，請檢查 CHANNEL_SECRET 是否正確。")
         raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
         logger.error(f"Callback 處理事件時發生未預期錯誤：{e}", exc_info=True)
@@ -808,8 +816,6 @@ async def root():
 
 @router.get("/healthz")
 async def healthz(): 
-    # (此日誌過於頻繁，通常保持安靜，Render 會自己打)
-    # logger.debug("收到 /healthz 請求")
     return PlainTextResponse("ok", status_code=200)
 
 # === [ADDED] 供應商健康檢視 API ===
