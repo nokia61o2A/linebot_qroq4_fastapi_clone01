@@ -1,12 +1,13 @@
-# app_fastapi.py  (Full)
-# ============================================
+# app_fastapi.py  (Full – TTS language badge & stable mp3 upload)
+# ================================================================
 # - LINE Bot SDK v2（同步）
 # - taiwanlottery 外部套件（失敗即官網備援）
-# - 真實資料來源（無模擬）
-# - TTS：OpenAI -> gTTS，自動偵測 401 後停用 OpenAI
+# - 金價 / 外匯 / 股票：真實抓取
+# - TTS：OpenAI(mp3) → gTTS(zh-tw)，自動偵錯切換；Cloudinary raw 上傳
+# - TTS 開啟時，每則回覆自動附「語音標籤（語言/引擎）」小行
 # - 每則訊息固定帶 Quick Reply（含 TTS ON/OFF）
 # - 翻譯模式：sender 顯示「翻譯模式(中->英)」
-# ============================================
+# ================================================================
 
 import os
 import re
@@ -29,7 +30,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
-    MessageEvent, TextMessage, AudioMessage, TextSendMessage, AudioSendMessage,
+    MessageEvent, TextMessage, TextSendMessage, AudioSendMessage,
     SourceUser, SourceGroup, SourceRoom,
     QuickReply, QuickReplyButton, MessageAction, PostbackAction,
     PostbackEvent, FlexSendMessage, BubbleContainer, BoxComponent,
@@ -54,6 +55,7 @@ CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")  # 可接代理，如 https://free.v36.cm
 CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 
 required = {
@@ -71,24 +73,22 @@ line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 # ---------- AI ----------
-sync_groq = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+# ＊Groq：更新到較新的模型，避免退役
+GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
+GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
+sync_groq = Groq(api_key=GROQ_API_KEY)
+
 openai_client = None
 if OPENAI_API_KEY:
     try:
-        openai_base = os.getenv("OPENAI_API_BASE")
-        if openai_base:
-            openai_client = openai.OpenAI(api_key=OPENAI_API_KEY, base_url=openai_base)
-            logger.info(f"✅ OpenAI Client (base={openai_base})")
+        if OPENAI_API_BASE:
+            openai_client = openai.OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+            logger.info(f"✅ OpenAI Client (base={OPENAI_API_BASE})")
         else:
             openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
             logger.info("✅ OpenAI Client (official)")
     except Exception as e:
         logger.warning(f"OpenAI init failed: {e}")
-else:
-    logger.info("No OPENAI_API_KEY; TTS will use gTTS.")
-
-GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-70b-versatile")
-GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 
 # ---------- Cloudinary ----------
 CLOUDINARY_CONFIGURED = False
@@ -98,10 +98,13 @@ if CLOUDINARY_URL:
         import re as _re
         import cloudinary
         import cloudinary.uploader
-        cloud_name = _re.search(r"@(.+)", CLOUDINARY_URL).group(1)
-        api_key = _re.search(r"//(\d+):", CLOUDINARY_URL).group(1)
-        api_secret = _re.search(r":([A-Za-z0-9_-]+)@", CLOUDINARY_URL).group(1)
-        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret)
+        m = _re.search(r"cloudinary://(?P<key>[^:]+):(?P<secret>[^@]+)@(?P<name>.+)", CLOUDINARY_URL)
+        cloudinary.config(
+            cloud_name=m.group("name"),
+            api_key=m.group("key"),
+            api_secret=m.group("secret"),
+            secure=True
+        )
         cloudinary_uploader = cloudinary.uploader
         CLOUDINARY_CONFIGURED = True
         logger.info("✅ Cloudinary 配置成功")
@@ -111,15 +114,15 @@ if CLOUDINARY_URL:
 # ---------- taiwanlottery ----------
 LOTTERY_ENABLED = True
 try:
-    from TaiwanLottery import TaiwanLotteryCrawler  # 外部套件
+    from TaiwanLottery import TaiwanLotteryCrawler
     lottery_crawler = TaiwanLotteryCrawler()
     logger.info("✅ taiwanlottery 套件已載入")
 except Exception as e:
-    logger.error(f"❌ 無法載入 taiwanlottery：{e}")
     LOTTERY_ENABLED = False
     lottery_crawler = None
+    logger.error(f"❌ 無法載入 taiwanlottery：{e}")
 
-# ---------- 自家股票模組（若無就弱化） ----------
+# ---------- 股票模組（若不存在則退化） ----------
 STOCK_ENABLED = True
 try:
     from my_commands.stock.stock_price import stock_price
@@ -129,8 +132,8 @@ try:
     from my_commands.stock.YahooStock import YahooStock
     logger.info("✅ 股票模組載入")
 except Exception as e:
-    logger.error(f"⚠️ 股票模組載入失敗：{e}")
     STOCK_ENABLED = False
+    logger.error(f"⚠️ 股票模組載入失敗：{e}")
 
     def stock_price(id): return pd.DataFrame()
     def stock_news(hint): return ["（股票新聞模組未載入）"]
@@ -147,7 +150,7 @@ except Exception as e:
 # ---------- 狀態 ----------
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY_LEN = 10
-translation_states: Dict[str, str] = {}          # chat_id -> 目標語言顯示（例如：英文）
+translation_states: Dict[str, str] = {}          # chat_id -> 目標語言（顯示名）
 tts_switch: Dict[str, bool] = {}                 # chat_id -> True/False
 _DEFAULT_TTS = True
 
@@ -161,7 +164,8 @@ user_persona: Dict[str, str] = {}
 PERSONA_ALIAS = {"甜":"sweet","鹹":"salty","萌":"moe","酷":"cool","random":"random"}
 
 LANGUAGE_MAP = {
-    "英文":"English","日文":"Japanese","韓文":"Korean","越南文":"Vietnamese","繁體中文":"Traditional Chinese","中文":"Traditional Chinese"
+    "英文":"English","日文":"Japanese","韓文":"Korean","越南文":"Vietnamese",
+    "繁體中文":"Traditional Chinese","中文":"Traditional Chinese"
 }
 
 # ---------- 常數 ----------
@@ -169,6 +173,10 @@ DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 }
 BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
+TTS_LANG = "zh-tw"        # gTTS 語言碼
+TTS_ENGINE_LABEL_OPENAI = "OpenAI"
+TTS_ENGINE_LABEL_GTTS   = "gTTS"
+TTS_OUTPUT_FORMAT = "mp3"
 
 _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
@@ -182,7 +190,6 @@ async def lifespan(app: FastAPI):
             async with httpx.AsyncClient() as c:
                 headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
                 payload = {"endpoint": f"{BASE_URL}/callback"}
-                # 只需要打官方端點
                 r = await c.put("https://api.line.me/v2/bot/channel/webhook/endpoint",
                                 headers=headers, json=payload, timeout=10.0)
                 r.raise_for_status()
@@ -192,10 +199,10 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("👋 應用關閉")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.0.0")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.1.0")
 router = APIRouter()
 
-# =============== 小工具 ===============
+# =================== Helpers ===================
 def get_chat_id(event: MessageEvent) -> str:
     if isinstance(event.source, SourceGroup): return event.source.group_id
     if isinstance(event.source, SourceRoom): return event.source.room_id
@@ -301,19 +308,19 @@ def is_stock_query(text: str) -> bool:
         or (bool(_US_CODE_RE.match(t)) and t not in ["JPY"])
     )
 
-# =============== AI ===============
+# =================== AI ===================
 def get_analysis_reply(messages: List[dict]) -> str:
     if openai_client:
         try:
             resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini", messages=messages, temperature=0.7, max_tokens=1500
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.7,
+                max_tokens=1500,
             )
             return resp.choices[0].message.content
         except Exception as e:
             logger.warning(f"OpenAI 失敗：{e}")
-
-    if not sync_groq: 
-        return "抱歉，AI 分析引擎無法連線。"
 
     try:
         resp = sync_groq.chat.completions.create(
@@ -334,7 +341,6 @@ def get_analysis_reply(messages: List[dict]) -> str:
 def analyze_sentiment(text: str) -> str:
     msgs = [{"role":"system","content":"Analyze sentiment; respond ONLY one of: positive, neutral, negative, angry."},
             {"role":"user","content":text}]
-    if not sync_groq: return "neutral"
     try:
         resp = sync_groq.chat.completions.create(
             model=GROQ_MODEL_FALLBACK, messages=msgs, max_tokens=10, temperature=0
@@ -355,20 +361,19 @@ def translate_text(text: str, target_lang_display: str) -> str:
     target = LANGUAGE_MAP.get(target_lang_display, target_lang_display)
     sys = "You are a precise translation engine. Output ONLY the translated text."
     usr = f'{{"source_language":"auto","target_language":"{target}","text_to_translate":"{text}"}}'
-    if not sync_groq:
-        return "抱歉，翻譯引擎無法連線。"
     try:
         resp = sync_groq.chat.completions.create(
             model=GROQ_MODEL_FALLBACK,
             messages=[{"role":"system","content":sys},{"role":"user","content":usr}],
-            max_tokens=len(text)*3 + 50, temperature=0.2
+            max_tokens=len(text)*3 + 50,
+            temperature=0.2
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         logger.error(f"Groq 翻譯失敗：{e}")
         return "抱歉，翻譯功能暫時出錯。"
 
-# =============== TTS ===============
+# =================== TTS ===================
 GTTS_AVAILABLE = False
 try:
     from gtts import gTTS
@@ -376,31 +381,52 @@ try:
 except Exception:
     pass
 
-_OPENAI_TTS_DISABLED = False  # 第一次 401 後停用
+_OPENAI_TTS_DISABLED = False  # 第一次 401 後永久停用（直到重啟）
 
-def _tts_openai(text: str) -> Optional[bytes]:
+def _tts_openai_bytes(text: str) -> Optional[bytes]:
+    """嘗試用 OpenAI TTS 產生 MP3；失敗回 None。"""
     global _OPENAI_TTS_DISABLED
     if _OPENAI_TTS_DISABLED or not openai_client:
         return None
     try:
-        clean = re.sub(r"[*_`~#]", "", text) or "內容為空"
-        resp = openai_client.audio.speech.create(model="tts-1", voice="nova", input=clean)
-        return resp.read()
+        clean = re.sub(r"[*_`~#]", "", (text or "").strip()) or "內容為空"
+        # 盡量要求 mp3（兼容不同 OpenAI/代理的 schema）
+        try:
+            resp = openai_client.audio.speech.create(
+                model="gpt-4o-mini-tts",
+                voice="nova",
+                input=clean,
+                format=TTS_OUTPUT_FORMAT  # 代理常用參數
+            )
+            return resp.read()
+        except Exception:
+            # 舊版/官方 schema
+            resp = openai_client.audio.speech.create(
+                model="tts-1",
+                voice="nova",
+                input=clean
+            )
+            # 有些代理直接回 bytes
+            if hasattr(resp, "read"):
+                return resp.read()
+            if isinstance(resp, (bytes, bytearray)):
+                return bytes(resp)
+            # 或回 {"data": "<base64>"}，此處不做其它解碼，直接失敗交給 gTTS
+            return None
     except Exception as e:
-        # 偵測 401 -> 以後都不用 OpenAI TTS
         if "401" in str(e) or "invalid_api_key" in str(e):
             _OPENAI_TTS_DISABLED = True
-            logger.error(f"OpenAI TTS 停用（API Key 錯）：{e}")
+            logger.error(f"OpenAI TTS 停用（API Key 錯或未授權）：{e}")
         else:
             logger.error(f"OpenAI TTS 失敗：{e}")
         return None
 
-def _tts_gtts(text: str) -> Optional[bytes]:
+def _tts_gtts_bytes(text: str) -> Optional[bytes]:
     if not GTTS_AVAILABLE:
         return None
     try:
-        clean = re.sub(r"[*_`~#]", "", text).strip() or "嗨，我在這裡。"
-        tts = gTTS(text=clean, lang="zh-tw", slow=False)  # 用 zh-tw 避免警告
+        clean = re.sub(r"[*_`~#]", "", (text or "").strip()) or "嗨，我在這裡。"
+        tts = gTTS(text=clean, lang=TTS_LANG, slow=False)
         buf = io.BytesIO()
         tts.write_to_fp(buf)
         buf.seek(0)
@@ -409,13 +435,20 @@ def _tts_gtts(text: str) -> Optional[bytes]:
         logger.error(f"gTTS 失敗：{e}")
         return None
 
-def build_tts_audio_bytes(text: str) -> Optional[bytes]:
-    data = _tts_openai(text)
+def build_tts_audio_bytes(text: str) -> Tuple[Optional[bytes], Optional[str]]:
+    """回傳 (音訊位元組, 使用引擎標籤)。"""
+    data = _tts_openai_bytes(text)
     if data:
-        return data
-    return _tts_gtts(text)
+        return data, TTS_ENGINE_LABEL_OPENAI
+    data = _tts_gtts_bytes(text)
+    if data:
+        return data, TTS_ENGINE_LABEL_GTTS
+    return None, None
 
-# =============== Quick Reply ===============
+def tts_badge_line(engine: str) -> str:
+    return f"🔊 語音：中文({TTS_LANG}) · 引擎：{engine}"
+
+# =================== Quick Reply ===================
 def build_quick_reply(chat_id: Optional[str]) -> QuickReply:
     tts_on = tts_switch.get(chat_id, _DEFAULT_TTS)
     tts_on_label = "TTS ON✅" if tts_on else "TTS ON"
@@ -437,11 +470,6 @@ def build_quick_reply(chat_id: Optional[str]) -> QuickReply:
     ])
 
 def _ensure_qr_visible(messages: List, chat_id: Optional[str], sender: Optional[Sender]):
-    """
-    確保最後顯示 Quick Reply：
-    - 若最後是 TextSendMessage：補 quick_reply
-    - 否則補一個極短可見字元「·」的 TextSendMessage，避免 LINE 視為空字串
-    """
     if not messages:
         return
     qr = build_quick_reply(chat_id)
@@ -458,14 +486,13 @@ def reply_messages(reply_token: str, messages: List, chat_id: Optional[str], sen
         line_bot_api.reply_message(reply_token, messages)
     except LineBotApiError as lbe:
         logger.error(f"LINE 回覆失敗：{lbe.status_code} {lbe.error.message}")
-        # 備援只發一則文字
         try:
             line_bot_api.reply_message(reply_token,
                 TextSendMessage(text="抱歉，訊息傳送失敗。", quick_reply=build_quick_reply(chat_id), sender=sender))
         except Exception:
             pass
 
-# =============== 主選單 ===============
+# =================== 主選單 ===================
 def build_main_menu_flex() -> FlexSendMessage:
     bubble = BubbleContainer(
         direction="ltr",
@@ -525,7 +552,7 @@ def build_submenu_flex(kind: str) -> FlexSendMessage:
     )
     return FlexSendMessage(alt_text=title, contents=bubble)
 
-# =============== 金價 / 外匯 / 股票 ===============
+# =================== 金價 / 外匯 / 股票 ===================
 def get_gold_analysis() -> str:
     try:
         r = requests.get(BOT_GOLD_URL, headers=DEFAULT_HEADERS, timeout=10)
@@ -535,7 +562,6 @@ def get_gold_analysis() -> str:
         sell = float(data["sell_twd_per_g"])
         buy = float(data["buy_twd_per_g"])
         spread = sell - buy
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
         return (f"**金價（台灣銀行）**\n"
                 f"- 掛牌時間：{ts}\n"
                 f"- 賣出(1g)：{sell:,.0f} 元\n"
@@ -613,7 +639,7 @@ def get_stock_report(user_input: str) -> str:
     msgs = [{"role":"system","content":system_prompt}, {"role":"user","content":content_msg}]
     return get_analysis_reply(msgs)
 
-# =============== 彩票 ===============
+# =================== 彩票 ===================
 def _lotto_fallback_scrape(kind: str) -> str:
     try:
         if kind == "威力彩":
@@ -689,33 +715,42 @@ def get_lottery_analysis(lottery_type_input: str) -> str:
     messages = [{"role":"system","content":"你是資深彩券分析師。"},{"role":"user","content":prompt}]
     return get_analysis_reply(messages)
 
-# =============== 主處理（文字/語音） ===============
+# =================== 主處理 ===================
 def _build_sender_for_chat(chat_id: str) -> Optional[Sender]:
-    # 翻譯模式時，顯示「翻譯模式(中->英)」
     if chat_id in translation_states:
         lang = translation_states[chat_id]
         arrow = {"英文":"英","日文":"日","繁體中文":"中","韓文":"韓","越南文":"越"}.get(lang, lang)
         return Sender(name=f"翻譯模式(中->{arrow})")
     return None
 
-def _maybe_add_tts(messages: List, chat_id: str, text_for_tts: str):
-    """視 chat 的開關決定是否加入 TTS 音檔（會上傳 Cloudinary）。"""
+def _append_tts_if_needed(msgs: List, chat_id: str, text_for_tts: str, sender: Optional[Sender]):
+    """若 TTS 開啟，產生 mp3 → Cloudinary(raw) → 追加 Audio + 語音標籤行。"""
     enabled = tts_switch.get(chat_id, _DEFAULT_TTS)
     if not enabled or not CLOUDINARY_CONFIGURED:
         return
-    audio_bytes = build_tts_audio_bytes(text_for_tts)
-    if not audio_bytes:
+
+    audio_bytes, engine = build_tts_audio_bytes(text_for_tts)
+    if not audio_bytes or not engine:
         return
     try:
-        # 上傳
-        res = cloudinary_uploader.upload(
-            io.BytesIO(audio_bytes), resource_type="video", folder="line-bot-tts", format="mp3"
+        # 以 raw 上傳，避免格式限制；檔名用 mp3 副檔名
+        upload_res = cloudinary_uploader.upload(
+            io.BytesIO(audio_bytes),
+            resource_type="raw",
+            folder="line-bot-tts",
+            filename_override="speech.mp3",
+            public_id=None,
+            overwrite=True,
+            unique_filename=True
         )
-        url = res.get("secure_url")
+        url = upload_res.get("secure_url")
         if url:
-            # 粗估長度（60ms/字，最少3秒，最多30秒）
+            # 長度估算（每字 60ms，限制 3s~30s）
             est = max(3000, min(30000, len(text_for_tts) * 60))
-            messages.append(AudioSendMessage(original_content_url=url, duration=est))
+            # 語音檔
+            msgs.append(AudioSendMessage(original_content_url=url, duration=est))
+            # 語音標籤
+            msgs.append(TextSendMessage(text=tts_badge_line(engine), sender=sender))
     except Exception as e:
         logger.error(f"TTS 上傳失敗：{e}")
 
@@ -724,19 +759,16 @@ def on_message_text(event: MessageEvent):
     chat_id = get_chat_id(event)
     msg_raw = (event.message.text or "").strip()
     reply_token = event.reply_token
-
     if not msg_raw:
         return
 
-    # 初始化該聊天室的 TTS 開關
     if chat_id not in tts_switch:
         tts_switch[chat_id] = _DEFAULT_TTS
 
     sender = _build_sender_for_chat(chat_id)
-
     low = msg_raw.lower()
 
-    # TTS 開關
+    # TTS 開/關
     if low == "tts on":
         tts_switch[chat_id] = True
         reply_messages(reply_token, [TextSendMessage(text="🔊 已開啟語音播報", sender=sender)], chat_id, sender)
@@ -751,7 +783,7 @@ def on_message_text(event: MessageEvent):
         reply_messages(reply_token, [build_main_menu_flex()], chat_id, sender)
         return
 
-    # 翻譯模式指令
+    # 翻譯模式切換
     if msg_raw.startswith("翻譯->"):
         lang = msg_raw.split("->",1)[1].strip()
         if lang == "結束":
@@ -763,29 +795,27 @@ def on_message_text(event: MessageEvent):
             reply_messages(reply_token, [TextSendMessage(text=f"🌐 開啟翻譯 → {lang}", sender=sender2)], chat_id, sender2)
         return
 
-    # 子選單 Postback 會處理，這裡略
-
     # 金價
     if low in ("金價","黃金"):
         text = get_gold_analysis()
         msgs = [TextSendMessage(text=text, sender=sender)]
-        _maybe_add_tts(msgs, chat_id, text)
+        _append_tts_if_needed(msgs, chat_id, text, sender)
         reply_messages(reply_token, msgs, chat_id, sender)
         return
 
-    # 外匯（簡單示例：只做 JPY）
+    # 外匯（示範 JPY）
     if low == "jpy":
         text = get_currency_analysis("JPY")
         msgs = [TextSendMessage(text=text, sender=sender)]
-        _maybe_add_tts(msgs, chat_id, text)
+        _append_tts_if_needed(msgs, chat_id, text, sender)
         reply_messages(reply_token, msgs, chat_id, sender)
         return
 
     # 彩票
     if msg_raw in ("大樂透","威力彩","539","今彩539"):
-        text = get_lottery_analysis(msg_raw if msg_raw!="今彩539" else "539")
+        text = get_lottery_analysis("539" if msg_raw=="今彩539" else msg_raw)
         msgs = [TextSendMessage(text=text, sender=sender)]
-        _maybe_add_tts(msgs, chat_id, text)
+        _append_tts_if_needed(msgs, chat_id, text, sender)
         reply_messages(reply_token, msgs, chat_id, sender)
         return
 
@@ -793,16 +823,16 @@ def on_message_text(event: MessageEvent):
     if is_stock_query(msg_raw):
         text = get_stock_report(msg_raw)
         msgs = [TextSendMessage(text=text, sender=sender)]
-        _maybe_add_tts(msgs, chat_id, text)
+        _append_tts_if_needed(msgs, chat_id, text, sender)
         reply_messages(reply_token, msgs, chat_id, sender)
         return
 
-    # 翻譯模式內容
+    # 翻譯內容
     if chat_id in translation_states:
         out = translate_text(msg_raw, translation_states[chat_id])
         sender2 = _build_sender_for_chat(chat_id)
         msgs = [TextSendMessage(text=out, sender=sender2)]
-        _maybe_add_tts(msgs, chat_id, out)
+        _append_tts_if_needed(msgs, chat_id, out, sender2)
         reply_messages(reply_token, msgs, chat_id, sender2)
         return
 
@@ -816,7 +846,7 @@ def on_message_text(event: MessageEvent):
         hist.extend([{"role":"user","content":msg_raw},{"role":"assistant","content":final_reply}])
         conversation_history[chat_id] = hist[-MAX_HISTORY_LEN*2:]
         msgs = [TextSendMessage(text=final_reply, sender=sender)]
-        _maybe_add_tts(msgs, chat_id, final_reply)
+        _append_tts_if_needed(msgs, chat_id, final_reply, sender)
         reply_messages(reply_token, msgs, chat_id, sender)
     except Exception as e:
         logger.error(f"一般聊天錯誤：{e}")
@@ -827,7 +857,6 @@ def on_postback(event: PostbackEvent):
     data = (event.postback.data or "").strip()
     chat_id = get_chat_id(event)
     sender = _build_sender_for_chat(chat_id)
-
     if data.startswith("menu:"):
         kind = data.split(":",1)[1]
         flex = build_submenu_flex(kind)
@@ -835,7 +864,7 @@ def on_postback(event: PostbackEvent):
     else:
         reply_messages(event.reply_token, [TextSendMessage(text="收到你的選擇，正在處理中...", sender=sender)], chat_id, sender)
 
-# =============== FastAPI Routes ===============
+# =================== FastAPI Routes ===================
 @router.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
@@ -873,7 +902,7 @@ async def healthz():
 
 app.include_router(router)
 
-# =============== Local run ===============
+# =================== Local run ===================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     logger.info(f"Uvicorn on 0.0.0.0:{port}")
