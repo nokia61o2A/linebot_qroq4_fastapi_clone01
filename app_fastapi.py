@@ -1,10 +1,10 @@
-# app_fastapi.py  (Full – TTS language badge & stable mp3 upload)
+# app_fastapi.py  (Full – TTS=gTTS only, no badge line)
 # ================================================================
 # - LINE Bot SDK v2（同步）
-# - taiwanlottery 外部套件（失敗即官網備援）
+# - taiwanlottery 外部套件（失敗→官網備援）
 # - 金價 / 外匯 / 股票：真實抓取
-# - TTS：OpenAI(mp3) → gTTS(zh-tw)，自動偵錯切換；Cloudinary raw 上傳
-# - TTS 開啟時，每則回覆自動附「語音標籤（語言/引擎）」小行
+# - TTS：僅 gTTS(zh-tw) 輸出 mp3；Cloudinary 以 raw 上傳
+# - 不顯示任何「語音：中文(zh-tw) · 引擎：...」附加行
 # - 每則訊息固定帶 Quick Reply（含 TTS ON/OFF）
 # - 翻譯模式：sender 顯示「翻譯模式(中->英)」
 # ================================================================
@@ -55,7 +55,7 @@ CHANNEL_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")  # 可接代理，如 https://free.v36.cm
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")  # 可接代理
 CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 
 required = {
@@ -72,8 +72,7 @@ if missing:
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# ---------- AI ----------
-# ＊Groq：更新到較新的模型，避免退役
+# ---------- AI（聊天/分析仍可用 OpenAI 或 Groq；TTS 不用 OpenAI） ----------
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.3-70b-versatile")
 GROQ_MODEL_FALLBACK = os.getenv("GROQ_MODEL_FALLBACK", "llama-3.1-8b-instant")
 sync_groq = Groq(api_key=GROQ_API_KEY)
@@ -173,10 +172,9 @@ DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 }
 BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
+
 TTS_LANG = "zh-tw"        # gTTS 語言碼
-TTS_ENGINE_LABEL_OPENAI = "OpenAI"
-TTS_ENGINE_LABEL_GTTS   = "gTTS"
-TTS_OUTPUT_FORMAT = "mp3"
+TTS_OUTPUT_FORMAT = "mp3" # 產出 mp3
 
 _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
 _US_CODE_RE = re.compile(r'^[A-Za-z]{1,5}$')
@@ -199,7 +197,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("👋 應用關閉")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.1.0")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.2.0")
 router = APIRouter()
 
 # =================== Helpers ===================
@@ -319,6 +317,7 @@ def get_analysis_reply(messages: List[dict]) -> str:
                 max_tokens=1500,
             )
             return resp.choices[0].message.content
+    # 若 OpenAI 不可用或失敗則走 Groq
         except Exception as e:
             logger.warning(f"OpenAI 失敗：{e}")
 
@@ -373,53 +372,13 @@ def translate_text(text: str, target_lang_display: str) -> str:
         logger.error(f"Groq 翻譯失敗：{e}")
         return "抱歉，翻譯功能暫時出錯。"
 
-# =================== TTS ===================
+# =================== TTS（gTTS only） ===================
 GTTS_AVAILABLE = False
 try:
     from gtts import gTTS
     GTTS_AVAILABLE = True
 except Exception:
     pass
-
-_OPENAI_TTS_DISABLED = False  # 第一次 401 後永久停用（直到重啟）
-
-def _tts_openai_bytes(text: str) -> Optional[bytes]:
-    """嘗試用 OpenAI TTS 產生 MP3；失敗回 None。"""
-    global _OPENAI_TTS_DISABLED
-    if _OPENAI_TTS_DISABLED or not openai_client:
-        return None
-    try:
-        clean = re.sub(r"[*_`~#]", "", (text or "").strip()) or "內容為空"
-        # 盡量要求 mp3（兼容不同 OpenAI/代理的 schema）
-        try:
-            resp = openai_client.audio.speech.create(
-                model="gpt-4o-mini-tts",
-                voice="nova",
-                input=clean,
-                format=TTS_OUTPUT_FORMAT  # 代理常用參數
-            )
-            return resp.read()
-        except Exception:
-            # 舊版/官方 schema
-            resp = openai_client.audio.speech.create(
-                model="tts-1",
-                voice="nova",
-                input=clean
-            )
-            # 有些代理直接回 bytes
-            if hasattr(resp, "read"):
-                return resp.read()
-            if isinstance(resp, (bytes, bytearray)):
-                return bytes(resp)
-            # 或回 {"data": "<base64>"}，此處不做其它解碼，直接失敗交給 gTTS
-            return None
-    except Exception as e:
-        if "401" in str(e) or "invalid_api_key" in str(e):
-            _OPENAI_TTS_DISABLED = True
-            logger.error(f"OpenAI TTS 停用（API Key 錯或未授權）：{e}")
-        else:
-            logger.error(f"OpenAI TTS 失敗：{e}")
-        return None
 
 def _tts_gtts_bytes(text: str) -> Optional[bytes]:
     if not GTTS_AVAILABLE:
@@ -435,18 +394,8 @@ def _tts_gtts_bytes(text: str) -> Optional[bytes]:
         logger.error(f"gTTS 失敗：{e}")
         return None
 
-def build_tts_audio_bytes(text: str) -> Tuple[Optional[bytes], Optional[str]]:
-    """回傳 (音訊位元組, 使用引擎標籤)。"""
-    data = _tts_openai_bytes(text)
-    if data:
-        return data, TTS_ENGINE_LABEL_OPENAI
-    data = _tts_gtts_bytes(text)
-    if data:
-        return data, TTS_ENGINE_LABEL_GTTS
-    return None, None
-
-def tts_badge_line(engine: str) -> str:
-    return f"🔊 語音：中文({TTS_LANG}) · 引擎：{engine}"
+def build_tts_audio_bytes(text: str) -> Optional[bytes]:
+    return _tts_gtts_bytes(text)
 
 # =================== Quick Reply ===================
 def build_quick_reply(chat_id: Optional[str]) -> QuickReply:
@@ -724,16 +673,15 @@ def _build_sender_for_chat(chat_id: str) -> Optional[Sender]:
     return None
 
 def _append_tts_if_needed(msgs: List, chat_id: str, text_for_tts: str, sender: Optional[Sender]):
-    """若 TTS 開啟，產生 mp3 → Cloudinary(raw) → 追加 Audio + 語音標籤行。"""
+    """若 TTS 開啟，使用 gTTS 產生 mp3 → Cloudinary(raw) → 追加 Audio。"""
     enabled = tts_switch.get(chat_id, _DEFAULT_TTS)
     if not enabled or not CLOUDINARY_CONFIGURED:
         return
 
-    audio_bytes, engine = build_tts_audio_bytes(text_for_tts)
-    if not audio_bytes or not engine:
+    audio_bytes = build_tts_audio_bytes(text_for_tts)
+    if not audio_bytes:
         return
     try:
-        # 以 raw 上傳，避免格式限制；檔名用 mp3 副檔名
         upload_res = cloudinary_uploader.upload(
             io.BytesIO(audio_bytes),
             resource_type="raw",
@@ -745,12 +693,9 @@ def _append_tts_if_needed(msgs: List, chat_id: str, text_for_tts: str, sender: O
         )
         url = upload_res.get("secure_url")
         if url:
-            # 長度估算（每字 60ms，限制 3s~30s）
+            # 粗估時長（60ms/字，3s~30s 範圍）
             est = max(3000, min(30000, len(text_for_tts) * 60))
-            # 語音檔
             msgs.append(AudioSendMessage(original_content_url=url, duration=est))
-            # 語音標籤
-            msgs.append(TextSendMessage(text=tts_badge_line(engine), sender=sender))
     except Exception as e:
         logger.error(f"TTS 上傳失敗：{e}")
 
@@ -893,7 +838,7 @@ async def healthz():
         "ts": datetime.utcnow().isoformat()+"Z",
         "providers":{
             "groq": sync_groq is not None,
-            "openai": openai_client is not None and not _OPENAI_TTS_DISABLED,
+            "openai": openai_client is not None,
             "cloudinary": CLOUDINARY_CONFIGURED,
             "lottery": LOTTERY_ENABLED,
             "stock": STOCK_ENABLED
