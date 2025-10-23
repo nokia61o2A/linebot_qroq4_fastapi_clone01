@@ -3,8 +3,9 @@
 # LINE Bot + FastAPI (金價/股票/彩票/翻譯/TTS)
 # - 金價：實抓台灣銀行 (桌機/行動/內嵌 script，三層解析、零 KeyError)
 # - TTS：gTTS 免費；無多餘提示泡泡；無 Cloudinary 時只回文字
-# - Groq：強制白名單可用模型，避免 404
+# - Groq：強制白名單可用模型，避免 404 / 退役
 # - 快速回覆按鈕每則都有；不再出現「.」的空泡
+# - 【方案2雙保險】音訊在前、文字在後，兩則都掛 QuickReply
 # =========================================
 
 import os
@@ -107,8 +108,12 @@ if GROQ_API_KEY:
         log.info("✅ Groq Client 初始化成功")
     except Exception as e:
         log.warning(f"Groq 初始化失敗：{e}")
-# 只允許使用這兩個，避免 404
-GROQ_WHITELIST = ["llama-3.1-70b-versatile", "llama-3.1-8b-instant"]
+
+# 只允許使用「現役」模型，避免 400（退役）  # ★修正
+GROQ_WHITELIST = [
+    "llama-3.1-70b-instant",   # 建議以實際 Groq console 公告調整
+    "llama-3.1-8b-instant"
+]
 GROQ_MODEL_PRIMARY = os.getenv("GROQ_MODEL_PRIMARY", GROQ_WHITELIST[0])
 if GROQ_MODEL_PRIMARY not in GROQ_WHITELIST:
     GROQ_MODEL_PRIMARY = GROQ_WHITELIST[0]
@@ -175,11 +180,24 @@ def quick_bar() -> QuickReply:
 
 def reply_text_audio(reply_token: str, text: str, audio_url: Optional[str] = None, duration_ms: int = 0):
     """
-    統一回覆：文字 +（可選）語音；一定含 QuickReply；不產生多的「.」氣泡
+    統一回覆（【方案 2：雙保險】）
+    - 訊息順序：音訊在前、文字在後（你的需求）
+    - Audio 與 Text 兩則都掛 quickReply（保險）
+    - 依 LINE 規則：最後一則支援 quickReply 的訊息會顯示按鈕
+      → 這裡最後一則是 Text（支援 quickReply），因此一定會顯示
+    參考：
+      Quick Reply 規範        https://developers.line.biz/en/docs/messaging-api/using-quick-reply/
+      Audio 訊息規格          https://developers.line.biz/en/reference/messaging-api/#audio-message
     """
-    msgs = [TextSendMessage(text=text, quick_reply=quick_bar())]
+    qr = quick_bar()  # ★修正：雙保險，同一個 quick_reply 物件掛兩則
+    msgs = []
     if audio_url:
-        msgs.append(AudioSendMessage(original_content_url=audio_url, duration=duration_ms))
+        msgs.append(AudioSendMessage(
+            original_content_url=audio_url,
+            duration=duration_ms,
+            quick_reply=qr          # ★修正：雖然不會在這則顯示，但作為保險
+        ))
+    msgs.append(TextSendMessage(text=text, quick_reply=qr))  # ★修正：最後一則一定是 Text + quickReply
     line_bot_api.reply_message(reply_token, msgs)
 
 # ========= Menu Flex =========
@@ -500,6 +518,10 @@ def lottery_text(kind: str) -> str:
         return f"{kind} 官網讀取失敗。"
 
 # ========= TTS =========
+
+# ★修正：gTTS 語言碼映射，消除 zh-TW deprecate 警告
+GTTS_LANG_MAP = {"zh-TW": "zh-tw", "zh-tw": "zh-tw", "zh-Hant": "zh-tw", "zh_Hant": "zh-tw"}
+
 def ensure_defaults(chat_id: str):
     if chat_id not in auto_reply_status: auto_reply_status[chat_id] = True
     if chat_id not in tts_enabled:       tts_enabled[chat_id] = False
@@ -511,7 +533,9 @@ def tts_make_url(text: str, lang_code: str) -> Tuple[Optional[str], int]:
     gTTS 產 mp3；若 CLOUD_OK，丟 Cloudinary 回 URL；否則回 (None, 0)
     """
     try:
-        tts = gTTS(text=text, lang=lang_code, slow=False)
+        # ★修正：語言映射
+        lang = GTTS_LANG_MAP.get(lang_code, "zh-tw")
+        tts = gTTS(text=text, lang=lang, slow=False)
         buf = io.BytesIO()
         tts.write_to_fp(buf)
         data = buf.getvalue()
