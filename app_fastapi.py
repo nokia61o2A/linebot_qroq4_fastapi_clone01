@@ -1,7 +1,7 @@
 # app_fastapi.py
 # =============================================================================
 # LINE Bot + FastAPI (金價/股票/彩票/翻譯/TTS)
-# - 文字在前、音訊在中、Flex（無分隔線）在後，並附 QuickReply
+# - 文字在前、音訊在中；僅「有音訊時」才會在最後附 Flex 提示卡
 # - 進入翻譯模式：以 sender.name 顯示「翻譯模式（中→英）」等格式
 # - 翻譯模式下，QuickReply 最右鍵由「🌐 翻譯工具」改為「結束翻譯」
 # =============================================================================
@@ -65,7 +65,6 @@ OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")
 if not BASE_URL or not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError(
         "請設定環境變數：BASE_URL、CHANNEL_ACCESS_TOKEN、CHANNEL_SECRET"
-        "（LINE Console 設定）"
     )
 # 參考（LINE Console）：https://developers.line.biz/console/
 
@@ -74,7 +73,7 @@ if not BASE_URL or not CHANNEL_TOKEN or not CHANNEL_SECRET:
 line_bot_api = LineBotApi(CHANNEL_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# ========= Cloudinary（可選）上傳語音檔 =========
+# ========= Cloudinary（可選）語音上傳 =========
 # 參考（Cloudinary Upload API）：https://cloudinary.com/documentation/image_upload_api_reference
 CLOUD_OK = False
 try:
@@ -119,7 +118,7 @@ if GROQ_API_KEY:
         log.warning(f"Groq 初始化失敗：{e}")
 GROQ_MODEL_PRIMARY = "llama-3.1-8b-instant"  # 避免 404
 
-# ========= 常數 / 狀態 =========
+# ========= 狀態 =========
 DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"}
 BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"  # 台銀金價頁
 
@@ -156,7 +155,7 @@ async def lifespan(app: FastAPI):
     yield
     log.info("👋 應用關閉")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.8.0")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.9.0")
 router = APIRouter()
 
 # ========= QuickReply（依翻譯模式切換） =========
@@ -213,7 +212,7 @@ def minimal_flex_hint(
     )
     return FlexSendMessage(alt_text=safe_alt, contents=bubble, quick_reply=quick_bar(chat_id))
 
-# ========= 統一回覆：Text → Audio → Flex，並套 sender =========
+# ========= 統一回覆：Text → Audio → Flex（僅在有音訊時才附 Flex） =========
 # 參考（訊息共同欄位/quickReply）：https://developers.line.biz/en/reference/messaging-api/#common-properties
 def reply_text_audio_flex(
     reply_token: str,
@@ -221,7 +220,7 @@ def reply_text_audio_flex(
     text: str,
     audio_url: Optional[str],
     duration_ms: int,
-    hint_text: str = "要聽語音請按上方播放鈕👆"
+    hint_text: str = "（👆要聽語音請按上方播放鈕）"
 ):
     sender_name, sender_icon = display_sender_name(chat_id)
 
@@ -233,7 +232,7 @@ def reply_text_audio_flex(
         text_msg.sender["iconUrl"] = sender_icon
     msgs.append(text_msg)
 
-    # 2) Audio
+    # 2) Audio（可選）
     if audio_url:
         audio_msg = AudioSendMessage(original_content_url=audio_url, duration=duration_ms)
         audio_msg.sender = {"name": sender_name}
@@ -241,16 +240,16 @@ def reply_text_audio_flex(
             audio_msg.sender["iconUrl"] = sender_icon
         msgs.append(audio_msg)
 
-    # 3) Flex 提示
-    flex_msg = minimal_flex_hint(
-        alt_text=(text[:60] + "…") if text else "提示",
-        hint_text=hint_text,
-        chat_id=chat_id
-    )
-    flex_msg.sender = {"name": sender_name}
-    if sender_icon:
-        flex_msg.sender["iconUrl"] = sender_icon
-    msgs.append(flex_msg)
+        # 3) 只有有音訊時才送 Flex 提示
+        flex_msg = minimal_flex_hint(
+            alt_text=(text[:60] + "…") if text else "提示",
+            hint_text=hint_text,
+            chat_id=chat_id
+        )
+        flex_msg.sender = {"name": sender_name}
+        if sender_icon:
+            flex_msg.sender["iconUrl"] = sender_icon
+        msgs.append(flex_msg)
 
     line_bot_api.reply_message(reply_token, msgs)
 
@@ -458,7 +457,7 @@ def jpy_twd() -> str:
         log.error(f"匯率失敗：{e}")
         return "外匯資料暫時無法取得。"
 
-# ========= 彩票（簡化：只做資料→AI說明） =========
+# ========= 彩票（簡化：資料→AI說明） =========
 # 來源（台灣彩券）：https://www.taiwanlottery.com.tw/
 def lottery_text(kind: str) -> str:
     try:
@@ -649,7 +648,6 @@ def on_message(event: MessageEvent):
 def on_postback(event: PostbackEvent):
     data = (event.postback.data or "")
     sub = data[5:] if data.startswith("menu:") else ""
-    # 需要 chat_id 來決定 QuickReply 是否顯示「結束翻譯」
     chat_id = (
         event.source.group_id if isinstance(event.source, SourceGroup) else
         event.source.room_id  if isinstance(event.source, SourceRoom)  else
