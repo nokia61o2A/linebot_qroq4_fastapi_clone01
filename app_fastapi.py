@@ -169,8 +169,8 @@ def quick_bar(chat_id: Optional[str] = None) -> QuickReply:
         QuickReplyButton(action=MessageAction(label="日圓匯率", text="JPY")),
         QuickReplyButton(action=MessageAction(label="查 2330", text="2330")),
         QuickReplyButton(action=MessageAction(label="查 NVDA", text="NVDA")),
-        QuickReplyButton(action=MessageAction(label="TTS ON✅", text="TTS ON")),
-        QuickReplyButton(action=MessageAction(label="TTS OFF", text="TTS OFF")),
+        QuickReplyButton(action=MessageAction(label="語音 開✅", text="TTS ON")),
+        QuickReplyButton(action=MessageAction(label="語音 關", text="TTS OFF")),
         QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
     ]
