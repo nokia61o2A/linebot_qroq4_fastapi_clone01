@@ -149,8 +149,12 @@ app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.7.0")
 router = APIRouter()
 
 # ========= QuickReply =========
-def quick_bar() -> QuickReply:
-    return QuickReply(items=[
+def quick_bar(chat_id: Optional[str] = None) -> QuickReply:
+    """
+    在翻譯模式下，最後一顆按鈕由『🌐 翻譯工具』改為『結束翻譯』。
+    參考：Quick Reply https://developers.line.biz/en/docs/messaging-api/using-quick-reply/
+    """
+    items = [
         QuickReplyButton(action=MessageAction(label="主選單", text="選單")),
         QuickReplyButton(action=MessageAction(label="台股大盤", text="台股大盤")),
         QuickReplyButton(action=MessageAction(label="美股大盤", text="美股大盤")),
@@ -162,8 +166,17 @@ def quick_bar() -> QuickReply:
         QuickReplyButton(action=MessageAction(label="TTS OFF", text="TTS OFF")),
         QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
-        QuickReplyButton(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate")),
-    ])
+    ]
+
+    # 修改：依翻譯模式切換最後一顆按鈕
+    if chat_id and chat_id in translation_states:
+        # 在翻譯模式 → 顯示「結束翻譯」，直接用 MessageAction 送出結束指令
+        items.append(QuickReplyButton(action=MessageAction(label="結束翻譯", text="翻譯->結束")))
+    else:
+        # 非翻譯模式 → 顯示「翻譯工具」進入子選單（Postback）
+        items.append(QuickReplyButton(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate")))
+
+    return QuickReply(items=items)
 
 # ========= 動態 sender 名稱：翻譯模式會顯示「翻譯模式（中→英）」 =========
 def display_sender_name(chat_id: str) -> Tuple[str, Optional[str]]:
@@ -182,10 +195,11 @@ def display_sender_name(chat_id: str) -> Tuple[str, Optional[str]]:
 # ========= Flex（無分隔線） =========
 def minimal_flex_hint(
     alt_text: str = "提示",
-    hint_text: str = "（👆要聽語音請按上方播放鈕）"
+    hint_text: str = "（👆要聽語音請按上方播放鈕）",
+    chat_id: Optional[str] = None  # 修改：新增 chat_id，才能套 QuickReply 狀態
 ) -> FlexSendMessage:
     """
-    alt_text 必填，否則 LINE 會報 400；官方 Flex 規格： https://developers.line.biz/en/docs/messaging-api/using-flex-messages/
+    alt_text 必填，否則 LINE 會報 400。Flex 規格： https://developers.line.biz/en/docs/messaging-api/using-flex-messages/
     """
     safe_alt = (alt_text or hint_text or "提示").strip() or "提示"
     bubble = BubbleContainer(
@@ -198,7 +212,8 @@ def minimal_flex_hint(
             ]
         )
     )
-    return FlexSendMessage(alt_text=safe_alt, contents=bubble, quick_reply=quick_bar())
+    # 修改：帶 chat_id 以便在翻譯模式顯示「結束翻譯」
+    return FlexSendMessage(alt_text=safe_alt, contents=bubble, quick_reply=quick_bar(chat_id))
 
 # ========= Reply：Text → Audio → Flex，並套 sender =========
 def reply_text_audio_flex(
@@ -209,6 +224,42 @@ def reply_text_audio_flex(
     duration_ms: int,
     hint_text: str = "（👆要聽語音請按上方播放鈕）"
 ):
+    """
+    1) 第一則 Text（附 QuickReply）
+    2) 第二則 Audio（如有）
+    3) 第三則 Flex（無分隔線，放提示，並附 QuickReply）
+    sender.name 會依翻譯模式切換；參考：https://developers.line.biz/en/docs/messaging-api/icon-nickname-switch/
+    """
+    sender_name, sender_icon = display_sender_name(chat_id)
+
+    msgs = []
+    # 1) Text
+    text_msg = TextSendMessage(text=text, quick_reply=quick_bar(chat_id))  # 修改：傳 chat_id
+    text_msg.sender = {"name": sender_name}
+    if sender_icon:
+        text_msg.sender["iconUrl"] = sender_icon
+    msgs.append(text_msg)
+
+    # 2) Audio（可選）
+    if audio_url:
+        audio_msg = AudioSendMessage(original_content_url=audio_url, duration=duration_ms)
+        audio_msg.sender = {"name": sender_name}
+        if sender_icon:
+            audio_msg.sender["iconUrl"] = sender_icon
+        msgs.append(audio_msg)
+
+    # 3) Flex（提示 + QuickReply）
+    flex_msg = minimal_flex_hint(
+        alt_text=(text[:60] + "…") if text else "提示",
+        hint_text=hint_text,
+        chat_id=chat_id  # 修改：傳 chat_id
+    )
+    flex_msg.sender = {"name": sender_name}
+    if sender_icon:
+        flex_msg.sender["iconUrl"] = sender_icon
+    msgs.append(flex_msg)
+
+    line_bot_api.reply_message(reply_token, msgs)
     """
     1) 第一則 Text（附 QuickReply）
     2) 第二則 Audio（如有）
@@ -526,7 +577,7 @@ def on_message(event: MessageEvent):
     try:
         # 主選單
         if low in ("menu","選單","主選單"):
-            line_bot_api.reply_message(event.reply_token, flex_main())  # 下方定義
+            line_bot_api.reply_message(event.reply_token, flex_main(chat_id))  # 修改：傳 chat_id
             return
 
         # TTS 切換
@@ -641,16 +692,22 @@ def on_message(event: MessageEvent):
 def on_postback(event: PostbackEvent):
     data = (event.postback.data or "")
     sub = data[5:] if data.startswith("menu:") else ""
+    # 取得 chat_id，才能讓 QuickReply 依翻譯模式顯示「結束翻譯」
+    chat_id = (
+        event.source.group_id if isinstance(event.source, SourceGroup) else
+        event.source.room_id  if isinstance(event.source, SourceRoom)  else
+        event.source.user_id
+    )
     try:
         line_bot_api.reply_message(
             event.reply_token,
-            [flex_submenu(sub or "finance"), TextSendMessage(text="請選擇 👇", quick_reply=quick_bar())]
+            [flex_submenu(sub or "finance", chat_id), TextSendMessage(text="請選擇 👇", quick_reply=quick_bar(chat_id))]
         )
     except Exception as e:
         log.error(f"Postback 失敗：{e}")
 
 # ========= Menu Flex =========
-def flex_main() -> FlexSendMessage:
+def flex_main(chat_id: Optional[str] = None) -> FlexSendMessage:
     bubble = BubbleContainer(
         direction="ltr",
         header=BoxComponent(layout="vertical", contents=[TextComponent(text="AI 助理主選單", weight="bold", size="lg")]),
@@ -666,9 +723,11 @@ def flex_main() -> FlexSendMessage:
             ]
         )
     )
-    return FlexSendMessage(alt_text="主選單", contents=bubble, quick_reply=quick_bar())
+    # 修改：附上 quick_reply(chat_id)
+    return FlexSendMessage(alt_text="主選單", contents=bubble, quick_reply=quick_bar(chat_id))
 
-def flex_submenu(kind: str) -> FlexSendMessage:
+
+def flex_submenu(kind: str, chat_id: Optional[str] = None) -> FlexSendMessage:
     title, buttons = "子選單", []
     if kind == "finance":
         title = "💹 金融查詢"
@@ -715,7 +774,8 @@ def flex_submenu(kind: str) -> FlexSendMessage:
         header=BoxComponent(layout="vertical", contents=[TextComponent(text=title, weight="bold", size="lg")]),
         body=BoxComponent(layout="vertical", contents=buttons, spacing="sm")
     )
-    return FlexSendMessage(alt_text=title, contents=bubble, quick_reply=quick_bar())
+    # 修改：附上 quick_reply(chat_id)
+    return FlexSendMessage(alt_text=title, contents=bubble, quick_reply=quick_bar(chat_id))
 
 # ========= Routes =========
 @router.post("/callback")
