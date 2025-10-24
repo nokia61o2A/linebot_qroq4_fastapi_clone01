@@ -206,7 +206,7 @@ def minimal_flex_hint(
             layout="vertical",
             spacing="sm",
             contents=[
-                TextComponent(text=hint_text, size="xs", color="#888888", wrap=True)
+                TextComponent(text=hint_text, size="sm", color="#888888", wrap=True)
             ]
         )
     )
