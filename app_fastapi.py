@@ -196,7 +196,7 @@ def display_sender_name(chat_id: str) -> Tuple[str, Optional[str]]:
 # 參考（Flex/altText）：https://developers.line.biz/en/docs/messaging-api/using-flex-messages/
 def minimal_flex_hint(
     alt_text: str = "提示",
-    hint_text: str = "（👆要聽語音請按上方播放鈕）",
+    hint_text: str = "要聽語音請按上方播放鈕👆",
     chat_id: Optional[str] = None
 ) -> FlexSendMessage:
     safe_alt = (alt_text or hint_text or "提示").strip() or "提示"
