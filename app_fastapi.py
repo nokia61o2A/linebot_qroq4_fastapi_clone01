@@ -158,10 +158,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, title="LINE Bot", version="3.9.0")
 router = APIRouter()
 
-# ========= QuickReply（依翻譯模式切換） =========
-# 參考（Quick Reply 規格）：https://developers.line.biz/en/docs/messaging-api/using-quick-reply/
+# ========= QuickReply（依 TTS 與翻譯模式動態顯示） =========
+# 只顯示必要的 TTS 切換按鈕：
+# - TTS ON 中：顯示「語音 關」（點了會傳 TTS OFF）
+# - TTS OFF 中：顯示「語音 開✅」（點了會傳 TTS ON）
+# 翻譯模式中：最後一鍵改為「結束翻譯」，否則為「🌐 翻譯工具」
 def quick_bar(chat_id: Optional[str] = None) -> QuickReply:
-    items = [
+    # 基本功能鍵（與你原本一致）
+    items: List[QuickReplyButton] = [
         QuickReplyButton(action=MessageAction(label="主選單", text="選單")),
         QuickReplyButton(action=MessageAction(label="台股大盤", text="台股大盤")),
         QuickReplyButton(action=MessageAction(label="美股大盤", text="美股大盤")),
@@ -169,16 +173,25 @@ def quick_bar(chat_id: Optional[str] = None) -> QuickReply:
         QuickReplyButton(action=MessageAction(label="日圓匯率", text="JPY")),
         QuickReplyButton(action=MessageAction(label="查 2330", text="2330")),
         QuickReplyButton(action=MessageAction(label="查 NVDA", text="NVDA")),
-        QuickReplyButton(action=MessageAction(label="語音 開✅", text="TTS ON")),
-        QuickReplyButton(action=MessageAction(label="語音 關", text="TTS OFF")),
         QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
     ]
-    # 翻譯模式：把最後一鍵換成「結束翻譯」
+
+    # 依目前 TTS 狀態只放「其一」按鈕
+    # 說明：quick bar 是在每次回覆時重建，因此切換 TTS 後，下一則回覆就會反映最新狀態
+    if chat_id and tts_enabled.get(chat_id, False):
+        # 目前是開啟狀態 → 顯示「關」
+        items.insert(7, QuickReplyButton(action=MessageAction(label="語音 關", text="TTS OFF")))
+    else:
+        # 目前是關閉狀態 → 顯示「開✅」
+        items.insert(7, QuickReplyButton(action=MessageAction(label="語音 開✅", text="TTS ON")))
+
+    # 翻譯模式：最後一鍵換成「結束翻譯」
     if chat_id and chat_id in translation_states:
         items.append(QuickReplyButton(action=MessageAction(label="結束翻譯", text="翻譯->結束")))
     else:
         items.append(QuickReplyButton(action=PostbackAction(label="🌐 翻譯工具", data="menu:translate")))
+
     return QuickReply(items=items)
 
 # ========= sender 名稱（翻譯模式顯示「翻譯模式（中→英）」） =========
