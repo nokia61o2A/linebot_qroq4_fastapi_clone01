@@ -13,6 +13,7 @@
 # 8) AI 引擎：OpenAI → Groq（fallback）雙引擎，避免 404 / 400 造成無回覆
 # 9) 功能：金價（台銀）、匯率（JPY→TWD）、股票（yfinance）、彩票（官網解析→AI說明）
 # 10) 友善錯誤訊息：任何例外狀況仍保證回覆 Text（避免空訊息 / altText 缺失）
+# 11) ### NEW: 「中英雙向互譯」模式：輸入中文→譯英；輸入英文→譯繁中；自動判斷主要語言
 # =============================================================================
 # 參考文件：
 # - Messaging API Overview: https://developers.line.biz/en/docs/messaging-api/overview/
@@ -143,7 +144,7 @@ BOT_GOLD_URL = "https://rate.bot.com.tw/gold?Lang=zh-TW"
 conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY = 10
 user_persona: Dict[str, str] = {}
-translation_states: Dict[str, str] = {}  # chat_id -> 目標語言顯示字串（英文/日文/繁體中文）
+translation_states: Dict[str, str] = {}  # chat_id -> 目標語言顯示字串（英文/日文/繁體中文/中英雙向）
 auto_reply_status: Dict[str, bool] = {}
 tts_enabled: Dict[str, bool] = {}
 tts_lang: Dict[str, str] = {}  # gTTS 用語言碼（e.g. zh-TW）
@@ -176,7 +177,7 @@ async def lifespan(app: FastAPI):
     yield
     log.info("👋 應用關閉")
 
-app = FastAPI(lifespan=lifespan, title="LINE Bot", version="4.0.0")
+app = FastAPI(lifespan=lifespan, title="LINE Bot", version="4.1.0")  # ### CHANGED: 版本號
 router = APIRouter()
 
 # ========= Loading 動畫（僅單人聊天有效）=========
@@ -230,7 +231,7 @@ def quick_bar(chat_id: Optional[str] = None) -> QuickReply:
 def display_sender_name(chat_id: str) -> Tuple[str, Optional[str]]:
     if chat_id in translation_states:
         target = translation_states.get(chat_id) or ""
-        mapping = {"英文": "中→英", "日文": "中→日", "繁體中文": "→ 繁中"}
+        mapping = {"英文": "中→英", "日文": "中→日", "繁體中文": "→ 繁中", "中英雙向": "中↔英"}  # ### NEW: 顯示互譯
         arrow = mapping.get(target, f"→ {target}") if target else ""
         name = f"翻譯模式（{arrow}）" if arrow else "翻譯模式"
         return name, None
@@ -337,7 +338,8 @@ def ai_chat(messages: List[dict]) -> str:
 
 def translate_text(content: str, target_lang_display: str) -> str:
     """
-    僅使用 Groq 快速翻譯（可自行切換到 OpenAI）
+    單向翻譯：將 content 翻譯成 target_lang_display（e.g. 英文/日文/繁體中文）
+    以 Groq 為主；若無 Groq 則回覆錯誤訊息（避免空回覆）
     """
     if not groq_client:
         return "抱歉，翻譯引擎暫不可用。"
@@ -355,6 +357,42 @@ def translate_text(content: str, target_lang_display: str) -> str:
     except Exception as e:
         log.warning(f"翻譯失敗：{e}")
         return "抱歉，翻譯失敗。"
+
+# ### NEW: 中英雙向互譯（雙向判斷→翻譯）
+def translate_bilingual(content: str) -> str:
+    """
+    中英雙向互譯規則：
+    - 若輸入以繁體中文為主：翻成英文
+    - 若輸入以英文為主：翻成繁體中文
+    - 混合情況：先判斷主要語言，再翻譯到對向語言
+    - 僅輸出譯文，不加多餘說明；保留數字、符號、程式碼區塊
+    提示詞已針對技術文本做處理，避免改動代碼語意。
+    """
+    if not groq_client:
+        return "抱歉，翻譯引擎暫不可用。"
+    try:
+        sys_prompt = (
+            "You are a bilingual translator for Traditional Chinese and English.\n"
+            "Rules:\n"
+            "1) Detect the main language of the input.\n"
+            "2) If input is mainly Traditional Chinese, translate to natural English.\n"
+            "3) If input is mainly English, translate to natural Traditional Chinese.\n"
+            "4) Keep formatting; preserve numbers, symbols, inline code, and code blocks.\n"
+            "5) Output ONLY the translation text. Do not add notes or explanations."
+        )
+        r = groq_client.chat.completions.create(
+            model=GROQ_MODEL_PRIMARY,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": content}
+            ],
+            temperature=0.2,
+            max_tokens=len(content) * 2 + 120
+        )
+        return (r.choices[0].message.content or "").strip()
+    except Exception as e:
+        log.warning(f"雙向翻譯失敗：{e}")
+        return "抱歉，雙向翻譯失敗。"
 
 # ========= 股票 =========
 _TW_CODE_RE = re.compile(r'^\d{4,6}[A-Za-z]?$')
@@ -504,7 +542,8 @@ def get_bot_gold() -> Tuple[str, Optional[float], Optional[float], Optional[str]
         f"來源：台灣銀行（{BOT_GOLD_URL}）"
     )
     return msg, sell, buy, ts
-    # ========= 匯率 =========
+
+# ========= 匯率 =========
 def jpy_twd() -> str:
     try:
         res = requests.get("https://open.er-api.com/v6/latest/JPY", timeout=10)
@@ -630,6 +669,7 @@ def flex_submenu(kind: str, chat_id: Optional[str] = None) -> FlexSendMessage:
             ButtonComponent(action=MessageAction(label="翻英文", text="翻譯->英文")),
             ButtonComponent(action=MessageAction(label="翻日文", text="翻譯->日文")),
             ButtonComponent(action=MessageAction(label="翻繁中", text="翻譯->繁體中文")),
+            ButtonComponent(action=MessageAction(label="中英互譯", text="翻譯->中英雙向")),  # ### NEW: 新增互譯按鈕
             ButtonComponent(action=MessageAction(label="結束翻譯", text="翻譯->結束")),
         ]
     elif kind == "settings":
@@ -759,16 +799,31 @@ def on_message(event: MessageEvent):
                 translation_states.pop(chat_id, None)
                 reply_text_audio_flex(event.reply_token, chat_id, "✅ 已結束翻譯模式", None, 0)
             else:
-                translation_states[chat_id] = lang
-                reply_text_audio_flex(event.reply_token, chat_id, f"🈯 已開啟翻譯模式（→ {lang}）", None, 0)
+                # ### CHANGED: 支援「中英雙向」
+                if lang in ("英文", "日文", "繁體中文", "中英雙向"):
+                    translation_states[chat_id] = lang
+                    label = "中↔英" if lang == "中英雙向" else f"→ {lang}"
+                    reply_text_audio_flex(event.reply_token, chat_id, f"🈯 已開啟翻譯模式（{label}）", None, 0)
+                else:
+                    reply_text_audio_flex(event.reply_token, chat_id, "未支援的翻譯目標。", None, 0)
             return
 
         # === 翻譯模式內容 ===
         if chat_id in translation_states:
-            out = translate_text(text, translation_states[chat_id])
+            mode = translation_states[chat_id]
+            if mode == "中英雙向":  # ### NEW: 雙向互譯入口
+                out = translate_bilingual(text)
+            else:
+                out = translate_text(text, mode)
             audio, dur = (None, 0)
             if tts_enabled[chat_id]:
-                audio, dur = tts_make_url(out, tts_lang[chat_id])
+                # gTTS 語音語系：若為互譯，嘗試以簡單規則決定語音語系
+                lang_code = tts_lang[chat_id]
+                if mode == "中英雙向":
+                    # 粗略偵測：含較多 ASCII → 英文，否則中文
+                    ascii_ratio = sum(1 for ch in out if ord(ch) < 128) / max(1, len(out))
+                    lang_code = "en" if ascii_ratio > 0.6 else "zh-TW"
+                audio, dur = tts_make_url(out, lang_code)
             reply_text_audio_flex(event.reply_token, chat_id, out, audio, dur)
             return
 
@@ -817,7 +872,8 @@ def on_postback(event: PostbackEvent):
         )
     except Exception as e:
         log.error(f"Postback 失敗：{e}")
-    # ========= Routes =========
+
+# ========= Routes =========
 @router.post("/callback")
 async def callback(request: Request):
     sig = request.headers.get("X-Line-Signature", "")
@@ -845,4 +901,3 @@ app.include_router(router)
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app_fastapi:app", host="0.0.0.0", port=port, log_level="info", reload=True)
-    
