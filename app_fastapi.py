@@ -391,14 +391,46 @@ def translate_bilingual(content: str) -> str:
         return "抱歉，翻譯失敗。"
 
 # ========= 股票 =========
-def normalize_ticker(t: str) -> Tuple[str, str]:
-    t = t.strip().upper()
-    if t in ("台股大盤", "大盤"): return "^TWII", "^TWII"
-    if t in ("美股大盤", "美盤", "美股"): return "^GSPC", "^GSPC"
-    if _TW_CODE_RE.match(t): return f"{t}.TW", t
-    return t, t
+# ========= 股票（完整覆蓋版）=========
+# 台股代碼規則：4~6 位數字，可能含一位英文字母後綴（如 1101B → 1101B.TW）
+_TW_CODE_RE = re.compile(r"^(?:[0-9]{4,6})(?:[A-Za-z])?$")
+# 美股代碼規則：1~5 個英文字（排除 JPY 關鍵字以免和匯率指令衝突）
+_US_CODE_RE = re.compile(r"^[A-Za-z]{1,5}$")
+
+def normalize_ticker(raw: str) -> Tuple[str, str]:
+    """
+    將使用者輸入的股票代碼/別名正規化為 Yahoo Finance 可用的 symbol
+    回傳 (yahoo_symbol, display_symbol)
+    - 台股：純數字或數字+字母 → 一律加 .TW（例如 '2002' → '2002.TW'）
+    - 大盤別名：台股大盤/大盤 → ^TWII，美股大盤/美盤/美股 → ^GSPC
+    - 其他純英文字：視為美股（不自動加市場尾碼）
+    """
+    t = (raw or "").strip()
+    u = t.upper()
+
+    # 大盤別名
+    if u in ("台股大盤", "大盤"):
+        return "^TWII", "^TWII"
+    if u in ("美股大盤", "美盤", "美股"):
+        return "^GSPC", "^GSPC"
+
+    # 台股：數字或數字+字母 → 強制 .TW
+    if _TW_CODE_RE.match(u):
+        return f"{u}.TW", u
+
+    # 英文代碼（美股）
+    if _US_CODE_RE.match(u):
+        return u, u
+
+    # 其他情況：原樣回傳（讓上層保守處理）
+    return u, u
 
 def yahoo_snapshot(symbol: str) -> dict:
+    """
+    以 yfinance 取得基本即時/近日快照資訊
+    - 會盡力從 info 或 history 補齊價格
+    - 輸出鍵：name/now_price/change/currency/close_time
+    """
     out = {"name": symbol, "now_price": None, "change": None, "currency": "", "close_time": ""}
     try:
         tk = yf.Ticker(symbol)
@@ -407,6 +439,7 @@ def yahoo_snapshot(symbol: str) -> dict:
             info = tk.info or {}
         except Exception:
             pass
+
         hist = pd.DataFrame()
         try:
             hist = tk.history(period="2d", interval="1d")
@@ -415,16 +448,24 @@ def yahoo_snapshot(symbol: str) -> dict:
 
         out["name"] = info.get("shortName") or info.get("longName") or symbol
         price = info.get("currentPrice") or info.get("regularMarketPrice")
-        if not price and not hist.empty:
+        if price is None and not hist.empty:
             price = float(hist["Close"].iloc[-1])
         if price is not None:
             out["now_price"] = f"{price:.2f}"
-            out["currency"] = info.get("currency") or ("TWD" if symbol.endswith(".TW") else "USD")
-        if not hist.empty and len(hist) >= 2 and float(hist["Close"].iloc[-2]) != 0:
-            chg = float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2])
-            pct = chg / float(hist["Close"].iloc[-2]) * 100
-            sign = "+" if chg >= 0 else ""
-            out["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
+            # 台股預設 TWD
+            if symbol.endswith(".TW"):
+                out["currency"] = "TWD"
+            else:
+                out["currency"] = info.get("currency") or "USD"
+
+        if not hist.empty and len(hist) >= 2:
+            prev = float(hist["Close"].iloc[-2]) if float(hist["Close"].iloc[-2]) != 0 else None
+            last = float(hist["Close"].iloc[-1])
+            if prev:
+                chg = last - prev
+                pct = chg / prev * 100
+                sign = "+" if chg >= 0 else ""
+                out["change"] = f"{sign}{chg:.2f} ({sign}{pct:.2f}%)"
         if not hist.empty:
             out["close_time"] = hist.index[-1].strftime("%Y-%m-%d %H:%M")
     except Exception as e:
@@ -432,21 +473,33 @@ def yahoo_snapshot(symbol: str) -> dict:
     return out
 
 def stock_report(q: str) -> str:
+    """
+    產生條列式股票分析。對台股輸入（例如 '2002'）會自動轉 '2002.TW'
+    並附正確的 Yahoo 連結（台股走 https://tw.stock.yahoo.com/quote/代碼）
+    """
     code, disp = normalize_ticker(q)
     snap = yahoo_snapshot(code)
-    link = (
-        f"https://finance.yahoo.com/quote/{code}"
-        if (code.startswith("^") or not code.endswith(".TW"))
-        else f"https://tw.stock.yahoo.com/quote/{disp}"
+
+    # Yahoo 連結（指向對應語系站點）
+    if code.startswith("^"):  # 指數
+        link = f"https://finance.yahoo.com/quote/{code}"
+    elif code.endswith(".TW"):  # 台股
+        link = f"https://tw.stock.yahoo.com/quote/{disp}"
+    else:  # 其他（多半是美股）
+        link = f"https://finance.yahoo.com/quote/{code}"
+
+    sys = (
+        "你是專業證券分析師，請用繁體中文分段條列："
+        "1) 近期走勢 2) 技術面 3) 基本面 4) 消息 5) 風險 6) 建議與合理區間 7) 結論。"
+        "若資料不足，請保守陳述；勿杜撰精確數字。"
     )
-    sys = "你是專業分析師。分段條列：走勢/技術/基本/消息/風險/建議與區間/結論。缺資料則保守陳述。"
     user = (
-        f"分析代碼：{disp}\n"
+        f"代碼：{disp}\n"
         f"名稱：{snap.get('name')}\n"
         f"價格：{snap.get('now_price')} {snap.get('currency')}\n"
         f"漲跌：{snap.get('change')}\n"
         f"時間：{snap.get('close_time')}\n"
-        f"請用繁體中文分析近期走勢並附連結：{link}"
+        f"參考連結：{link}"
     )
     return ai_chat([{"role": "system", "content": sys}, {"role": "user", "content": user}])
 
