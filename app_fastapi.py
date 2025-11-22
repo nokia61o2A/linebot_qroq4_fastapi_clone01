@@ -2,13 +2,24 @@
 # =============================================================================
 # LINE Bot + FastAPI (金價 / 股票 / 彩票 / 翻譯 / TTS / 單聊 Loading 動畫)
 # -----------------------------------------------------------------------------
-# ✅ 修正版要點
+# ✅ 修正版要點（含本次「自動應答模式」修正 + QuickReplyButton 自動應答OFF）
 # 1) 指令匹配不到時，最終一律回到「一般 LLM 對話（代入人設）」。
 # 2) 加回 _TW_CODE_RE / _US_CODE_RE，避免 NameError 導致整段對話中斷。
 # 3) 彩票：「優先」呼叫你獨立模組 my_commands/lottery_gpt.py（大樂透/威力彩/今彩539），
 #    其他彩種「後備」走 TaiwanLotteryCrawler，皆含錯誤保底。
 # 4) 翻譯模式新增「中英雙向」；TTS 在雙向模式會依輸出語種自動選 en/zh-TW。
 # 5) 任何錯誤都以文字回覆保底，避免 LINE 空訊息。
+# 6) ✅ 新增「自動應答模式」：支援 1:1 / 群組 / 聊天室不同默認行為
+#    - 私聊：預設自動應答 ON，照舊回覆所有訊息。
+#    - 群組 / 聊天室：預設自動應答 OFF，不會主動回覆。
+#      * OFF 時：僅在訊息內出現「@ai」或包含 BOT_NAME 片段時，才會回覆，並自動切到 ON。
+#      * ON 時：群組 / 聊天室回復所有訊息（原本的所有分析功能）。
+#    - 使用「開啟自動回答／關閉自動回答」可手動切換。
+#    - 當自動應答 OFF 時，QuickReply 整排按鈕會隱藏；ON 時才會顯示。
+#    - 自動應答 OFF 時關閉訊息會回「我先退下了」。
+# 7) ✅ 新增 QuickReplyButton「自動應答OFF」：
+#    - 只在自動應答為 ON 且 quick_bar 有顯示時才會出現。
+#    - 點擊後會送出文字「關閉自動回答」，由 on_message 內原有邏輯關閉自動應答。
 # =============================================================================
 
 import os
@@ -81,6 +92,16 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")  # e.g. 官方或自建代理
 
+# ✅ Bot 名稱關鍵字（用於群組 / 聊天室偵測 @ 提及）
+#    - BOT_NAME：可設定完整顯示名稱或暱稱，例如 "AI醬"、"金價小幫手"。
+#    - BOT_NAME_KEYWORDS：若要額外自訂多個關鍵字（逗號分隔），例如 "ai,AI,小幫手"。
+BOT_NAME = os.getenv("BOT_NAME", "").strip()
+BOT_NAME_KEYWORDS = [
+    kw.strip().lower()
+    for kw in os.getenv("BOT_NAME_KEYWORDS", "ai,ＡＩ,ai醬,ai醬,ai bot").split(",")
+    if kw.strip()
+]
+
 if not BASE_URL or not CHANNEL_TOKEN or not CHANNEL_SECRET:
     raise RuntimeError("請設定環境變數：BASE_URL、CHANNEL_ACCESS_TOKEN、CHANNEL_SECRET")
 
@@ -143,7 +164,7 @@ conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY = 10
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}  # chat_id -> 目標語言顯示字串（英文/日文/繁體中文/中英雙向）
-auto_reply_status: Dict[str, bool] = {}
+auto_reply_status: Dict[str, bool] = {}  # ✅ 自動應答 ON/OFF（key = chat_id）
 tts_enabled: Dict[str, bool] = {}
 tts_lang: Dict[str, str] = {}  # gTTS 用語言碼（e.g. zh-TW）
 
@@ -205,7 +226,23 @@ def send_loading_animation(user_id: str, seconds: int = 5):
         log.warning(f"⚠️ Loading 動畫觸發失敗：{e}")
 
 # ========= QuickReply（依 TTS 與翻譯模式動態顯示）=========
-def quick_bar(chat_id: Optional[str] = None) -> QuickReply:
+def quick_bar(chat_id: Optional[str] = None) -> Optional[QuickReply]:
+    """
+    ✅ 依「自動應答模式」決定是否顯示 QuickReply：
+    - 私聊：預設 auto_reply_status[chat_id] = True → 一律顯示。
+    - 群組 / 聊天室：
+        * 自動應答 ON：顯示完整 QuickReply。
+        * 自動應答 OFF：整排 QuickReply 隱藏（回傳 None）。
+    並加入：
+    - 「自動應答OFF」按鈕：
+        * 只在 auto_reply_status 為 True 時顯示。
+        * 點擊後送出文字「關閉自動回答」，由 on_message 內既有邏輯關閉自動應答。
+    """
+    if chat_id is not None:
+        # 預設 False 代表：群組 / 聊天室若沒有被初始化就不顯示
+        if not auto_reply_status.get(chat_id, True):
+            return None
+
     items: List[QuickReplyButton] = [
         QuickReplyButton(action=MessageAction(label="主選單", text="選單")),
         QuickReplyButton(action=MessageAction(label="台股大盤", text="台股大盤")),
@@ -220,9 +257,20 @@ def quick_bar(chat_id: Optional[str] = None) -> QuickReply:
 
     # 僅顯示 TTS「其中之一」按鈕
     if chat_id and tts_enabled.get(chat_id, False):
+        # 在第 7 個位置插入「TTS OFF」，介於查 NVDA 與人設之間
         items.insert(7, QuickReplyButton(action=MessageAction(label="語音 關", text="TTS OFF")))
     else:
         items.insert(7, QuickReplyButton(action=MessageAction(label="語音 開✅", text="TTS ON")))
+
+    # ✅ 自動應答 OFF 快速按鈕（只有在目前自動應答為 ON 時顯示）
+    #    - 按下後會送出純文字「關閉自動回答」，由 on_message 中原本的
+    #      if text in ("開啟自動回答","關閉自動回答") 邏輯處理。
+    if chat_id and auto_reply_status.get(chat_id, True):
+        items.append(
+            QuickReplyButton(
+                action=MessageAction(label="自動應答OFF", text="關閉自動回答")
+            )
+        )
 
     # 翻譯模式：最後一鍵換成「結束翻譯」
     if chat_id and chat_id in translation_states:
@@ -273,12 +321,14 @@ def reply_text_audio_flex(
     """
     - 只有 audio_url 存在時才附 Flex 提示卡（TTS OFF 不出現）
     - 所有訊息 sender.name 隨翻譯模式顯示「翻譯模式（中↔英）」等
+    - QuickReply 是否顯示，依 quick_bar(chat_id)（會看 auto_reply_status）
     """
     sender_name, sender_icon = display_sender_name(chat_id)
     msgs = []
 
     # 1) Text
-    text_msg = TextSendMessage(text=text, quick_reply=quick_bar(chat_id))
+    qr = quick_bar(chat_id)
+    text_msg = TextSendMessage(text=text, quick_reply=qr)
     text_msg.sender = {"name": sender_name}
     if sender_icon:
         text_msg.sender["iconUrl"] = sender_icon
@@ -784,13 +834,23 @@ def flex_submenu(kind: str, chat_id: Optional[str] = None) -> FlexSendMessage:
     )
     return FlexSendMessage(alt_text=title, contents=bubble, quick_reply=quick_bar(chat_id))
 
-# ====== 下頁接續：TTS、事件處理（包含「指令匹配不到 → 一般 LLM 對話」）、路由與 main ======
 # ========== ✅ TTS 功能 ==========
-def ensure_defaults(chat_id: str):
-    if chat_id not in auto_reply_status: auto_reply_status[chat_id] = True
-    if chat_id not in tts_enabled: tts_enabled[chat_id] = False
-    if chat_id not in tts_lang: tts_lang[chat_id] = "zh-TW"
-    if chat_id not in user_persona: user_persona[chat_id] = "sweet"
+def ensure_defaults(chat_id: str, is_private: bool):
+    """
+    ✅ 依 chat 類型初始化預設值：
+    - 私聊 (SourceUser)：auto_reply_status = True（預設會自動回覆所有訊息）
+    - 群組 / 聊天室：auto_reply_status = False（預設不主動回覆，等待被 @ 才開啟）
+    其餘 TTS / 人設維持原本預設。
+    """
+    if chat_id not in auto_reply_status:
+        # 私聊預設 ON；群組 / 聊天室預設 OFF
+        auto_reply_status[chat_id] = True if is_private else False
+    if chat_id not in tts_enabled:
+        tts_enabled[chat_id] = False
+    if chat_id not in tts_lang:
+        tts_lang[chat_id] = "zh-TW"
+    if chat_id not in user_persona:
+        user_persona[chat_id] = "sweet"
 
 def tts_make_url(text: str, lang_code: str) -> Tuple[Optional[str], int]:
     try:
@@ -817,7 +877,7 @@ def tts_make_url(text: str, lang_code: str) -> Tuple[Optional[str], int]:
         return None, 0
 
 
-# ========== ✅ 中英雙向翻譯 ==========
+# ========== ✅ 中英雙向翻譯（此版本會中英雙語一起回）=========
 def translate_bilingual(content: str) -> str:
     try:
         r = groq_client.chat.completions.create(
@@ -834,26 +894,84 @@ def translate_bilingual(content: str) -> str:
         log.warning(f"中英雙向翻譯失敗: {e}")
         return content
 
+# ========== ✅ 判斷是否在群組被 @ 到 Bot ==========
+def is_bot_mentioned(text: str) -> bool:
+    """
+    ✅ 用來判斷在「自動應答 OFF」的群組 / 聊天室中，
+       是否有明確 @ 到機器人：
+       - 文字中出現 "@ai"（大小寫不分）
+       - 若有設定 BOT_NAME，則：
+         * "@{BOT_NAME}" 或
+         * 純文字包含 BOT_NAME 關鍵字
+       - 若設定 BOT_NAME_KEYWORDS，則若文字中包含任一關鍵字也算
+    """
+    if not text:
+        return False
+    low = text.lower()
+
+    # 明確 @ai
+    if "@ai" in low:
+        return True
+
+    # BOT_NAME 完整名稱 / 片段
+    if BOT_NAME:
+        name_low = BOT_NAME.lower()
+        if f"@{name_low}" in low or name_low in low:
+            return True
+
+    # 額外關鍵字片段
+    for kw in BOT_NAME_KEYWORDS:
+        if kw and kw in low:
+            return True
+
+    return False
+
 
 # ========== ✅ LINE Message Event ==========
 @handler.add(MessageEvent, message=TextMessage)
 def on_message(event: MessageEvent):
-    chat_id = (
-        event.source.group_id if isinstance(event.source, SourceGroup)
-        else event.source.room_id if isinstance(event.source, SourceRoom)
-        else event.source.user_id
-    )
+    # 依來源判斷 chat_id 與聊天型態
+    if isinstance(event.source, SourceGroup):
+        chat_id = event.source.group_id
+        is_private = False
+    elif isinstance(event.source, SourceRoom):
+        chat_id = event.source.room_id
+        is_private = False
+    else:
+        chat_id = event.source.user_id
+        is_private = True
 
-    ensure_defaults(chat_id)
+    # ✅ 初始化預設值（會依 is_private 設定自動應答 ON / OFF）
+    ensure_defaults(chat_id, is_private)
+
     text = (event.message.text or "").strip()
     low = text.lower()
 
-    should = isinstance(event.source, SourceUser) or auto_reply_status.get(chat_id, True)
-    if not should:
+    # ======= ✅ 自動應答模式：是否要處理這一則訊息？ =======
+    # 私聊：永遠回覆（auto_reply_status 仍可供之後擴充使用）
+    if is_private:
+        should_handle = True
+    else:
+        # 群組 / 聊天室
+        ar = auto_reply_status.get(chat_id, False)
+        if ar:
+            # 自動應答 ON：回覆所有訊息
+            should_handle = True
+        else:
+            # 自動應答 OFF：僅在被 @（或包含設定關鍵字）時才啟動
+            if is_bot_mentioned(text):
+                auto_reply_status[chat_id] = True  # ✅ 一旦被 @，自動切換為 ON
+                log.info(f"自動應答由 OFF → ON (chat_id={chat_id}) 因為被 @ 觸發")
+                should_handle = True
+            else:
+                should_handle = False
+
+    # 若自動應答 OFF 且沒有被 @，直接忽略訊息
+    if not should_handle:
         return
 
     # 單聊 → Loading 動畫
-    if isinstance(event.source, SourceUser):
+    if is_private:
         send_loading_animation(chat_id, seconds=3)
 
     try:
@@ -902,8 +1020,10 @@ def on_message(event: MessageEvent):
             kind = "今彩539" if text=="539" else text
 
             if _EXT_LOTTERY_OK and kind in ("大樂透","威力彩","今彩539"):
-                try: msg = ext_lottery_gpt(kind)
-                except: msg = lottery_report_all(kind)
+                try:
+                    msg = ext_lottery_gpt(kind)
+                except Exception:
+                    msg = lottery_report_all(kind)
             else:
                 msg = lottery_report_all(kind)
 
@@ -911,16 +1031,35 @@ def on_message(event: MessageEvent):
             reply_text_audio_flex(event.reply_token, chat_id, msg, audio, dur)
             return
 
-        # ======= ✅ 自動回覆 =======
+        # ======= ✅ 自動回覆 / 自動應答開關 =======
         if text in ("開啟自動回答","關閉自動回答"):
-            auto_reply_status[chat_id] = (text=="開啟自動回答")
-            reply_text_audio_flex(event.reply_token, chat_id, f"自動回覆：{text}", None, 0)
+            if text == "開啟自動回答":
+                auto_reply_status[chat_id] = True
+                # ON 時 QuickReply 會重新顯示
+                reply_text_audio_flex(
+                    event.reply_token,
+                    chat_id,
+                    "自動應答已開啟 ✅ 之後我會在這個聊天室主動回覆大家的訊息。",
+                    None,
+                    0
+                )
+            else:
+                auto_reply_status[chat_id] = False
+                # OFF 時 QuickReply 會隱藏；關閉訊息改成「我先退下了」
+                reply_text_audio_flex(
+                    event.reply_token,
+                    chat_id,
+                    "自動應答已關閉，我先退下了 🙏 有需要再 @ 我把我叫出來。",
+                    None,
+                    0
+                )
             return
 
         # ======= ✅ 人設切換 =======
         if text in PERSONA_ALIAS:
             role = PERSONA_ALIAS[text]
-            if role=="random": role=random.choice(list(PERSONAS.keys()))
+            if role=="random":
+                role = random.choice(list(PERSONAS.keys()))
             user_persona[chat_id] = role
             p = PERSONAS[role]
             reply_text_audio_flex(event.reply_token, chat_id, f"角色切換：{p['title']} {p['greet']}", None, 0)
@@ -969,8 +1108,29 @@ def on_message(event: MessageEvent):
 # ========== ✅ Postback ==========
 @handler.add(PostbackEvent)
 def on_postback(event: PostbackEvent):
+    """
+    Postback 事件也要套用自動應答邏輯：
+    - 私聊：照常。
+    - 群組 / 聊天室：若自動應答 OFF，則不處理 Postback（避免亂入）。
+    """
+    # 與 on_message 同樣方式判斷 chat_id / is_private
+    if isinstance(event.source, SourceGroup):
+        chat_id = event.source.group_id
+        is_private = False
+    elif isinstance(event.source, SourceRoom):
+        chat_id = event.source.room_id
+        is_private = False
+    else:
+        chat_id = event.source.user_id
+        is_private = True
+
+    ensure_defaults(chat_id, is_private)
+
+    # 群組 / 聊天室若自動應答 OFF，直接略過 Postback
+    if not is_private and not auto_reply_status.get(chat_id, False):
+        return
+
     sub = (event.postback.data or "").replace("menu:","")
-    chat_id = event.source.user_id
     line_bot_api.reply_message(
         event.reply_token,
         [
