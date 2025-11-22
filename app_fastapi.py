@@ -2,24 +2,28 @@
 # =============================================================================
 # LINE Bot + FastAPI (金價 / 股票 / 彩票 / 翻譯 / TTS / 單聊 Loading 動畫)
 # -----------------------------------------------------------------------------
-# ✅ 修正版要點（含本次「自動應答模式」修正 + QuickReplyButton 自動應答OFF）
+# ✅ 修正版要點（含本次「@ai 行為」修正 + QuickReplyButton 自動應答OFF）
 # 1) 指令匹配不到時，最終一律回到「一般 LLM 對話（代入人設）」。
 # 2) 加回 _TW_CODE_RE / _US_CODE_RE，避免 NameError 導致整段對話中斷。
 # 3) 彩票：「優先」呼叫你獨立模組 my_commands/lottery_gpt.py（大樂透/威力彩/今彩539），
 #    其他彩種「後備」走 TaiwanLotteryCrawler，皆含錯誤保底。
 # 4) 翻譯模式新增「中英雙向」；TTS 在雙向模式會依輸出語種自動選 en/zh-TW。
 # 5) 任何錯誤都以文字回覆保底，避免 LINE 空訊息。
-# 6) ✅ 新增「自動應答模式」：支援 1:1 / 群組 / 聊天室不同默認行為
+# 6) ✅ 自動應答模式：
 #    - 私聊：預設自動應答 ON，照舊回覆所有訊息。
 #    - 群組 / 聊天室：預設自動應答 OFF，不會主動回覆。
-#      * OFF 時：僅在訊息內出現「@ai」或包含 BOT_NAME 片段時，才會回覆，並自動切到 ON。
+#      * OFF 時：僅在「@ai 指令」或「@機器人名 + 指令」才會處理該次指令，但 **不改變** 自動應答狀態。
+#      * OFF 時：若「只有 @ai」或「只有 @機器人名（無其它文字）」→ 將自動應答切到 ON，並回覆 "I'm back!"。
 #      * ON 時：群組 / 聊天室回復所有訊息（原本的所有分析功能）。
 #    - 使用「開啟自動回答／關閉自動回答」可手動切換。
 #    - 當自動應答 OFF 時，QuickReply 整排按鈕會隱藏；ON 時才會顯示。
 #    - 自動應答 OFF 時關閉訊息會回「我先退下了」。
-# 7) ✅ 新增 QuickReplyButton「自動應答OFF」：
-#    - 只在自動應答為 ON 且 quick_bar 有顯示時才會出現。
-#    - 點擊後會送出文字「關閉自動回答」，由 on_message 內原有邏輯關閉自動應答。
+# 7) ✅ QuickReplyButton 新增「自動應答OFF」按鈕：
+#    - 只在自動應答為 ON 時顯示。
+#    - 點擊後會送出文字「關閉自動回答」，由 on_message 既有邏輯處理。
+# 8) ✅ 本次重點修正：
+#    - 「@ai 有帶訊息/指令」：會把 @ 前綴去掉後的內容當指令處理，但 **不改變** 自動應答 ON/OFF。
+#    - 「只有 @ai 或只有 @機器人名」：才會把自動應答模式切成 ON，並回覆 "I'm back!"。
 # =============================================================================
 
 import os
@@ -98,7 +102,7 @@ OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")  # e.g. 官方或自建代理
 BOT_NAME = os.getenv("BOT_NAME", "").strip()
 BOT_NAME_KEYWORDS = [
     kw.strip().lower()
-    for kw in os.getenv("BOT_NAME_KEYWORDS", "ai,ＡＩ,ai醬,ai醬,ai bot").split(",")
+    for kw in os.getenv("BOT_NAME_KEYWORDS", "ai,ＡＩ,ai醬,ai bot").split(",")
     if kw.strip()
 ]
 
@@ -164,7 +168,7 @@ conversation_history: Dict[str, List[dict]] = {}
 MAX_HISTORY = 10
 user_persona: Dict[str, str] = {}
 translation_states: Dict[str, str] = {}  # chat_id -> 目標語言顯示字串（英文/日文/繁體中文/中英雙向）
-auto_reply_status: Dict[str, bool] = {}  # ✅ 自動應答 ON/OFF（key = chat_id）
+auto_reply_status: Dict[str, bool] = {}  # 自動應答 ON/OFF（key = chat_id）
 tts_enabled: Dict[str, bool] = {}
 tts_lang: Dict[str, str] = {}  # gTTS 用語言碼（e.g. zh-TW）
 
@@ -236,10 +240,10 @@ def quick_bar(chat_id: Optional[str] = None) -> Optional[QuickReply]:
     並加入：
     - 「自動應答OFF」按鈕：
         * 只在 auto_reply_status 為 True 時顯示。
-        * 點擊後送出文字「關閉自動回答」，由 on_message 內既有邏輯關閉自動應答。
+        * 點擊後送出文字「關閉自動回答」，由 on_message 中既有邏輯關閉自動應答。
     """
     if chat_id is not None:
-        # 預設 False 代表：群組 / 聊天室若沒有被初始化就不顯示
+        # 群組 / 聊天室若 auto_reply_status=False → 不顯示 QuickReply
         if not auto_reply_status.get(chat_id, True):
             return None
 
@@ -257,14 +261,11 @@ def quick_bar(chat_id: Optional[str] = None) -> Optional[QuickReply]:
 
     # 僅顯示 TTS「其中之一」按鈕
     if chat_id and tts_enabled.get(chat_id, False):
-        # 在第 7 個位置插入「TTS OFF」，介於查 NVDA 與人設之間
         items.insert(7, QuickReplyButton(action=MessageAction(label="語音 關", text="TTS OFF")))
     else:
         items.insert(7, QuickReplyButton(action=MessageAction(label="語音 開✅", text="TTS ON")))
 
     # ✅ 自動應答 OFF 快速按鈕（只有在目前自動應答為 ON 時顯示）
-    #    - 按下後會送出純文字「關閉自動回答」，由 on_message 中原本的
-    #      if text in ("開啟自動回答","關閉自動回答") 邏輯處理。
     if chat_id and auto_reply_status.get(chat_id, True):
         items.append(
             QuickReplyButton(
@@ -410,42 +411,11 @@ def translate_text(content: str, target_lang_display: str) -> str:
         log.warning(f"翻譯失敗：{e}")
         return "抱歉，翻譯失敗。"
 
-def translate_bilingual(content: str) -> str:
-    """
-    中英雙向互譯：
-    - 如果主要為中文，輸出英文
-    - 如果主要為英文，輸出中文
-    - 混雜時給出雙欄（中→英 / 英→中）
-    """
-    if not groq_client:
-        return "抱歉，翻譯引擎暫不可用。"
-    # 粗略偵測英文比例
-    ascii_ratio = sum(1 for ch in content if ord(ch) < 128) / max(1, len(content))
-    if ascii_ratio > 0.6:
-        # 視為英文 → 翻成中文
-        prompt = f"Translate to Traditional Chinese (Taiwan). Output ONLY the translation:\n{content}"
-    else:
-        # 視為中文 → 翻成英文
-        prompt = f"Translate to English. Output ONLY the translation:\n{content}"
-    try:
-        r = groq_client.chat.completions.create(
-            model=GROQ_MODEL_PRIMARY,
-            messages=[{"role": "system", "content": "You are a precise translator."},
-                      {"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=len(content) * 2 + 80
-        )
-        return (r.choices[0].message.content or "").strip()
-    except Exception as e:
-        log.warning(f"雙向翻譯失敗：{e}")
-        return "抱歉，翻譯失敗。"
-
 # ========= 股票 =========
-# ========= 股票（完整覆蓋版）=========
 # 台股代碼規則：4~6 位數字，可能含一位英文字母後綴（如 1101B → 1101B.TW）
-_TW_CODE_RE = re.compile(r"^(?:[0-9]{4,6})(?:[A-Za-z])?$")
+_TW_CODE_FULL_RE = re.compile(r"^(?:[0-9]{4,6})(?:[A-Za-z])?$")
 # 美股代碼規則：1~5 個英文字（排除 JPY 關鍵字以免和匯率指令衝突）
-_US_CODE_RE = re.compile(r"^[A-Za-z]{1,5}$")
+_US_CODE_FULL_RE = re.compile(r"^[A-Za-z]{1,5}$")
 
 def normalize_ticker(raw: str) -> Tuple[str, str]:
     """
@@ -465,11 +435,11 @@ def normalize_ticker(raw: str) -> Tuple[str, str]:
         return "^GSPC", "^GSPC"
 
     # 台股：數字或數字+字母 → 強制 .TW
-    if _TW_CODE_RE.match(u):
+    if _TW_CODE_FULL_RE.match(u):
         return f"{u}.TW", u
 
     # 英文代碼（美股）
-    if _US_CODE_RE.match(u):
+    if _US_CODE_FULL_RE.match(u):
         return u, u
 
     # 其他情況：原樣回傳（讓上層保守處理）
@@ -843,7 +813,6 @@ def ensure_defaults(chat_id: str, is_private: bool):
     其餘 TTS / 人設維持原本預設。
     """
     if chat_id not in auto_reply_status:
-        # 私聊預設 ON；群組 / 聊天室預設 OFF
         auto_reply_status[chat_id] = True if is_private else False
     if chat_id not in tts_enabled:
         tts_enabled[chat_id] = False
@@ -879,6 +848,13 @@ def tts_make_url(text: str, lang_code: str) -> Tuple[Optional[str], int]:
 
 # ========== ✅ 中英雙向翻譯（此版本會中英雙語一起回）=========
 def translate_bilingual(content: str) -> str:
+    """
+    ✅ 最終採用版本：
+    - 讓 model 同時輸出中英對照（方便看原文 + 翻譯）
+    - 由系統提示「Reply with Chinese + English」
+    """
+    if not groq_client:
+        return content
     try:
         r = groq_client.chat.completions.create(
             model=GROQ_MODEL_PRIMARY,
@@ -889,43 +865,81 @@ def translate_bilingual(content: str) -> str:
             temperature=0.3,
             max_tokens=400
         )
-        return r.choices[0].message.content.strip()
+        return (r.choices[0].message.content or "").strip()
     except Exception as e:
         log.warning(f"中英雙向翻譯失敗: {e}")
         return content
 
-# ========== ✅ 判斷是否在群組被 @ 到 Bot ==========
-def is_bot_mentioned(text: str) -> bool:
+# ========== ✅ 解析 @ai / @機器人名 ==========
+def parse_bot_mention(text: str) -> Tuple[bool, bool, str]:
     """
-    ✅ 用來判斷在「自動應答 OFF」的群組 / 聊天室中，
-       是否有明確 @ 到機器人：
-       - 文字中出現 "@ai"（大小寫不分）
-       - 若有設定 BOT_NAME，則：
-         * "@{BOT_NAME}" 或
-         * 純文字包含 BOT_NAME 關鍵字
-       - 若設定 BOT_NAME_KEYWORDS，則若文字中包含任一關鍵字也算
+    ✅ 專門處理「@ai 訊息/指令」與「只打 @ai」的行為：
+
+    回傳:
+    - mentioned: 是否有明確提到 bot（@ai 或 @機器人名 或關鍵字）
+    - bare_mention: 是否為「只有提到 bot，無其他內容」
+        * 例如："@ai"、"ai"、"@AI醬" → bare_mention=True
+        * 例如："@ai 金價"、"ai 幫我查 2330" → bare_mention=False
+    - cleaned_text: 去掉 @ 部分後的剩餘指令文字（已去除常見前導標點）
+        * 若 bare_mention=True 則 cleaned_text=""
     """
     if not text:
-        return False
-    low = text.lower()
+        return False, False, ""
 
-    # 明確 @ai
-    if "@ai" in low:
-        return True
+    raw = text.strip()
+    if not raw:
+        return False, False, ""
 
-    # BOT_NAME 完整名稱 / 片段
+    low = raw.lower()
+
+    # 建立候選名稱清單（優先長的，避免 "ai" 吃掉 "ai bot"）
+    candidates: List[str] = []
+
+    # 1) BOT_NAME（若有設定）
     if BOT_NAME:
-        name_low = BOT_NAME.lower()
-        if f"@{name_low}" in low or name_low in low:
-            return True
+        candidates.append(BOT_NAME.lower())
 
-    # 額外關鍵字片段
+    # 2) 其它環境變數關鍵字
     for kw in BOT_NAME_KEYWORDS:
-        if kw and kw in low:
-            return True
+        if kw and kw not in candidates:
+            candidates.append(kw)
 
-    return False
+    # 3) 保底關鍵字 "ai" / "ＡＩ"
+    if "ai" not in candidates:
+        candidates.append("ai")
+    if "ＡＩ".lower() not in candidates:
+        candidates.append("ＡＩ".lower())
 
+    # 依長度排序，避免短字先吃掉
+    candidates.sort(key=len, reverse=True)
+
+    best_prefix_len = -1
+    best_payload = None
+
+    for cand in candidates:
+        # cand 已經是小寫
+        for with_at in (True, False):
+            prefix = f"@{cand}" if with_at else cand
+            if low.startswith(prefix):
+                l = len(prefix)
+                if l > best_prefix_len:
+                    best_prefix_len = l
+                    # 從原字串切掉對應長度（保留原大小寫與中英文標點）
+                    payload_raw = raw[len(raw) - len(low) + l:] if len(raw) != len(low) else raw[l:]
+                    # 去掉前後空白與常見標點
+                    payload = payload_raw.lstrip().lstrip(" ,，、:：;；").rstrip()
+                    best_payload = payload
+
+    if best_prefix_len == -1:
+        # 沒偵測到任何 @ai / BOT 名稱
+        return False, False, text
+
+    if not best_payload:
+        # 只有 @ai 或 @BOT_NAME，沒有其它文字
+        return True, True, ""
+
+    # 有提到 bot 且後面還有指令文字
+    return True, False, best_payload
 
 # ========== ✅ LINE Message Event ==========
 @handler.add(MessageEvent, message=TextMessage)
@@ -941,34 +955,67 @@ def on_message(event: MessageEvent):
         chat_id = event.source.user_id
         is_private = True
 
-    # ✅ 初始化預設值（會依 is_private 設定自動應答 ON / OFF）
+    # 初始化預設值
     ensure_defaults(chat_id, is_private)
 
-    text = (event.message.text or "").strip()
+    original_text = (event.message.text or "")
+    text = original_text.strip()
     low = text.lower()
 
+    mentioned = False
+    bare_mention = False
+    cmd_text = text
+
+    # ✅ 群組 / 聊天室才需要特別解析 @ai 行為
+    if not is_private:
+        mentioned, bare_mention, cleaned = parse_bot_mention(text)
+        if mentioned:
+            cmd_text = cleaned or ""  # 有指令就用指令，沒有就空字串
+        else:
+            cmd_text = text  # 沒有 @ 到，就維持原文字
+    else:
+        # 私聊不用解析 @ai，直接用原文字
+        cmd_text = text
+
     # ======= ✅ 自動應答模式：是否要處理這一則訊息？ =======
-    # 私聊：永遠回覆（auto_reply_status 仍可供之後擴充使用）
     if is_private:
+        # 私聊：永遠處理
         should_handle = True
     else:
-        # 群組 / 聊天室
         ar = auto_reply_status.get(chat_id, False)
         if ar:
-            # 自動應答 ON：回覆所有訊息
+            # 群組 / 聊天室，自動應答 ON：處理所有訊息（cmd_text 可能已去掉 @ai）
             should_handle = True
         else:
-            # 自動應答 OFF：僅在被 @（或包含設定關鍵字）時才啟動
-            if is_bot_mentioned(text):
-                auto_reply_status[chat_id] = True  # ✅ 一旦被 @，自動切換為 ON
-                log.info(f"自動應答由 OFF → ON (chat_id={chat_id}) 因為被 @ 觸發")
-                should_handle = True
+            # 自動應答 OFF
+            if mentioned:
+                if bare_mention:
+                    # ✅ 只有 "@ai" 或 "@機器人名"：
+                    #    → 把自動應答切到 ON，並回覆 "I'm back!"，然後結束這次處理。
+                    auto_reply_status[chat_id] = True
+                    reply_text_audio_flex(
+                        event.reply_token,
+                        chat_id,
+                        "I'm back!",
+                        None,
+                        0
+                    )
+                    return
+                else:
+                    # ✅ "@ai 訊息/指令"：
+                    #    → 處理這一次指令，但 **不改變** 自動應答 ON/OFF 狀態
+                    should_handle = True
+                # 此時 cmd_text 已經是去掉 @ 前綴的內容
             else:
+                # 沒有提到 bot，且目前自動應答 OFF → 不處理
                 should_handle = False
 
-    # 若自動應答 OFF 且沒有被 @，直接忽略訊息
     if not should_handle:
         return
+
+    # 從這裡開始，一律改用「cmd_text」當作指令內容
+    text = cmd_text or ""
+    low = text.lower()
 
     # 單聊 → Loading 動畫
     if is_private:
@@ -1035,7 +1082,6 @@ def on_message(event: MessageEvent):
         if text in ("開啟自動回答","關閉自動回答"):
             if text == "開啟自動回答":
                 auto_reply_status[chat_id] = True
-                # ON 時 QuickReply 會重新顯示
                 reply_text_audio_flex(
                     event.reply_token,
                     chat_id,
@@ -1045,7 +1091,6 @@ def on_message(event: MessageEvent):
                 )
             else:
                 auto_reply_status[chat_id] = False
-                # OFF 時 QuickReply 會隱藏；關閉訊息改成「我先退下了」
                 reply_text_audio_flex(
                     event.reply_token,
                     chat_id,
@@ -1113,7 +1158,6 @@ def on_postback(event: PostbackEvent):
     - 私聊：照常。
     - 群組 / 聊天室：若自動應答 OFF，則不處理 Postback（避免亂入）。
     """
-    # 與 on_message 同樣方式判斷 chat_id / is_private
     if isinstance(event.source, SourceGroup):
         chat_id = event.source.group_id
         is_private = False
@@ -1126,8 +1170,8 @@ def on_postback(event: PostbackEvent):
 
     ensure_defaults(chat_id, is_private)
 
-    # 群組 / 聊天室若自動應答 OFF，直接略過 Postback
     if not is_private and not auto_reply_status.get(chat_id, False):
+        # 群組 / 聊天室且自動應答 OFF → 不處理 Postback
         return
 
     sub = (event.postback.data or "").replace("menu:","")
