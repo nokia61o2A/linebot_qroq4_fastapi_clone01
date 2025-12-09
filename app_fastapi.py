@@ -182,8 +182,8 @@ PERSONAS = {
 PERSONA_ALIAS = {"甜": "sweet", "鹹": "salty", "萌": "moe", "酷": "cool", "random": "random"}
 
 # ========= 股票代碼 Regex（修正缺失）=========
-# 台股：常見 4 碼（2330、2603…），ETF 可另行加入白名單
-_TW_CODE_RE = re.compile(r'^\d{4}$')
+# 台股代碼：4~5 位數字，可選擇結尾 1 個大寫英文字母
+_TW_CODE_RE = re.compile(r'^\d{4,5}[A-Z]?$')
 # 美股：1~5 英文字母（NVDA、AAPL、TSLA…）
 _US_CODE_RE = re.compile(r'^[A-Z]{1,5}$')
 
