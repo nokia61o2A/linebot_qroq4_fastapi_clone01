@@ -1,4 +1,4 @@
-# app_fastapi.py 2025/12/9
+# app_fastapi.py
 # =============================================================================
 # LINE Bot + FastAPI (金價 / 股票 / 彩票 / 翻譯 / TTS / 單聊 Loading 動畫)
 # -----------------------------------------------------------------------------
@@ -400,7 +400,7 @@ def translate_text(content: str, target_lang_display: str) -> str:
         r = groq_client.chat.completions.create(
             model=GROQ_MODEL_PRIMARY,
             messages=[
-                {"role": "system", "content": "You are a precise translator. Output ONLY the translated text."},
+                {"role": "system", "content": "You are a precise translator. Output ONLY the translated text. Do NOT converse. Do NOT explain."},
                 {"role": "user", "content": f"Translate to {target_lang_display}:\n{content}"}
             ],
             temperature=0.2,
@@ -851,7 +851,7 @@ def translate_bilingual(content: str) -> str:
     """
     ✅ 最終採用版本：
     - 讓 model 同時輸出中英對照（方便看原文 + 翻譯）
-    - 由系統提示「Reply with Chinese + English」
+    - 強制翻譯模式，不進行對話
     """
     if not groq_client:
         return content
@@ -859,7 +859,15 @@ def translate_bilingual(content: str) -> str:
         r = groq_client.chat.completions.create(
             model=GROQ_MODEL_PRIMARY,
             messages=[
-                {"role": "system", "content": "You are a bilingual translator. Reply with Chinese + English."},
+                {"role": "system", "content": (
+                    "You are a strict bilingual translator. "
+                    "You must translate the user's input directly. "
+                    "If the input is Chinese, translate it to English. "
+                    "If the input is English, translate it to Chinese. "
+                    "Output BOTH the original text and the translation. "
+                    "Do NOT converse, do NOT answer questions, and do NOT explain. "
+                    "Just provide the translation."
+                )},
                 {"role": "user", "content": content},
             ],
             temperature=0.3,
