@@ -109,16 +109,45 @@ def lottery_gpt(lottery_type: str) -> str:
                 p += random.sample(remain, k - len(p))
             return sorted(random.sample(p, k))
 
-        # 組合 1：熱門號碼組合
-        combo1 = pick_from(hot, num_main)
-        # 組合 2：冷門號碼組合
-        combo2 = pick_from(cold, num_main)
+        # 組合 1：冷門號碼組合
+        combo1 = pick_from(cold, num_main)
+        # 組合 2：熱門號碼組合
+        combo2 = pick_from(hot, num_main)
         # 組合 3：隨機號碼組合
         all_nums = list(range(1, max_num + 1))
         combo3 = sorted(random.sample(all_nums, num_main))
 
         def fmt(nums):
             return "、".join(f"{n:02d}" for n in nums)
+
+        # ===== 本月歷史開獎 =====
+        month_history_str = ""
+        try:
+            now_dt = datetime.now()
+            current_month_draws = []
+            # result 應該是 TaiwanLotteryCrawler 抓回來的 list
+            if isinstance(result, list):
+                for item in result:
+                    d_date = getattr(item, "draw_date", None)
+                    # 確保是 datetime 且為本月
+                    if d_date and isinstance(d_date, datetime) and d_date.year == now_dt.year and d_date.month == now_dt.month:
+                        nums = getattr(item, "numbers", None) or getattr(item, "number", None)
+                        if isinstance(nums, (list, tuple)):
+                            nums_s = ", ".join(f"{n:02d}" for n in nums)
+                            # 特別號
+                            sp_s = ""
+                            if special_label:
+                                sp_val = getattr(item, "special", None)
+                                if sp_val is not None:
+                                    sp_s = f" + {sp_val:02d}"
+                            
+                            d_str = d_date.strftime("%Y/%m/%d")
+                            current_month_draws.append(f"{d_str}：{nums_s}{sp_s}")
+            
+            if current_month_draws:
+                month_history_str = "**本月開獎紀錄：**\n" + "\n".join(current_month_draws) + "\n\n"
+        except Exception as e:
+            logger.error(f"處理本月開獎紀錄失敗：{e}")
 
         # ===== 照用戶指定格式輸出 =====
         report = (
@@ -129,9 +158,10 @@ def lottery_gpt(lottery_type: str) -> str:
             f"3. **奇偶分布：** {odd_even_desc}。\n"
             f"4. **大小分布：** {size_desc}。\n"
             f"5. **連續號碼：** {consec_desc}。\n\n"
+            f"{month_history_str}"
             f"**3組隨機號碼建議：**\n\n"
-            f"1. **組合 1：** {fmt(combo1)}（熱門號碼組合）\n"
-            f"2. **組合 2：** {fmt(combo2)}（冷門號碼組合）\n"
+            f"1. **組合 1：** {fmt(combo1)}（冷門號碼組合）\n"
+            f"2. **組合 2：** {fmt(combo2)}（熱門號碼組合）\n"
             f"3. **組合 3：** {fmt(combo3)}（隨機號碼組合）\n"
         )
 
@@ -160,7 +190,7 @@ def lottery_gpt(lottery_type: str) -> str:
             f"4. **大小分布：** 大小號碼分布相對均衡。\n"
             f"5. **連續號碼：** 連續號碼出現頻率較低。\n\n"
             f"**3組隨機號碼建議：**\n\n"
-            f"1. **組合 1：** {fmt(combo1)}（熱門號碼組合）\n"
-            f"2. **組合 2：** {fmt(combo2)}（冷門號碼組合）\n"
+            f"1. **組合 1：** {fmt(combo1)}（冷門號碼組合）\n"
+            f"2. **組合 2：** {fmt(combo2)}（熱門號碼組合）\n"
             f"3. **組合 3：** {fmt(combo3)}（隨機號碼組合)\n"
         )

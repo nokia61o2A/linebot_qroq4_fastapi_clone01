@@ -689,19 +689,58 @@ def lottery_report_all(kind: str) -> str:
                 special_rand = random.randint(1, max_num if special_label else max_num)
                 special_str = f"（{special_label}：{special_rand:02d}）"
 
-        # 建議（隨機保底）
-        suggest = sorted(random.sample(range(1, max_num + 1), num_main))
-        suggest_str = ", ".join(f"{n:02d}" for n in suggest)
+        # 建議（隨機保底 3 組）
+        def get_random_set():
+            nums = sorted(random.sample(range(1, max_num + 1), num_main))
+            return ", ".join(f"{n:02d}" for n in nums)
+
+        suggest_str_1 = get_random_set()
+        suggest_str_2 = get_random_set()
+        suggest_str_3 = get_random_set()
+        
         suggest_special_str = ""
         if special_label:
             special_sug = random.randint(1, max_num)
             suggest_special_str = f"（{special_label}：{special_sug:02d}）"
 
+        # ===== 本月歷史開獎 =====
+        month_history_str = ""
+        try:
+            now_dt = datetime.now()
+            current_month_draws = []
+            if isinstance(result, list):
+                for item in result:
+                    d_date = getattr(item, "draw_date", None)
+                    if d_date and isinstance(d_date, datetime) and d_date.year == now_dt.year and d_date.month == now_dt.month:
+                        nums = getattr(item, "numbers", None) or getattr(item, "number", None)
+                        if isinstance(nums, (list, tuple)):
+                            nums_s = ", ".join(f"{n:02d}" for n in nums)
+                            sp_s = ""
+                            if special_label:
+                                sp_val = getattr(item, "special", None)
+                                if sp_val is not None:
+                                    try:
+                                        sp_s = f" + {int(sp_val):02d}"
+                                    except:
+                                        sp_s = f" + {sp_val}"
+                            
+                            d_str = d_date.strftime("%Y/%m/%d")
+                            current_month_draws.append(f"{d_str}：{nums_s}{sp_s}")
+            
+            if current_month_draws:
+                month_history_str = "**本月開獎紀錄：**\n" + "\n".join(current_month_draws) + "\n\n"
+        except Exception as e:
+            log.error(f"處理本月開獎紀錄失敗：{e}")
+
         analysis = f"{kind}：近期開獎號碼動態多變，建議理性娛樂。"
         return (
             f"**{kind} 分析報告**\n\n"
             f"📅 最新開獎（{draw_date}）：{numbers_str} {special_str}\n\n"
-            f"🎯 下期建議：{suggest_str} {suggest_special_str}\n\n"
+            f"{month_history_str}"
+            f"🎯 下期建議：\n"
+            f"1. {suggest_str_1}\n"
+            f"2. {suggest_str_2}\n"
+            f"3. {suggest_str_3} {suggest_special_str}\n\n"
             f"💡 分析：{analysis}\n\n"
             f"[官方歷史開獎查詢](https://www.taiwanlottery.com.tw/)"
         )
@@ -710,12 +749,22 @@ def lottery_report_all(kind: str) -> str:
         # 錯誤保底
         num_main = 6
         max_num = 49
-        rnd = sorted(random.sample(range(1, max_num + 1), num_main))
-        rnd_str = ", ".join(f"{n:02d}" for n in rnd)
+        
+        def get_random_set():
+            nums = sorted(random.sample(range(1, max_num + 1), num_main))
+            return ", ".join(f"{n:02d}" for n in nums)
+
+        rnd_str_1 = get_random_set()
+        rnd_str_2 = get_random_set()
+        rnd_str_3 = get_random_set()
+
         return (
             f"**{kind} 分析報告**\n\n"
             f"📅 最新開獎：資料取得失敗（顯示隨機）\n\n"
-            f"🎯 下期建議：{rnd_str}\n\n"
+            f"🎯 下期建議：\n"
+            f"1. {rnd_str_1}\n"
+            f"2. {rnd_str_2}\n"
+            f"3. {rnd_str_3}\n\n"
             f"💡 分析：資料來源異常，請稍後再試。\n\n"
             f"[官方歷史開獎查詢](https://www.taiwanlottery.com.tw/)"
         )
