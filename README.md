@@ -1,4 +1,5 @@
-# Line Bot + FastAPI (Groq/OpenAI)
+# Line Bot + FastAPI (Groq/OpenAI)qroq4_clon
+# 小豬助理
 
 這是一個基於 FastAPI 的 Line Bot 範本，整合了 Groq (Llama 3) 與 OpenAI，並包含彩票分析、股票查詢、匯率查詢等功能。
 

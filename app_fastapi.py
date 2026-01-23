@@ -223,8 +223,10 @@ def send_loading_animation(user_id: str, seconds: int = 5):
         }
         payload = {"chatId": user_id, "loadingSeconds": max(1, min(15, int(seconds)))}
         resp = requests.post(url, headers=headers, json=payload, timeout=5)
-        resp.raise_for_status()
-        log.info(f"✅ Loading 動畫觸發成功 chatId={user_id}")
+        if 200 <= resp.status_code < 300:
+            log.info(f"✅ Loading 動畫觸發成功 chatId={user_id}")
+        else:
+            log.warning(f"⚠️ Loading 動畫觸發失敗：{resp.status_code} {resp.text}")
     except Exception as e:
         # 這裡只警告，不中斷後續流程
         log.warning(f"⚠️ Loading 動畫觸發失敗：{e}")
@@ -1076,7 +1078,7 @@ def on_message(event: MessageEvent):
 
     # 單聊 → Loading 動畫
     if is_private:
-        send_loading_animation(chat_id, seconds=3)
+        send_loading_animation(chat_id, seconds=5)
 
     try:
         # ======= ✅ 主選單 =======

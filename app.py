@@ -193,10 +193,14 @@ def handle_message(event):
     if user_id not in conversation_history:
         conversation_history[user_id] = []
 
-    # 將訊息加入對話歷史
+    # 將 GPT 的回應加入對話歷史
     conversation_history[user_id].append({"role": "user", "content": msg + ", 請以繁體中文回答我問題"})
 
-     # 台股代碼邏輯：必須以 4-6 個數字開頭，後面可選擇性有一個英文字母
+    # 單人聊天顯示 LINE 官方 Loading 動畫（點點點）
+    if event.source.type == 'user':
+        start_loading_animation(chat_id=user_id, loading_seconds=5)
+
+    # 台股代碼邏輯：必須以 4-6 個數字開頭，後面可選擇性有一個英文字母
     stock_code = re.search(r'^\d{4,6}[A-Za-z]?\b', msg)
     # 美股代碼邏輯：必須以 1-5 個字母開頭
     stock_symbol = re.search(r'^[A-Za-z]{1,5}\b', msg)
@@ -253,10 +257,6 @@ def handle_message(event):
 
     # 回應使用者
     try:
-        #單人才會顯示 (...)
-        if event.source.type == 'user':
-            start_loading_animation(chat_id=chat_id, loading_seconds=5)
-            
         line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_text))
     except LineBotApiError as e:
         print(f"LINE 回覆失敗: {e}")
