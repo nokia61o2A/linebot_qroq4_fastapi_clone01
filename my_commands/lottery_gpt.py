@@ -113,18 +113,9 @@ def lottery_gpt(lottery_type: str) -> str:
         combo1 = pick_from(hot, num_main)
         # 組合 2：冷門號碼組合
         combo2 = pick_from(cold, num_main)
-        # 組合 3：均衡分布（奇偶/大小各半盡量）
-        half = num_main // 2
-        odds_pool = [n for n in range(1, max_num + 1) if n % 2 == 1]
-        evens_pool = [n for n in range(1, max_num + 1) if n % 2 == 0]
-        small_pool = [n for n in range(1, small_threshold + 1)]
-        large_pool = [n for n in range(small_threshold + 1, max_num + 1)]
-        combo3 = sorted(set(random.sample(odds_pool, half) + random.sample(evens_pool, num_main - half)))
-        # 若不夠均衡，再微調大小混合
-        if len(combo3) < num_main:
-            need = num_main - len(combo3)
-            combo3 += random.sample(small_pool if len(combo3) < half else large_pool, need)
-        combo3 = sorted(combo3[:num_main])
+        # 組合 3：隨機號碼組合
+        all_nums = list(range(1, max_num + 1))
+        combo3 = sorted(random.sample(all_nums, num_main))
 
         def fmt(nums):
             return "、".join(f"{n:02d}" for n in nums)
@@ -141,7 +132,7 @@ def lottery_gpt(lottery_type: str) -> str:
             f"**3組隨機號碼建議：**\n\n"
             f"1. **組合 1：** {fmt(combo1)}（熱門號碼組合）\n"
             f"2. **組合 2：** {fmt(combo2)}（冷門號碼組合）\n"
-            f"3. **組合 3：** {fmt(combo3)}（均衡分布組合）\n"
+            f"3. **組合 3：** {fmt(combo3)}（隨機號碼組合）\n"
         )
 
         return report
@@ -157,14 +148,8 @@ def lottery_gpt(lottery_type: str) -> str:
             return "、".join(f"{n:02d}" for n in nums)
         combo1 = sorted(random.sample(pool, num_main))
         combo2 = sorted(random.sample(pool, num_main))
-        # 均衡分布組合
-        odds_pool = [n for n in pool if n % 2 == 1]
-        evens_pool = [n for n in pool if n % 2 == 0]
-        half = num_main // 2
-        combo3 = sorted(set(random.sample(odds_pool, half) + random.sample(evens_pool, num_main - half)))
-        if len(combo3) < num_main:
-            combo3 += random.sample([n for n in pool if n not in combo3], num_main - len(combo3))
-        combo3 = sorted(combo3[:num_main])
+        # 組合 3：隨機號碼組合
+        combo3 = sorted(random.sample(pool, num_main))
 
         return (
             f"根據近期的{kind}數據，以下是一些趨勢分析和3組隨機號碼建議：\n\n"
@@ -177,5 +162,5 @@ def lottery_gpt(lottery_type: str) -> str:
             f"**3組隨機號碼建議：**\n\n"
             f"1. **組合 1：** {fmt(combo1)}（熱門號碼組合）\n"
             f"2. **組合 2：** {fmt(combo2)}（冷門號碼組合）\n"
-            f"3. **組合 3：** {fmt(combo3)}（均衡分布組合)\n"
+            f"3. **組合 3：** {fmt(combo3)}（隨機號碼組合)\n"
         )
