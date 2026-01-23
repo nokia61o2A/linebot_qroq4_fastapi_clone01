@@ -8,6 +8,26 @@ from TaiwanLottery import TaiwanLotteryCrawler  # 套件提供的模組名稱為
 
 logger = logging.getLogger(__name__)
 
+def get_val(obj, keys):
+    """從 dict 或 object 中取得值，支援多個 key"""
+    if isinstance(keys, str): keys = [keys]
+    for k in keys:
+        if isinstance(obj, dict):
+            if k in obj: return obj[k]
+        else:
+            if hasattr(obj, k): return getattr(obj, k)
+    return None
+
+def parse_date(d):
+    """解析日期"""
+    if isinstance(d, datetime): return d
+    if isinstance(d, str):
+        try:
+            return datetime.fromisoformat(d)
+        except:
+            pass
+    return None
+
 # 定義彩種對應：函式名稱、主號數量、號碼最大值、（可選）特別區說明
 _LOTTERY_MAP = {
     "大樂透":     ("lotto649",    6, 49,    "特別號"),
@@ -52,7 +72,7 @@ def lottery_gpt(lottery_type: str) -> str:
         try:
             if isinstance(result, list):
                 for item in result[:30]:
-                    nums = getattr(item, "numbers", None) or getattr(item, "number", None)
+                    nums = get_val(item, ["numbers", "number", "獎號"])
                     if isinstance(nums, (list, tuple)):
                         all_draws.append(list(nums))
         except Exception:
@@ -64,12 +84,15 @@ def lottery_gpt(lottery_type: str) -> str:
 
         # 最新一期顯示（若有）
         latest_draw = all_draws[0]
-        draw_date = getattr(latest, "draw_date", None)
-        draw_date = draw_date.strftime("%Y/%m/%d") if draw_date else datetime.now().strftime("%Y/%m/%d")
+        
+        draw_date_val = get_val(latest, ["draw_date", "開獎日期"])
+        draw_date = parse_date(draw_date_val)
+        draw_date_str = draw_date.strftime("%Y/%m/%d") if draw_date else datetime.now().strftime("%Y/%m/%d")
+        
         numbers_str = ", ".join(f"{n:02d}" for n in latest_draw)
         special_str = ""
         if special_label:
-            special_val = getattr(latest, "special", None) if latest else None
+            special_val = get_val(latest, ["special", "特別號"]) if latest else None
             if special_val is not None:
                 special_str = f"（{special_label}：{special_val:02d}）"
 
@@ -128,16 +151,18 @@ def lottery_gpt(lottery_type: str) -> str:
             # result 應該是 TaiwanLotteryCrawler 抓回來的 list
             if isinstance(result, list):
                 for item in result:
-                    d_date = getattr(item, "draw_date", None)
+                    d_val = get_val(item, ["draw_date", "開獎日期"])
+                    d_date = parse_date(d_val)
+                    
                     # 確保是 datetime 且為本月
-                    if d_date and isinstance(d_date, datetime) and d_date.year == now_dt.year and d_date.month == now_dt.month:
-                        nums = getattr(item, "numbers", None) or getattr(item, "number", None)
+                    if d_date and d_date.year == now_dt.year and d_date.month == now_dt.month:
+                        nums = get_val(item, ["numbers", "number", "獎號"])
                         if isinstance(nums, (list, tuple)):
                             nums_s = ", ".join(f"{n:02d}" for n in nums)
                             # 特別號
                             sp_s = ""
                             if special_label:
-                                sp_val = getattr(item, "special", None)
+                                sp_val = get_val(item, ["special", "特別號"])
                                 if sp_val is not None:
                                     sp_s = f" + {sp_val:02d}"
                             
