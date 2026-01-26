@@ -20,11 +20,20 @@ services:
       - key: OPENAI_API_KEY
         sync: false
 
+      - key: OPENAI_API_BASE
+        value: https://free.v36.cm
+
       - key: BASE_URL
         sync: false
 
       - key: BOT_NAME
         sync: false
+
+      - key: TTS_PROVIDER
+        value: auto
+
+      - key: TTS_SEND_ALWAYS
+        value: "true"
 
     autoDeploy: true
     plan: free
