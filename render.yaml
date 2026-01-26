@@ -29,6 +29,12 @@ services:
       - key: BOT_NAME
         sync: false
 
+      - key: CLOUDINARY_URL
+        sync: false
+
+      - key: CWB_AUTHORIZATION
+        sync: false
+
       - key: TTS_PROVIDER
         value: auto
 
