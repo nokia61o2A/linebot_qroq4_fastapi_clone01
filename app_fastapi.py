@@ -1174,6 +1174,9 @@ def on_message(event: MessageEvent):
 
     try:
         if low in ("下載代碼表", "股票代碼表", "代碼表", "download codes", "download csv"):
+            _load_stock_name_map_csv()
+            _ensure_etf_loaded()
+            _save_combined_map_csv()
             url = f"{BASE_URL}/codes/latest"
             line_bot_api.reply_message(event.reply_token, flex_codes_download(chat_id, url))
             return
@@ -1367,6 +1370,8 @@ def latest_codes_csv_path() -> Optional[str]:
     base = os.getcwd()
     files = [f for f in os.listdir(base) if f.startswith("name_df2_") and f.endswith(".csv")]
     if not files:
+        _load_stock_name_map_csv()
+        _ensure_etf_loaded()
         _save_combined_map_csv()
         files = [f for f in os.listdir(base) if f.startswith("name_df2_") and f.endswith(".csv")]
     if not files:
@@ -1379,6 +1384,14 @@ async def get_codes_latest():
     p = latest_codes_csv_path()
     if not p or not os.path.exists(p):
         raise HTTPException(status_code=404, detail="codes csv not found")
+    try:
+        if os.path.getsize(p) == 0:
+            _load_stock_name_map_csv()
+            _ensure_etf_loaded()
+            _save_combined_map_csv()
+            p = latest_codes_csv_path() or p
+    except Exception:
+        pass
     return FileResponse(p, media_type="text/csv", filename=os.path.basename(p))
 
 
