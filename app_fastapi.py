@@ -45,7 +45,7 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, FileResponse
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
@@ -53,7 +53,7 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, AudioSendMessage,
     SourceUser, SourceGroup, SourceRoom,
     QuickReply, QuickReplyButton, MessageAction,
-    PostbackAction, PostbackEvent,
+    PostbackAction, PostbackEvent, URIAction,
     FlexSendMessage, BubbleContainer, BoxComponent,
     TextComponent, ButtonComponent
 )
@@ -260,6 +260,7 @@ def quick_bar(chat_id: Optional[str] = None) -> Optional[QuickReply]:
         QuickReplyButton(action=MessageAction(label="查 NVDA", text="NVDA")),
         QuickReplyButton(action=PostbackAction(label="💖 AI 人設", data="menu:persona")),
         QuickReplyButton(action=PostbackAction(label="🎰 彩票選單", data="menu:lottery")),
+        QuickReplyButton(action=MessageAction(label="股票代碼表", text="下載代碼表")),
     ]
 
     # 僅顯示 TTS「其中之一」按鈕
@@ -312,6 +313,18 @@ def minimal_flex_hint(
         )
     )
     return FlexSendMessage(alt_text=safe_alt, contents=bubble, quick_reply=quick_bar(chat_id))
+
+def flex_codes_download(chat_id: Optional[str] = None, url: str = "") -> FlexSendMessage:
+    bubble = BubbleContainer(
+        direction="ltr",
+        header=BoxComponent(layout="vertical", contents=[
+            TextComponent(text="股票代碼表", weight="bold", size="lg")
+        ]),
+        body=BoxComponent(layout="vertical", contents=[
+            ButtonComponent(action=URIAction(label="下載 CSV", uri=url))
+        ])
+    )
+    return FlexSendMessage(alt_text="下載股票代碼表", contents=bubble, quick_reply=quick_bar(chat_id))
 
 # ========= 統一回覆：Text → Audio →（可選）Flex =========
 def reply_text_audio_flex(
@@ -419,6 +432,84 @@ def translate_text(content: str, target_lang_display: str) -> str:
 _TW_CODE_FULL_RE = re.compile(r"^(?:[0-9]{4,6})(?:[A-Za-z])?$")
 # 美股代碼規則：1~5 個英文字（排除 JPY 關鍵字以免和匯率指令衝突）
 _US_CODE_FULL_RE = re.compile(r"^[A-Za-z]{1,5}$")
+
+_STOCK_NAME_MAP: Dict[str, str] = {}
+_ETF_LOADED = False
+_TWSE_ETF_URLS = [
+    "https://www.twse.com.tw/zh/products/securities/etf/products/domestic.html",
+    "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",
+]
+
+def _load_stock_name_map_csv() -> Dict[str, str]:
+    global _STOCK_NAME_MAP
+    if _STOCK_NAME_MAP:
+        return _STOCK_NAME_MAP
+    try:
+        df = pd.read_csv(os.path.join(os.path.dirname(__file__), "name_df.csv"))
+    except Exception:
+        df = pd.read_csv("name_df.csv")
+    m: Dict[str, str] = {}
+    for _, r in df.iterrows():
+        n = str(r.get("股名", "")).strip()
+        c = str(r.get("股號", "")).strip()
+        if n and c:
+            m[n] = c
+    _STOCK_NAME_MAP = m
+    return _STOCK_NAME_MAP
+
+def _save_combined_map_csv():
+    try:
+        now = datetime.now()
+        fname = f"name_df2_{now.strftime('%y%m%d')}_{now.strftime('%m%d')}-{now.strftime('%H%M%S')}.csv"
+        base = os.getcwd()
+        for fn in os.listdir(base):
+            if fn.startswith("name_df2_") and fn.endswith(".csv"):
+                try:
+                    os.remove(os.path.join(base, fn))
+                except Exception:
+                    pass
+        rows = [{"股號": code, "股名": name} for name, code in sorted(_STOCK_NAME_MAP.items())]
+        pd.DataFrame(rows).to_csv(os.path.join(base, fname), index=False)
+        log.info(f"已另存股名對照表：{fname}（{len(rows)}）")
+    except Exception as e:
+        log.warning(f"對照表另存失敗：{e}")
+
+def _ensure_etf_loaded():
+    global _ETF_LOADED, _STOCK_NAME_MAP
+    if _ETF_LOADED:
+        return
+    for url in _TWSE_ETF_URLS:
+        try:
+            r = requests.get(url, headers=DEFAULT_HEADERS, timeout=12)
+            r.raise_for_status()
+            s = " ".join(BeautifulSoup(r.text, "html.parser").stripped_strings)
+            for mt in re.finditer(r"(\d{4})\s*([^\d]{2,}?)(?=\d{4}|$)", s):
+                code = mt.group(1).strip()
+                name = mt.group(2).strip()
+                if code and name and name not in _STOCK_NAME_MAP:
+                    _STOCK_NAME_MAP[name] = code
+        except Exception:
+            pass
+    _ETF_LOADED = True
+    _save_combined_map_csv()
+
+def lookup_tw_code_by_name(name: str) -> Optional[str]:
+    if not name:
+        return None
+    m = _load_stock_name_map_csv()
+    key = name.strip()
+    if key in m:
+        return m[key]
+    for n, c in m.items():
+        if key in n:
+            return c
+    _ensure_etf_loaded()
+    if key in _STOCK_NAME_MAP:
+        return _STOCK_NAME_MAP[key]
+    for n, c in _STOCK_NAME_MAP.items():
+        if key in n:
+            return c
+    return None
 
 def normalize_ticker(raw: str) -> Tuple[str, str]:
     """
@@ -1082,6 +1173,10 @@ def on_message(event: MessageEvent):
         send_loading_animation(chat_id, seconds=5)
 
     try:
+        if low in ("下載代碼表", "股票代碼表", "代碼表", "download codes", "download csv"):
+            url = f"{BASE_URL}/codes/latest"
+            line_bot_api.reply_message(event.reply_token, flex_codes_download(chat_id, url))
+            return
         # ======= ✅ 主選單 =======
         if low in ("menu", "主選單", "選單"):
             line_bot_api.reply_message(event.reply_token, flex_main(chat_id))
@@ -1111,12 +1206,13 @@ def on_message(event: MessageEvent):
             reply_text_audio_flex(event.reply_token, chat_id, msg, audio, dur)
             return
 
-        # ======= ✅ 股票 =======
+        name_code = lookup_tw_code_by_name(text)
         if low in ("台股大盤", "大盤", "美股大盤", "美盤", "美股") or \
            _TW_CODE_RE.match(text.upper()) or \
-           (_US_CODE_RE.match(text.upper()) and text.upper() != "JPY"):
-
-            msg = stock_report(text)
+           (_US_CODE_RE.match(text.upper()) and text.upper() != "JPY") or \
+           (name_code is not None):
+            q = text if (name_code is None) else name_code
+            msg = stock_report(q)
             audio, dur = (tts_make_url(msg, tts_lang[chat_id]) if tts_enabled[chat_id] else (None, 0))
             reply_text_audio_flex(event.reply_token, chat_id, msg, audio, dur)
             return
@@ -1266,6 +1362,24 @@ async def index():
 @router.get("/healthz")
 async def health():
     return PlainTextResponse("ok")
+
+def latest_codes_csv_path() -> Optional[str]:
+    base = os.getcwd()
+    files = [f for f in os.listdir(base) if f.startswith("name_df2_") and f.endswith(".csv")]
+    if not files:
+        _save_combined_map_csv()
+        files = [f for f in os.listdir(base) if f.startswith("name_df2_") and f.endswith(".csv")]
+    if not files:
+        return None
+    files.sort(key=lambda fn: os.path.getmtime(os.path.join(base, fn)), reverse=True)
+    return os.path.join(base, files[0])
+
+@router.get("/codes/latest")
+async def get_codes_latest():
+    p = latest_codes_csv_path()
+    if not p or not os.path.exists(p):
+        raise HTTPException(status_code=404, detail="codes csv not found")
+    return FileResponse(p, media_type="text/csv", filename=os.path.basename(p))
 
 
 # ========== ✅ Main ==========
