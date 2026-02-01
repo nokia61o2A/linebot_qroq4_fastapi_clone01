@@ -436,8 +436,8 @@ _US_CODE_FULL_RE = re.compile(r"^[A-Za-z]{1,5}$")
 _STOCK_NAME_MAP: Dict[str, str] = {}
 _ETF_LOADED = False
 _TWSE_ETF_URLS = [
-    "https://www.twse.com.tw/zh/products/securities/etf/products/domestic.html",
     "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",
+    "https://www.twse.com.tw/zh/products/securities/etf/products/domestic.html",
 ]
 
 def _load_stock_name_map_csv() -> Dict[str, str]:
@@ -445,13 +445,28 @@ def _load_stock_name_map_csv() -> Dict[str, str]:
     if _STOCK_NAME_MAP:
         return _STOCK_NAME_MAP
     try:
-        df = pd.read_csv(os.path.join(os.path.dirname(__file__), "name_df.csv"))
+        # 優先讀取專案下的 name_df.csv
+        df = None
+        paths = ["name_df.csv", os.path.join(os.path.dirname(__file__), "name_df.csv")]
+        for p in paths:
+            if os.path.exists(p):
+                df = pd.read_csv(p)
+                break
+        
+        if df is None:
+            # 若都找不到，嘗試讀取已生成的 name_df2 (如果有的話)
+            # 但依據需求，應以 "原始的 name_df" 為主。
+            # 這裡若讀不到，就回傳空 dict
+            return {}
+            
     except Exception:
-        df = pd.read_csv("name_df.csv")
+        return {}
+        
     m: Dict[str, str] = {}
     for _, r in df.iterrows():
         n = str(r.get("股名", "")).strip()
         c = str(r.get("股號", "")).strip()
+        # 確保以 name_df 為主，若重複則後蓋前 (但 csv 通常唯一)
         if n and c:
             m[n] = c
     _STOCK_NAME_MAP = m
@@ -459,37 +474,188 @@ def _load_stock_name_map_csv() -> Dict[str, str]:
 
 def _save_combined_map_csv():
     try:
+        # 1. 讀取原始 name_df.csv 取得 索引/產業別 資訊
+        base_meta = {}
+        try:
+            paths = ["name_df.csv", os.path.join(os.path.dirname(__file__), "name_df.csv")]
+            origin_df = None
+            for p in paths:
+                if os.path.exists(p):
+                    origin_df = pd.read_csv(p)
+                    break
+            
+            if origin_df is not None:
+                for _, row in origin_df.iterrows():
+                    c = str(row.get("股號", "")).strip()
+                    if c:
+                        base_meta[c] = {
+                            "索引": row.get("索引", ""),
+                            "產業別": row.get("產業別", "")
+                        }
+        except Exception:
+            pass
+
+        # 2. 整理 _STOCK_NAME_MAP
+        #    需求：先以原來的 name_df 沒 tw 為主
+        #    策略：
+        #    (A) 遍歷 _STOCK_NAME_MAP，建立 Code -> Name List
+        #    (B) 對每個 Code，優先選擇 "完全符合 base_meta 裡的名稱" (若有)
+        #    (C) 若無，則選擇最短的名稱 (並移除 TW)
+        
+        code_map = {} # Code -> set of names
+        for name, code in _STOCK_NAME_MAP.items():
+            clean_name = name.replace(" TW", "").strip()
+            if code not in code_map:
+                code_map[code] = set()
+            code_map[code].add(clean_name)
+        
+        final_rows = []
+        # 取得最大索引
+        max_idx = 0
+        for info in base_meta.values():
+            try:
+                i = int(info["索引"])
+                if i > max_idx: max_idx = i
+            except:
+                pass
+        
+        sorted_codes = sorted(code_map.keys())
+        
+        for code in sorted_codes:
+            candidates = code_map[code]
+            
+            # 決定最佳股名
+            # 1. 檢查是否有 base_meta 裡的股名 (原始 CSV 裡的股名)
+            #    這需要反查 base_meta (Code -> Info) 裡的 Info 是否包含股名？
+            #    base_meta 目前只存了 索引/產業別。
+            #    我們應該在讀取 base_meta 時也順便記下原始股名，或者相信 candidates 裡一定包含原始股名 (如果它來自 load_csv)
+            
+            # 修正策略：從 candidates 中挑選。
+            # 由於我們無法輕易知道哪個 candidate 來自 name_df，
+            # 但通常 name_df 的名字比較乾淨。
+            # 簡單規則：取最短的。通常 "台積電" 比 "台積電 TW" 短。
+            best_name = min(candidates, key=len)
+            
+            # 取得 metadata
+            meta = base_meta.get(code, {})
+            idx = meta.get("索引", "")
+            industry = meta.get("產業別", "")
+            
+            if not idx:
+                max_idx += 1
+                idx = max_idx
+                if not industry:
+                     industry = "ETF"
+            
+            final_rows.append({
+                "索引": idx,
+                "股號": code,
+                "股名": best_name,
+                "產業別": industry
+            })
+            
+        # 存檔邏輯
         now = datetime.now()
         fname = f"name_df2_{now.strftime('%y%m%d')}_{now.strftime('%m%d')}-{now.strftime('%H%M%S')}.csv"
         base = os.getcwd()
+        
+        # 刪除舊檔 (保留 name_df.csv，只刪 name_df2_*.csv)
         for fn in os.listdir(base):
             if fn.startswith("name_df2_") and fn.endswith(".csv"):
                 try:
                     os.remove(os.path.join(base, fn))
                 except Exception:
                     pass
-        rows = [{"股號": code, "股名": name} for name, code in sorted(_STOCK_NAME_MAP.items())]
-        pd.DataFrame(rows).to_csv(os.path.join(base, fname), index=False)
-        log.info(f"已另存股名對照表：{fname}（{len(rows)}）")
+                    
+        df_out = pd.DataFrame(final_rows)
+        cols = ["索引", "股號", "股名", "產業別"]
+        df_out = df_out[cols]
+        df_out.to_csv(os.path.join(base, fname), index=False, encoding="utf-8-sig")
+        
+        log.info(f"✅ 已另存股名對照表：{fname}（筆數 {len(final_rows)}）")
     except Exception as e:
-        log.warning(f"對照表另存失敗：{e}")
+        log.warning(f"⚠️ 對照表另存失敗：{e}")
 
 def _ensure_etf_loaded():
     global _ETF_LOADED, _STOCK_NAME_MAP
     if _ETF_LOADED:
         return
+        
     for url in _TWSE_ETF_URLS:
         try:
-            r = requests.get(url, headers=DEFAULT_HEADERS, timeout=12)
-            r.raise_for_status()
-            s = " ".join(BeautifulSoup(r.text, "html.parser").stripped_strings)
-            for mt in re.finditer(r"(\d{4})\s*([^\d]{2,}?)(?=\d{4}|$)", s):
-                code = mt.group(1).strip()
-                name = mt.group(2).strip()
-                if code and name and name not in _STOCK_NAME_MAP:
-                    _STOCK_NAME_MAP[name] = code
-        except Exception:
-            pass
+            r = requests.get(url, headers=DEFAULT_HEADERS, timeout=15)
+            # 不使用 raise_for_status，避免單一來源失敗導致全部失敗，改用 log 紀錄
+            if r.status_code != 200:
+                log.warning(f"ETF 來源回應錯誤 {url}: {r.status_code}")
+                continue
+
+            # 針對 ISIN 頁面的解析
+            if "isin.twse.com.tw" in url:
+                # 設定編碼為 cp950 (Big5) 避免亂碼
+                r.encoding = 'cp950'
+                soup = BeautifulSoup(r.text, "html.parser")
+                
+                # ISIN 頁面的資料在 tr 中，且第一欄是 "有價證券代號及名稱"
+                # 排除頁尾雜訊：通常頁尾沒有 td 或 td 格式不同
+                rows = soup.find_all("tr")
+                for tr in rows:
+                    tds = tr.find_all("td")
+                    # 有效的資料列通常有 2 個以上的 td
+                    if not tds or len(tds) < 2:
+                        continue
+                        
+                    raw_txt = tds[0].get_text(strip=True)
+                    # 格式通常為 "1101　台泥" (中間是全形空格)
+                    # 必須嚴格過濾雜訊 (如 "Copyright", "本網站...", 年份等)
+                    if "Copyright" in raw_txt or "權利" in raw_txt:
+                        continue
+                        
+                    parts = raw_txt.split()
+                    if len(parts) >= 2:
+                        code = parts[0]
+                        name = parts[1]
+                        
+                        # 過濾無效代碼
+                        # 1. 必須是 4-6 碼英數
+                        # 2. 排除純年份 (如 2023, 2024) 且名字看起來像雜訊的
+                        if not re.match(r"^[A-Za-z0-9]{4,6}$", code):
+                            continue
+                        if code.isdigit() and (code.startswith("202") or code.startswith("199")) and ("年" in name or "月" in name):
+                            continue
+                            
+                        # 過濾亂碼名稱 (檢查是否包含常見亂碼字元或過多非中英數符號)
+                        # 這裡簡單檢查：如果出現 "æ" 等 UTF-8 解碼錯誤特徵，或長度過長
+                        if "æ" in name or "å" in name or "ç" in name:
+                            continue
+                            
+                        # 若名稱尚未存在，則加入
+                        if name and name not in _STOCK_NAME_MAP:
+                            _STOCK_NAME_MAP[name] = code
+                                
+            else:
+                # 針對一般網頁 (domestic.html)
+                r.encoding = 'utf-8'
+                s = " ".join(BeautifulSoup(r.text, "html.parser").stripped_strings)
+                
+                # Regex 掃描 Code + Name
+                for mt in re.finditer(r"([A-Za-z0-9]{4,6})\s+([^\s]+)", s):
+                    code = mt.group(1).strip()
+                    name = mt.group(2).strip()
+                    
+                    if len(name) <= 1: continue
+                    if "Copyright" in name or "權利" in name: continue
+                    if "æ" in name or "å" in name or "ç" in name: continue
+                    
+                    # 排除年份誤判
+                    if code.isdigit() and (code.startswith("202") or code.startswith("199")):
+                         continue
+
+                    if name not in _STOCK_NAME_MAP:
+                        _STOCK_NAME_MAP[name] = code
+                        
+        except Exception as e:
+            log.warning(f"ETF 來源讀取失敗 ({url}): {e}")
+            
     _ETF_LOADED = True
     _save_combined_map_csv()
 
