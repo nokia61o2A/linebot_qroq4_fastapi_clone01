@@ -36,7 +36,9 @@ def load_stock_data():
 # 根據股號查找對應的股名
 def get_stock_name(stock_id):
     stock_data_df = load_stock_data()  # 加載股票資料
-    result = stock_data_df[stock_data_df['股號'] == stock_id]
+    # 確保股號欄位為字串型態以便比較
+    stock_data_df['股號'] = stock_data_df['股號'].astype(str)
+    result = stock_data_df[stock_data_df['股號'] == str(stock_id)]
     if not result.empty:
         return result.iloc[0]['股名']
     return None
